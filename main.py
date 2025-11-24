@@ -16,6 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile
+from aiogram.client.default import DefaultBotProperties # <<< ИСПРАВЛЕНИЕ: Новый импорт
 
 # --- Telethon ---
 from telethon import TelegramClient, events
@@ -178,7 +179,7 @@ def kb_terminal_input(current_code: str) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(text="9️⃣", callback_data="term_9")])
     
     buttons.append([InlineKeyboardButton(text="⬅️ Очистить", callback_data="term_C"),
-                    InlineKeyboardButton(text="0️⃣", callback_data="term_0"),
+                    InlineKeyboardButton(text="0️⃣", callback_data="term_0"), # <<< Кнопка 0️⃣ ЕСТЬ!
                     InlineKeyboardButton(text="✅ Ввести", callback_data="term_OK")])
     
     # Текущий код
@@ -288,7 +289,7 @@ class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
-    waiting_for_qr_scan = State() # СОСТОЯНИЕ ДЛЯ QR
+    waiting_for_qr_scan = State() 
 
 async def create_telethon_client_auth():
     session_path = os.path.join(SESSION_DIR, os.path.basename(SESSION_FILE))
@@ -350,7 +351,7 @@ async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
         await client.connect()
         
         qr_login_object = await client.qr_login()
-        qr_url = qr_login_object.url # Получаем URL
+        qr_url = qr_login_object.url 
         
         # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ QR-КОДА ---
         qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -369,12 +370,10 @@ async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
             caption="📱 **QR-вход запущен.**\n\n1. Откройте Telegram на телефоне.\n2. Перейдите: **Настройки → Устройства → Привязать новое устройство**.\n3. **Отсканируйте** код выше.\n\n**Ожидаю сканирования...**"
         )
         
-        await callback.message.delete() # Удаляем предыдущее сообщение
+        await callback.message.delete() 
         
-        # Устанавливаем состояние и ждем
         await state.set_state(AuthStates.waiting_for_qr_scan)
         
-        # Асинхронно ждем сканирования (блокирует это FSM состояние)
         user = await qr_login_object.wait(client)
         
         await state.clear()
@@ -386,7 +385,6 @@ async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка QR входа: {e}")
         await state.clear()
-        # Отправляем ошибку в ответ на последнюю фотографию
         await callback.message.answer(f"❌ Ошибка QR входа: {e}. Попробуйте снова.", reply_markup=kb_auth_menu())
     finally:
         if 'client' in locals() and client.is_connected():
@@ -442,14 +440,14 @@ async def process_phone(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {e}. Попробуйте /start снова.")
         await state.clear()
 
-# --- PROCESS CODE (ОБРАБАТЫВАЕТ INLINE КНОПКИ ТЕРМИНАЛА) ---
+# --- PROCESS CODE (ОБРАБАТЫВАЕТ INLINE КНОПКИ ТЕРМИНАЛА, ВКЛЮЧАЯ 0️⃣) ---
 @auth_router.callback_query(AuthStates.waiting_for_code, F.data.startswith("term_"))
 async def process_code_terminal(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     current_code = data.get('current_code', "")
     action = callback.data.split('_')[1]
 
-    if action.isdigit():
+    if action.isdigit(): # <<< action.isdigit() ловит цифры 0-9
         if len(current_code) < 5: 
             current_code += action
     elif action == 'C': 
@@ -648,7 +646,8 @@ async def main():
     create_tables()
     
     storage = MemoryStorage() 
-    bot = Bot(token=BOT_TOKEN, parse_mode='Markdown')
+    # ИСПРАВЛЕНИЕ: Новый синтаксис для parse_mode в Aiogram 3.x
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='Markdown')) 
     dp = Dispatcher(storage=storage)
     
     dp.include_router(auth_router)
