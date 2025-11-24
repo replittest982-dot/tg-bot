@@ -25,9 +25,9 @@ from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError, UserDeactivatedError, FloodWaitError
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
-from telethon.utils import get_display_name, get_peer_id # <<< ИСПРАВЛЕННАЯ СТРОКА
-from telethon.tl.functions.channels import GetForumTopicsRequest, GetChannelsRequest
-from telethon.tl.functions.messages import GetPeerDialogsRequest
+from telethon.utils import get_display_name, get_peer_id 
+from telethon.tl.functions.channels import GetChannelsRequest # <<< ИСПРАВЛЕНО
+from telethon.tl.functions.messages import GetPeerDialogsRequest, GetForumTopicsRequest # <<< ИСПРАВЛЕНО: Добавлен GetForumTopicsRequest
 
 # =========================================================================
 # I. КОНФИГ И ЛОГИРОВАНИЕ
@@ -822,7 +822,7 @@ async def get_monitor_report(callback: types.CallbackQuery, state: FSMContext, b
         await callback.answer("⚠️ Логи пусты. Нет данных для отчета.", show_alert=True)
         return
 
-    # 1. Отправка стартового сообщения для прогресса
+    # 1. Отправка стартового сообщения в чат бота (для получения ID)
     start_msg = await callback.message.answer(f"⏳ **Генерация Отчета {monitor_type}**... Ожидание целевого чата.")
     
     # 2. Переводим пользователя в состояние ожидания чата для отправки отчета
@@ -862,7 +862,7 @@ async def process_chat_for_report(message: Message, state: FSMContext, bot: Bot)
         await bot.edit_message_text(
             chat_id=user_id,
             message_id=report_msg_id or message.message_id,
-            text="⚠️ **Отчет {monitor_type}:** Логи пусты или были очищены.",
+            text=f"⚠️ **Отчет {monitor_type}:** Логи пусты или были очищены.",
             reply_markup=get_main_inline_kb(user_id)
         )
         return
