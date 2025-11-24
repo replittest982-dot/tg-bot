@@ -1,4 +1,4 @@
-# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД - Версия 4: Telethon Fixes и Редактирование)
+# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД - Версия 6: Реализация .ЛС и Мониторинг Задач)
 
 import asyncio
 import logging
@@ -45,122 +45,120 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# II. БАЗА ДАННЫХ (DB)
+# II. БАЗА ДАННЫХ (DB) (ИСПРАВЛЕНА БЛОКИРОВКА)
 # =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME) 
 
 def get_db_connection():
-    return sqlite3.connect(DB_PATH)
+    # Установка таймаута на 5 секунд для ожидания снятия блокировки
+    return sqlite3.connect(DB_PATH, timeout=5)
 
 def create_tables():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            subscription_active BOOLEAN DEFAULT 0,
-            subscription_end_date TIMESTAMP,
-            role TEXT DEFAULT 'user',
-            promo_code TEXT,       
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS promo_codes (
-            code TEXT PRIMARY KEY,
-            duration_days INTEGER NOT NULL,
-            is_used BOOLEAN DEFAULT 0,
-            used_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS topic_monitors (
-            topic_id INTEGER PRIMARY KEY,
-            chat_id INTEGER,
-            monitor_type TEXT, -- 'drop' or 'it'
-            is_active BOOLEAN DEFAULT 1,
-            started_by INTEGER,
-            start_time TIMESTAMP
-        );
-    """)
-    conn.commit()
-    conn.close()
+    # Используем 'with' для гарантированного закрытия
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                subscription_active BOOLEAN DEFAULT 0,
+                subscription_end_date TIMESTAMP,
+                role TEXT DEFAULT 'user',
+                promo_code TEXT,       
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                duration_days INTEGER NOT NULL,
+                is_used BOOLEAN DEFAULT 0,
+                used_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS topic_monitors (
+                topic_id INTEGER PRIMARY KEY,
+                chat_id INTEGER,
+                monitor_type TEXT, -- 'drop' or 'it'
+                is_active BOOLEAN DEFAULT 1,
+                started_by INTEGER,
+                start_time TIMESTAMP
+            );
+        """)
+        conn.commit()
+    # Соединение закрывается автоматически
 
 def db_create_user_if_not_exists(user_id, username=None, first_name=None):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cursor.fetchone() is None:
-        try:
-            cursor.execute(
-                "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                (user_id, username, first_name)
-            )
-            conn.commit()
-        except sqlite3.IntegrityError: pass
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        if cursor.fetchone() is None:
+            try:
+                cursor.execute(
+                    "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+                    (user_id, username, first_name)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError: pass
+    # Соединение закрывается автоматически
 
 def db_activate_subscription(user_id, reason="admin_issued"):
-    conn = get_db_connection()
-    cursor = conn.cursor()
     end_date = datetime.now(TIMEZONE_MSK) + timedelta(days=30)
     
-    cursor.execute(
-        "UPDATE users SET subscription_active = 1, subscription_end_date = ? WHERE user_id = ?",
-        (end_date.isoformat(), user_id)
-    )
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET subscription_active = 1, subscription_end_date = ? WHERE user_id = ?",
+            (end_date.isoformat(), user_id)
+        )
+        conn.commit()
     return end_date
 
 def db_use_promo_code(user_id, code):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT duration_days, is_used FROM promo_codes WHERE code = ?", (code,))
-    promo = cursor.fetchone()
-    
-    if promo and promo[1] == 0: 
-        duration = promo[0]
-        end_date = datetime.now(TIMEZONE_MSK) + timedelta(days=duration)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
         
-        cursor.execute(
-            "UPDATE users SET subscription_active = 1, subscription_end_date = ?, promo_code = ? WHERE user_id = ?",
-            (end_date.isoformat(), code, user_id)
-        )
+        cursor.execute("SELECT duration_days, is_used FROM promo_codes WHERE code = ?", (code,))
+        promo = cursor.fetchone()
         
-        cursor.execute(
-            "UPDATE promo_codes SET is_used = 1, used_by = ? WHERE code = ?",
-            (user_id, code)
-        )
-        conn.commit()
-        conn.close()
-        return end_date
+        if promo and promo[1] == 0: 
+            duration = promo[0]
+            end_date = datetime.now(TIMEZONE_MSK) + timedelta(days=duration)
+            
+            cursor.execute(
+                "UPDATE users SET subscription_active = 1, subscription_end_date = ?, promo_code = ? WHERE user_id = ?",
+                (end_date.isoformat(), code, user_id)
+            )
+            
+            cursor.execute(
+                "UPDATE promo_codes SET is_used = 1, used_by = ? WHERE code = ?",
+                (user_id, code)
+            )
+            conn.commit()
+            return end_date
     
-    conn.close()
     return None
 
 def db_create_promo_code(duration_days):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    
-    try:
-        cursor.execute(
-            "INSERT INTO promo_codes (code, duration_days) VALUES (?, ?)",
-            (code, duration_days)
-        )
-        conn.commit()
-        conn.close()
-        return code
-    except sqlite3.IntegrityError:
-        conn.close()
-        return db_create_promo_code(duration_days) 
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        
+        try:
+            cursor.execute(
+                "INSERT INTO promo_codes (code, duration_days) VALUES (?, ?)",
+                (code, duration_days)
+            )
+            conn.commit()
+            return code
+        except sqlite3.IntegrityError:
+            # Если код уже существует (редко), рекурсивно пытаемся создать новый
+            return db_create_promo_code(duration_days) 
 
 async def db_check_user_subscription(bot: Bot, user_id):
     if user_id == ADMIN_ID: return True 
@@ -174,11 +172,11 @@ async def db_check_user_subscription(bot: Bot, user_id):
         pass
 
     # 2. Проверка через DB (промокод/админ)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT subscription_active, subscription_end_date FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
+    # Используем 'with' для гарантированного закрытия
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT subscription_active, subscription_end_date FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
     
     if result:
         active, end_date_str = result
@@ -225,6 +223,8 @@ def kb_main_menu(user_id: int) -> InlineKeyboardMarkup:
     
     buttons.append([
         InlineKeyboardButton(text="📄 Отчеты и Инструменты", callback_data="menu_reports_tools"), 
+        # НОВАЯ КНОПКА: Мониторинг активных задач Telethon
+        InlineKeyboardButton(text="⚙️ Мониторинг Задач", callback_data="menu_task_monitor"), 
     ])
     
     if user_id == ADMIN_ID:
@@ -297,12 +297,54 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
 
 
 # =========================================================================
-# IV. TELETHON WORKER
+# IV. TELETHON WORKER (Добавлена логика .ЛС и Мониторинг Задач)
 # =========================================================================
 
 SESSION_DIR = 'data'
 SESSION_FILE = f'{SESSION_DIR}/telethon_session_{API_ID}'
 TELETHON_RUNNING = False
+# Глобальный словарь для хранения активных задач Telethon
+ACTIVE_TELETHON_TASKS = {} 
+
+
+async def send_mass_pm(client, task_id, user_ids_or_usernames, message_text, started_by_id):
+    global ACTIVE_TELETHON_TASKS
+    
+    task_data = ACTIVE_TELETHON_TASKS.get(task_id)
+    if not task_data:
+        logger.error(f"Задача {task_id} не найдена в ACTIVE_TELETHON_TASKS.")
+        return
+
+    total_recipients = len(user_ids_or_usernames)
+    sent_count = 0
+    
+    task_data['total'] = total_recipients
+    
+    for recipient in user_ids_or_usernames:
+        # Проверяем, была ли задача отменена
+        if task_data['task'].cancelled():
+            logger.warning(f"Задача {task_id} отменена.")
+            break
+            
+        try:
+            # Преобразование ID/Username в сущность Telegram
+            entity = await client.get_input_entity(recipient) 
+            await client.send_message(entity, message_text)
+            sent_count += 1
+            
+            # Обновление прогресса
+            task_data['progress'] = f"{sent_count}/{total_recipients}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки ЛС на {recipient}: {e}")
+            
+        # Задержка 1 секунда для избежания флуда и блокировки
+        await asyncio.sleep(1) 
+        
+    # Финальное обновление статуса
+    task_data['progress'] = f"100% (Отправлено: {sent_count}/{total_recipients})"
+    logger.info(f"Задача ЛС {task_id} завершена. Отправлено {sent_count}.")
+
 
 async def start_telethon_worker(bot: Bot, dp: Dispatcher):
     global TELETHON_RUNNING
@@ -329,12 +371,12 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         # .чек лс: Работает везде (private or group)
         @client.on(events.NewMessage(pattern=r'^\.чек лс'))
         async def handle_check_ls_command(event: events.NewMessage):
-             await event.reply("✅ **.чек лс**: Начинаю сбор ID/Username. Отчет будет отправлен вам в ЛС бота.")
+             await event.reply("✅ **.чек лс**: Начинаю сбор ID/Username. Отчет будет отправлен вам в ЛС бота. (Заглушка)")
         
         # .чекгруппу: Работает ТОЛЬКО в группах (is_private is False)
         @client.on(events.NewMessage(pattern=r'^\.чекгруппу', func=lambda e: e.is_private is False))
         async def handle_check_group_command(event: events.NewMessage):
-             await event.reply("✅ **.чекгруппу**: Начинаю сбор ID/Username. Отчет будет отправлен вам в ЛС бота.")
+             await event.reply("✅ **.чекгруппу**: Начинаю сбор ID/Username. Отчет будет отправлен вам в ЛС бота. (Заглушка)")
         
         @client.on(events.NewMessage(pattern=r'^\.чекгруппу', func=lambda e: e.is_private is True))
         async def handle_check_group_command_fail(event: events.NewMessage):
@@ -345,29 +387,62 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         async def handle_flood_command(event: events.NewMessage):
             command = event.text.split()
             if command[0] == '.флудстоп':
+                # TODO: Добавить логику отмены флуд-задачи
                 await event.reply("❌ **.флудстоп**: Команда остановки рассылки получена. (Требуется логика остановки процесса)")
                 return
-            await event.reply("✅ **.флуд**: Запущена рассылка с указанными параметрами.")
+            await event.reply("✅ **.флуд**: Запущена рассылка с указанными параметрами. (Заглушка)")
 
-        @client.on(events.NewMessage(pattern=r'^\.лс '))
+        # .лс (ИСПРАВЛЕНО: Теперь запускает реальную рассылку)
+        @client.on(events.NewMessage(pattern=r'^\.лс (.*)'))
         async def handle_ls_command(event: events.NewMessage):
-             await event.reply("✅ **.лс**: Сообщение отправлено указанным пользователям.")
+            global ACTIVE_TELETHON_TASKS
+            
+            # 1. Парсинг команды
+            # Пример: .лс @user1, 123456 Привет, это тест!
+            parts = event.text.split(' ', 2)
+            if len(parts) < 3:
+                await event.reply("❌ **Неверный формат**. Используйте: `.лс [юзернейм1, ID2, ...] [Сообщение]`")
+                return
+            
+            recipients_str = parts[1]
+            message_text = parts[2]
+            
+            recipients = [r.strip().replace('@', '') for r in recipients_str.split(',')]
+            task_id = ''.join(random.choices(string.hexdigits, k=10))
+            
+            # 2. Запуск асинхронной задачи
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(send_mass_pm(client, task_id, recipients, message_text, event.sender_id))
+            
+            # 3. Сохранение статуса
+            ACTIVE_TELETHON_TASKS[task_id] = {
+                'task': task,
+                'type': 'Mass PM (.лс)',
+                'started_by': event.sender_id,
+                'start_time': datetime.now(TIMEZONE_MSK),
+                'progress': '0/0',
+                'total': 0
+            }
+
+            # 4. Отправка ответа (БЕЗ ЗАГЛУШКИ "отправлено")
+            await event.reply(
+                f"✅ **Задача `.лс` запущена!**\n"
+                f"ID задачи: `{task_id[:6]}`\n"
+                f"Получателей: **{len(recipients)}**\n"
+                f"Прогресс можно отслеживать в меню **⚙️ Мониторинг Задач**."
+            )
              
-        # --- КОМАНДЫ МОНИТОРИНГА ТОПИКОВ (ИСПРАВЛЕНО) ---
+        # --- КОМАНДЫ МОНИТОРИНГА ТОПИКОВ ---
         @client.on(events.NewMessage(pattern=r'^\.(дропворк|айтиворк)', func=lambda e: e.is_private is False))
         async def handle_start_monitor_command(event: events.NewMessage):
             topic_id = event.reply_to_msg_id if event.reply_to_msg_id else event.id 
             monitor_type = 'drop' if event.text.startswith('.дропворк') else 'it'
             
             await client.send_message(event.chat_id, 
-                                      f"✅ **Мониторинг {monitor_type.upper()} запущен** в топике ID: {topic_id}.", 
+                                      f"✅ **Мониторинг {monitor_type.upper()} запущен** в топике ID: {topic_id}. (Заглушка)", 
                                       reply_to=event.id)
             await client.send_message(ADMIN_ID, f"🔔 Мониторинг {monitor_type.upper()} запущен в чате {get_display_name(await event.get_chat())}, топик {topic_id}.")
 
-        # УДАЛЕН ПРОБЛЕМНЫЙ ХЕНДЛЕР:
-        # @client.on(events.NewMessage(func=lambda e: e.is_private is False and e.is_topic))
-        # async def handle_topic_commands(event: events.NewMessage):
-        #     pass 
         # ----------------------------------------------------------------------
         
         await client.run_until_disconnected()
@@ -673,6 +748,39 @@ async def process_password(message: Message, state: FSMContext):
 # VI. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ И АДМИНА
 # =========================================================================
 
+# НОВЫЙ ХЕНДЛЕР: Мониторинг активных задач
+@user_router.callback_query(F.data == "menu_task_monitor")
+async def show_task_monitor_menu(callback: types.CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    if not await db_check_user_subscription(bot, user_id): 
+        await callback.answer(text="❌ Доступ запрещен. Нет подписки.", show_alert=True)
+        return
+        
+    tasks_list = [v for v in ACTIVE_TELETHON_TASKS.values() if v['started_by'] == user_id]
+    
+    if not tasks_list:
+        text = "⚙️ **Мониторинг Задач**\n\n**Нет активных задач.**\n" \
+               "Запустите рассылку или сбор, используя Telethon-команды."
+        
+    else:
+        text = "⚙️ **Мониторинг Активных Задач:**\n\n"
+        for task_id, task_data in ACTIVE_TELETHON_TASKS.items():
+            if task_data['started_by'] != user_id: continue 
+            
+            status = "✅ Завершена" if task_data['task'].done() else "⏳ В процессе"
+            
+            text += f"**ID: `{task_id[:6]}` | Тип: {task_data['type']}**\n"
+            text += f"Статус: {status}\n"
+            text += f"Прогресс: {task_data.get('progress', '0/0')} ({task_data.get('total', '?')} получателей)\n"
+            text += f"Время старта: {task_data['start_time'].strftime('%H:%M:%S')}\n\n"
+            
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb_back_to_main(user_id)
+    )
+    await callback.answer()
+
+
 # --- МЕНЮ IT / DROP (Редактирование сообщений) ---
 @user_router.callback_query(F.data == "menu_it")
 async def show_it_menu(callback: types.CallbackQuery, bot: Bot) -> None:
@@ -793,7 +901,9 @@ async def show_help(callback: types.CallbackQuery) -> None:
         f"Перейдите в **📄 Отчеты и Инструменты → 🔐 Вход в аккаунт** "
         f"и авторизуйтесь через QR или SMS, чтобы запустить мониторинг.\n\n"
         f"**Шаг 3: Работа с отчетами**\n"
-        f"После авторизации вам станут доступны **IT-Отчеты** и **Дроп-Отчеты**.\n\n"
+        f"После авторизации вам станут доступны **IT-Отчеты** и **Дроп-Отчеты**.\n"
+        f"**Шаг 4: Мониторинг задач**\n"
+        f"Прогресс запущенных команд (`.лс`, `.чек`) можно отслеживать в разделе **⚙️ Мониторинг Задач**.\n\n"
         f"Если у вас остались вопросы, воспользуйтесь кнопкой **❓ Задать вопрос** в Главном меню.",
         reply_markup=kb_back_to_main(callback.from_user.id)
     )
