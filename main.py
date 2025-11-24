@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Message
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from telethon import TelegramClient, events
 from telethon.errors import UserDeactivatedError, FloodWaitError, SessionPasswordNeededError
 from telethon.utils import get_display_name
@@ -21,10 +22,11 @@ from telethon.utils import get_display_name
 # =========================================================================
 
 # Переменные окружения (замените на ваши данные)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH")
+# ВНИМАНИЕ: Значения взяты из предоставленного вами скриншота!
+BOT_TOKEN = "7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo" # Ваш BOT_TOKEN
+ADMIN_ID = 6256576302 # Ваш ADMIN_ID (преобразован в int)
+API_ID = 35775411 # Ваш API_ID (преобразован в int)
+API_HASH = "4f8220840326cb5f74e1771c0c4248f2" # Ваш API_HASH
 TARGET_CHANNEL_URL = "@STAT_PRO1"
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
@@ -231,7 +233,7 @@ async def run_telethon_worker_for_user(user_id: int):
 # VI. ХЕНДЛЕРЫ AIOGRAM (ГЛАВНОЕ МЕНЮ И ПРОМОКОДЫ)
 # =========================================================================
 
-@user_router.message(commands=["start"])
+@user_router.message(Command("start"))
 @user_router.callback_query(F.data == "back_to_main")
 async def cmd_start_or_back(union: types.Message | types.CallbackQuery, state: FSMContext):
     """Обработчик команды /start и кнопки 'Назад'."""
@@ -257,12 +259,10 @@ async def request_promo_code(callback: types.CallbackQuery):
     await callback.answer("Для активации промокода используйте команду: /promo КОД_ПРОМО", show_alert=True)
 
 
-@user_router.message(F.text.startswith("/promo"))
+@user_router.message(Command("promo"))
 async def activate_promo_command(message: types.Message):
     """Обработчик активации промокода."""
     user_id = message.from_user.id
-    # Логика проверки доступа для активации промокода здесь не нужна, 
-    # так как он предоставляет доступ.
     
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
