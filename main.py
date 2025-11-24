@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta # <<< ДОБАВЛЕН timedelta
+from datetime import datetime, timedelta 
 import pytz 
 from io import BytesIO 
 import qrcode 
@@ -130,10 +130,10 @@ async def db_check_user_subscription(bot: Bot, user_id):
         active, end_date_str = result
         if active and end_date_str:
             end_date = datetime.fromisoformat(end_date_str)
-            if end_date > datetime.now(TIMEZONE_MSK).replace(tzinfo=None):
+            # Сравниваем дату окончания с текущей (без tzinfo)
+            if end_date.replace(tzinfo=None) > datetime.now(TIMEZONE_MSK).replace(tzinfo=None):
                  return True # Активна и не просрочена
             else:
-                 # Если просрочена, можно обновить статус в DB, но пока просто вернем False
                  pass 
 
     return False
@@ -170,12 +170,12 @@ def kb_main_menu(user_id: int) -> InlineKeyboardMarkup:
     buttons.append([
         InlineKeyboardButton(text="ℹ️ Помощь", callback_data="show_help"),
         InlineKeyboardButton(text="🔑 Подписка", callback_data="activate_promo"),
-        InlineKeyboardButton(text="❓ Задать вопрос", url="t.me/yanixforever"), # <<< ИЗМЕНЕНИЕ: Ссылка на юзернейм
+        InlineKeyboardButton(text="❓ Задать вопрос", url="t.me/yanixforever"), 
     ])
     
     # Раздел Отчетов и Инструментов
     buttons.append([
-        InlineKeyboardButton(text="📄 Отчеты и Инструменты", callback_data="menu_reports_tools"), # <<< НОВАЯ КНОПКА
+        InlineKeyboardButton(text="📄 Отчеты и Инструменты", callback_data="menu_reports_tools"), 
     ])
     
     if user_id == ADMIN_ID:
@@ -190,7 +190,7 @@ def kb_general_reports_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 IT-Отчеты", callback_data="menu_it")],
         [InlineKeyboardButton(text="📝 Дроп-Отчеты", callback_data="menu_drop")],
         [InlineKeyboardButton(text="🔐 Вход в аккаунт (Telethon)", callback_data="menu_auth")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")], 
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -199,7 +199,7 @@ def kb_auth_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📱 Войти через QR-код", callback_data="auth_qr")],
         [InlineKeyboardButton(text="🔑 Войти через API ID/Hash", callback_data="auth_api")],
         [InlineKeyboardButton(text="💬 Войти через TG SMS (Код)", callback_data="auth_sms")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_reports_tools")], # <<< ИЗМЕНЕНИЕ: Назад в Отчеты
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_reports_tools")], 
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -230,7 +230,7 @@ def kb_report_menu(report_type: str, user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Отчет (Последние 10)", callback_data=f"show_{report_type}_reports")],
         [InlineKeyboardButton(text="📈 Прогресс/Статус", callback_data=f"show_{report_type}_progress")],
         [InlineKeyboardButton(text="💡 Помощь по командам", callback_data=f"show_{report_type}_help")],
-        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_reports_tools")] # <<< ИЗМЕНЕНИЕ: Назад в Отчеты
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_reports_tools")] 
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -329,7 +329,7 @@ class AuthStates(StatesGroup):
     waiting_for_password = State()
     waiting_for_qr_scan = State() 
 
-class AdminStates(StatesGroup): # <<< НОВЫЙ FSM ДЛЯ АДМИНА
+class AdminStates(StatesGroup): 
     waiting_for_promo_user_id = State()
 
 async def create_telethon_client_auth():
@@ -346,7 +346,8 @@ async def command_start_handler(message: Message, state: FSMContext, bot: Bot) -
     is_subscribed = await db_check_user_subscription(bot, user_id)
     
     welcome_text = f"👋 **STATPRO приветствует!**\n"
-    welcome_text += f"*{[BETA] Бот находится в бета-тестировании.}*\n\n" # <<< НОВОЕ СООБЩЕНИЕ
+    # ИСПРАВЛЕННАЯ СТРОКА: Убраны фигурные скобки, добавлен обратный слэш для экранирования
+    welcome_text += f"*\[BETA\] Бот находится в бета-тестировании.*\n\n" 
     welcome_text += f"Ваш ID: `{user_id}`\n"
     welcome_text += f"Статус подписки: {'✅ Активна' if is_subscribed else '❌ Не активна'}"
 
@@ -383,7 +384,7 @@ async def show_reports_tools_menu(callback: types.CallbackQuery, bot: Bot) -> No
     await callback.message.edit_text(
         "📄 **Отчеты и Инструменты**\n\n"
         "Выберите раздел:",
-        reply_markup=kb_general_reports_menu() # <<< НОВАЯ КЛАВИАТУРА
+        reply_markup=kb_general_reports_menu() 
     )
     await callback.answer()
 
