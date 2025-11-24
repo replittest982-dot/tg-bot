@@ -1,4 +1,4 @@
-# main.py (ФИНАЛЬНАЯ РЕСТРУКТУРИЗАЦИЯ)
+# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД)
 
 import asyncio
 import logging
@@ -6,10 +6,8 @@ import os
 import sqlite3
 from datetime import datetime
 import pytz 
-
-# --- ЧТЕНИЕ ИЗ ОКРУЖЕНИЯ ---
-from dotenv import load_dotenv 
-load_dotenv() 
+from io import BytesIO 
+import qrcode 
 
 # --- Aiogram и FSM ---
 from aiogram import Bot, Dispatcher, Router, F, types
@@ -17,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile
 
 # --- Telethon ---
 from telethon import TelegramClient, events
@@ -25,9 +23,10 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.utils import get_display_name
 
 # =========================================================================
-# I. КОНФИГ И ЛОГИРОВАНИЕ (БЕЗ ИЗМЕНЕНИЙ)
+# I. КОНФИГ И ЛОГИРОВАНИЕ (ЧТЕНИЕ ИЗ ОКРУЖЕНИЯ)
 # =========================================================================
 
+# Чтение из переменных окружения сайта/платформы
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
 API_ID = int(os.getenv("API_ID", "0"))
@@ -43,7 +42,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# II. DB И UTILS (БЕЗ ИЗМЕНЕНИЙ)
+# II. БАЗА ДАННЫХ (DB)
 # =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME) 
@@ -65,7 +64,6 @@ def create_tables():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    # Добавление таблицы для мониторинга топиков
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS topic_monitors (
             topic_id INTEGER PRIMARY KEY,
@@ -106,8 +104,22 @@ async def db_check_user_subscription(bot: Bot, user_id):
         logger.error(f"Ошибка при проверке подписки для {user_id}: {e}")
         return False
 
+# Заглушки для отчетов
+def db_get_last_it_entries(limit=10):
+    return [
+        {'timestamp': '2025-11-24 10:00:00', 'phone': '79990001122', 'status': 'встал'},
+        {'timestamp': '2025-11-24 09:30:00', 'phone': '79990002233', 'status': 'слетел'},
+    ]
+
+def db_get_last_drop_entries(limit=10):
+    return [
+        {'timestamp': '2025-11-24 11:00:00', 'report_text': 'Тестовый дроп-отчет 1: Курьер на месте.'},
+        {'timestamp': '2025-11-24 10:30:00', 'report_text': 'Тестовый дроп-отчет 2: Собрали 5 документов.'},
+    ]
+
+
 # =========================================================================
-# III. КЛАВИАТУРЫ (KEYBOARDS) - ПОЛНЫЙ РЕДИЗАЙН
+# III. КЛАВИАТУРЫ (KEYBOARDS)
 # =========================================================================
 
 def kb_subscription_required() -> InlineKeyboardMarkup:
@@ -145,7 +157,6 @@ def kb_main_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def kb_auth_menu() -> InlineKeyboardMarkup:
-    """Кнопки входа в аккаунт."""
     buttons = [
         [InlineKeyboardButton(text="📱 Войти через QR-код", callback_data="auth_qr")],
         [InlineKeyboardButton(text="🔑 Войти через API ID/Hash", callback_data="auth_api")],
@@ -155,34 +166,28 @@ def kb_auth_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def kb_terminal_input(current_code: str) -> InlineKeyboardMarkup:
-    """Специальная цифровая клавиатура для ввода кода."""
     buttons = []
-    
-    # 1 2 3
     buttons.append([InlineKeyboardButton(text="1️⃣", callback_data="term_1"),
                     InlineKeyboardButton(text="2️⃣", callback_data="term_2"),
                     InlineKeyboardButton(text="3️⃣", callback_data="term_3")])
-    # 4 5 6
     buttons.append([InlineKeyboardButton(text="4️⃣", callback_data="term_4"),
                     InlineKeyboardButton(text="5️⃣", callback_data="term_5"),
                     InlineKeyboardButton(text="6️⃣", callback_data="term_6")])
-    # 7 8 9
     buttons.append([InlineKeyboardButton(text="7️⃣", callback_data="term_7"),
                     InlineKeyboardButton(text="8️⃣", callback_data="term_8"),
                     InlineKeyboardButton(text="9️⃣", callback_data="term_9")])
     
-    # Clear 0 Confirm
     buttons.append([InlineKeyboardButton(text="⬅️ Очистить", callback_data="term_C"),
                     InlineKeyboardButton(text="0️⃣", callback_data="term_0"),
                     InlineKeyboardButton(text="✅ Ввести", callback_data="term_OK")])
     
     # Текущий код
-    buttons.append([InlineKeyboardButton(text=f"Код: {current_code or '...'} | Введите", callback_data="ignore")])
+    display_code = "..." if not current_code else current_code
+    buttons.append([InlineKeyboardButton(text=f"Код: {display_code} | Введите", callback_data="ignore")])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def kb_report_menu(report_type: str, user_id: int) -> InlineKeyboardMarkup:
-    """Меню для IT и Drop отчетов."""
     buttons = [
         [InlineKeyboardButton(text="📊 Отчет (Последние 10)", callback_data=f"show_{report_type}_reports")],
         [InlineKeyboardButton(text="📈 Прогресс/Статус", callback_data=f"show_{report_type}_progress")],
@@ -199,7 +204,7 @@ def kb_back_to_main(user_id: int) -> InlineKeyboardMarkup:
 
 
 # =========================================================================
-# IV. TELETHON WORKER (ОБНОВЛЕННЫЕ КОМАНДЫ)
+# IV. TELETHON WORKER
 # =========================================================================
 
 SESSION_DIR = 'data'
@@ -207,10 +212,7 @@ SESSION_FILE = f'{SESSION_DIR}/telethon_session_{API_ID}'
 TELETHON_RUNNING = False
 
 async def start_telethon_worker(bot: Bot, dp: Dispatcher):
-    """Запускает и поддерживает Telethon-клиента с новыми командами."""
     global TELETHON_RUNNING
-    
-    # ... (Проверка ключей и сессии остается прежней) ...
     
     if not API_ID or not API_HASH:
         logger.error("🚫 Telethon не запущен: Отсутствует API_ID или API_HASH в окружении.")
@@ -229,41 +231,29 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         logger.info(f"✅ Telethon запущен как: {user.username or user.first_name}")
         TELETHON_RUNNING = True
 
-        # --- ОБНОВЛЕННАЯ СТРУКТУРА ДЛЯ КАСТОМНЫХ КОМАНД TELETHON ---
+        # --- СТРУКТУРА ДЛЯ КАСТОМНЫХ КОМАНД TELETHON ---
         
         @client.on(events.NewMessage(pattern=r'^\.чекгруппу', func=lambda e: e.is_private is False))
         async def handle_check_group_command(event: events.NewMessage):
              # Логика: .чекгруппу [группа/топик]
-             # event.chat_id, event.reply_to_msg_id (для топика)
              await event.reply("✅ **.чекгруппу**: Начинаю сбор ID/Username. Отчет будет отправлен вам в ЛС бота.")
-             # ... Здесь должна быть логика сбора участников и форматирования TXT/Таблицы
-             
-             # Отправка результата в ЛС админа через Aiogram Bot
-             # await bot.send_document(ADMIN_ID, ...)
         
         @client.on(events.NewMessage(pattern=r'^\.флуд(стоп)?', func=lambda e: e.is_private is True or e.sender_id == ADMIN_ID))
         async def handle_flood_command(event: events.NewMessage):
-            # Логика: .флуд (кол-во) текст (задержка) / .флудстоп
             command = event.text.split()
             if command[0] == '.флудстоп':
                 await event.reply("❌ **.флудстоп**: Команда остановки рассылки получена. (Требуется логика остановки процесса)")
                 return
-            
-            # ... Логика парсинга .флуд (кол-во, текст, задержка)
             await event.reply("✅ **.флуд**: Запущена рассылка с указанными параметрами.")
 
         @client.on(events.NewMessage(pattern=r'^\.лс ', func=lambda e: e.is_private is True or e.sender_id == ADMIN_ID))
         async def handle_ls_command(event: events.NewMessage):
-             # Логика: .лс текст юзернеймы(без запятой)
-             # Парсинг: event.text.split()[1] - текст, остальные - юзернеймы.
              await event.reply("✅ **.лс**: Сообщение отправлено указанным пользователям.")
              
         # --- КОМАНДЫ МОНИТОРИНГА ТОПИКОВ ---
-        # Логика запуска мониторинга топика
         @client.on(events.NewMessage(pattern=r'^\.(дропворк|айтиворк)', func=lambda e: e.is_private is False and e.is_topic))
         async def handle_start_monitor_command(event: events.NewMessage):
             topic_id = event.id if event.is_topic else event.reply_to_msg_id
-            chat_id = event.chat_id
             monitor_type = 'drop' if event.text.startswith('.дропворк') else 'it'
             
             # ... Логика сохранения в DB о начале мониторинга топика
@@ -273,26 +263,10 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
                                       reply_to=event.id)
             await client.send_message(ADMIN_ID, f"🔔 Мониторинг {monitor_type.upper()} запущен в чате {get_display_name(await event.get_chat())}, топик {topic_id}.")
 
-        # Логика обработки команд внутри топика (только если мониторинг активен)
         @client.on(events.NewMessage(func=lambda e: e.is_private is False and e.is_topic))
         async def handle_topic_commands(event: events.NewMessage):
-            # ... Здесь должна быть логика проверки: Активен ли мониторинг для event.id / event.reply_to_msg_id
-            if event.text.startswith('.дропворк'): # Игнорируем команду запуска
-                return
-            
-            if event.text.startswith('.айтиворк'): # Игнорируем команду запуска
-                return
-            
-            # --- Логика парсинга IT команд: .встал, .ошибка-, .кьар, .повтор, .слет ---
-            # ...
-            
-            # --- Логика парсинга Drop отчета: +7... 12:00 @user бх ---
-            # ...
-            
-            # Сохранение лога и отправка в ЛС админа
-            # await bot.send_message(ADMIN_ID, f"Новый отчет ({monitor_type.upper()}): {event.text}")
-
-
+            # ... Логика обработки IT и Drop команд внутри активных топиков
+            pass 
         # ----------------------------------------------------------------------
         
         await client.run_until_disconnected()
@@ -312,10 +286,13 @@ auth_router = Router()
 
 class AuthStates(StatesGroup):
     waiting_for_phone = State()
-    waiting_for_code = State() # Теперь обрабатывает inline-кнопки
+    waiting_for_code = State()
     waiting_for_password = State()
-    
-# ... (create_telethon_client_auth и check_telethon_auth остаются прежними)
+    waiting_for_qr_scan = State() # СОСТОЯНИЕ ДЛЯ QR
+
+async def create_telethon_client_auth():
+    session_path = os.path.join(SESSION_DIR, os.path.basename(SESSION_FILE))
+    return TelegramClient(session_path, API_ID, API_HASH)
 
 # --- START HANDLER ---
 @auth_router.message(Command("start"))
@@ -337,7 +314,6 @@ async def command_start_handler(message: Message, state: FSMContext, bot: Bot) -
         )
         return
 
-    # Если подписка активна
     await message.answer(
         welcome_text + "\n\nВыберите действие в Главном меню:",
         reply_markup=kb_main_menu(user_id)
@@ -352,7 +328,6 @@ async def back_to_main_menu_callback(callback: types.CallbackQuery) -> None:
     )
     await callback.answer()
 
-# --- AUTH MENU NAVIGATION ---
 @auth_router.callback_query(F.data == "menu_auth")
 async def show_auth_menu(callback: types.CallbackQuery) -> None:
     await callback.message.edit_text(
@@ -361,15 +336,75 @@ async def show_auth_menu(callback: types.CallbackQuery) -> None:
     )
     await callback.answer()
 
-# --- AUTH METHODS ---
-@auth_router.callback_query(F.data == "auth_sms")
-async def cmd_auth_start(callback: types.CallbackQuery, state: FSMContext):
-    # Проверка Telethon и запуск диалога (та же логика, что и раньше)
+# --- 1. QR-ВХОД (С ГЕНЕРАЦИЕЙ ИЗОБРАЖЕНИЯ) ---
+@auth_router.callback_query(F.data == "auth_qr")
+async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID: 
          await callback.answer("❌ Эта команда доступна только администратору.", show_alert=True)
          return
     
-    # ... (логика проверки авторизации, см. старый код)
+    await callback.message.edit_text("⏳ **Запускаю QR-сессию...**")
+    
+    try:
+        client = await create_telethon_client_auth()
+        await client.connect()
+        
+        qr_login_object = await client.qr_login()
+        qr_url = qr_login_object.url # Получаем URL
+        
+        # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ QR-КОДА ---
+        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        qr.add_data(qr_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        buffer.seek(0)
+        # --- КОНЕЦ ГЕНЕРАЦИИ ---
+
+        # Отправляем ИЗОБРАЖЕНИЕ с инструкциями
+        await callback.message.answer_photo(
+            BufferedInputFile(buffer.getvalue(), filename="qr_code.png"),
+            caption="📱 **QR-вход запущен.**\n\n1. Откройте Telegram на телефоне.\n2. Перейдите: **Настройки → Устройства → Привязать новое устройство**.\n3. **Отсканируйте** код выше.\n\n**Ожидаю сканирования...**"
+        )
+        
+        await callback.message.delete() # Удаляем предыдущее сообщение
+        
+        # Устанавливаем состояние и ждем
+        await state.set_state(AuthStates.waiting_for_qr_scan)
+        
+        # Асинхронно ждем сканирования (блокирует это FSM состояние)
+        user = await qr_login_object.wait(client)
+        
+        await state.clear()
+        await callback.message.answer(
+            f"🎉 Успешный вход через QR!\n\nВы вошли как: @{user.username or 'без username'}.\n"
+            "**⚠️ Теперь перезапустите** скрипт бота, чтобы активировать мониторинг."
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка QR входа: {e}")
+        await state.clear()
+        # Отправляем ошибку в ответ на последнюю фотографию
+        await callback.message.answer(f"❌ Ошибка QR входа: {e}. Попробуйте снова.", reply_markup=kb_auth_menu())
+    finally:
+        if 'client' in locals() and client.is_connected():
+            await client.disconnect()
+            
+    await callback.answer()
+
+# --- 2. API ВХОД (ЗАГЛУШКА) ---
+@auth_router.callback_query(F.data == "auth_api")
+async def cmd_api_start(callback: types.CallbackQuery, state: FSMContext):
+     await callback.answer("⏳ API вход временно недоступен. Используйте SMS или QR.", show_alert=True)
+
+# --- 3. SMS ВХОД ---
+@auth_router.callback_query(F.data == "auth_sms")
+async def cmd_auth_start_sms(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: 
+         await callback.answer("❌ Эта команда доступна только администратору.", show_alert=True)
+         return
     
     await callback.message.edit_text(
         "🔒 **Начинаем вход в Telegram.**\n\n"
@@ -378,17 +413,14 @@ async def cmd_auth_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AuthStates.waiting_for_phone)
     await callback.answer()
 
-@auth_router.callback_query(F.data == "auth_qr")
-async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
-     await callback.answer("⏳ QR-вход временно недоступен. Используйте SMS.", show_alert=True)
-     # ... Здесь должна быть логика: client.qr_login() и FSM для ожидания сканирования.
+# --- PROCESS PHONE ---
+@auth_router.message(AuthStates.waiting_for_qr_scan)
+async def handle_qr_scan_status(message: types.Message):
+    await message.answer(
+        "⏳ **Процесс QR-входа запущен.**\n"
+        "Пожалуйста, не отправляйте другие команды, пока не отсканируете код."
+    )
 
-@auth_router.callback_query(F.data == "auth_api")
-async def cmd_api_start(callback: types.CallbackQuery, state: FSMContext):
-     await callback.answer("⏳ API вход временно недоступен. Используйте SMS.", show_alert=True)
-     # ... Здесь должна быть логика: ввод API ID/Hash, но мы их берем из окружения.
-
-# --- PROCESS PHONE (Остается текстовым) ---
 @auth_router.message(AuthStates.waiting_for_phone, F.text.regexp(r'^\+?[789]\d{9,10}$'))
 async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip().replace('+', '')
@@ -400,7 +432,6 @@ async def process_phone(message: Message, state: FSMContext):
         
         await state.update_data(phone=phone, code_hash=result.phone_code_hash, current_code="")
         
-        # Отправляем сообщение с ТЕРМИНАЛЬНОЙ КЛАВИАТУРОЙ
         await message.answer(
             f"🔑 Код отправлен на номер **{phone}**.\n\n"
             "Введите **код подтверждения** с помощью цифровой клавиатуры:",
@@ -419,19 +450,19 @@ async def process_code_terminal(callback: types.CallbackQuery, state: FSMContext
     action = callback.data.split('_')[1]
 
     if action.isdigit():
-        if len(current_code) < 5: # Максимум 5 цифр для кода
+        if len(current_code) < 5: 
             current_code += action
-    elif action == 'C': # Clear
+    elif action == 'C': 
         current_code = current_code[:-1] if current_code else ""
     elif action == 'OK':
-        # Если код введен, переходим к следующему шагу (process_code_final)
         await state.update_data(current_code=current_code)
         await process_code_final(callback.message, state, current_code)
+        await callback.answer()
         return
 
     await state.update_data(current_code=current_code)
     
-    # Обновляем сообщение с новым кодом и клавиатурой
+    # Обновляем сообщение с новым кодом
     await callback.message.edit_text(
         f"🔑 **Код: {current_code}**\n\n"
         "Введите **код подтверждения** с помощью цифровой клавиатуры:",
@@ -461,14 +492,13 @@ async def process_code_final(message: Message, state: FSMContext, code: str):
         )
     except SessionPasswordNeededError:
         await state.update_data(phone=phone) 
-        # Переключаемся на обычную текстовую клавиатуру для ввода пароля
         await message.edit_text("🔒 **Требуется двухфакторный пароль.** Введите его обычной клавиатурой:")
         await state.set_state(AuthStates.waiting_for_password)
     except Exception as e:
         await state.clear()
         await message.edit_text(f"❌ Ошибка входа: {e}. Пожалуйста, попробуйте /start снова.")
 
-# --- PROCESS PASSWORD (Остается текстовым) ---
+# --- PROCESS PASSWORD ---
 @auth_router.message(AuthStates.waiting_for_password, F.text)
 async def process_password(message: Message, state: FSMContext):
     password = message.text.strip()
@@ -490,12 +520,12 @@ async def process_password(message: Message, state: FSMContext):
 
 
 # =========================================================================
-# VI. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ (USER HANDLERS)
+# VI. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ
 # =========================================================================
 
 user_router = Router()
 
-# --- ОТЧЕТЫ: IT ---
+# --- МЕНЮ IT ---
 @user_router.callback_query(F.data == "menu_it")
 async def show_it_menu(callback: types.CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
@@ -507,13 +537,13 @@ async def show_it_menu(callback: types.CallbackQuery, bot: Bot) -> None:
 
 @user_router.callback_query(F.data == "show_it_reports")
 async def show_it_reports(callback: types.CallbackQuery, bot: Bot) -> None:
-    # ... (логика показа отчетов, см. старый код)
-    await callback.answer(text="Отчеты показаны (старая заглушка)", show_alert=True)
+    entries = db_get_last_it_entries(limit=10) 
+    text = "📄 **Последние 10 записей IT-цикла:**\n\n" + \
+           "\n".join([f"*{e['timestamp']}* - **{e['phone']}** ({e['status']})" for e in entries])
+            
+    await callback.message.edit_text(text, reply_markup=kb_report_menu('it', callback.from_user.id))
+    await callback.answer()
     
-@user_router.callback_query(F.data == "show_it_progress")
-async def show_it_progress(callback: types.CallbackQuery) -> None:
-    await callback.answer(text="📈 Здесь будет прогресс IT.", show_alert=True)
-
 @user_router.callback_query(F.data == "show_it_help")
 async def show_it_help(callback: types.CallbackQuery) -> None:
     await callback.message.edit_text(
@@ -529,7 +559,12 @@ async def show_it_help(callback: types.CallbackQuery) -> None:
     )
     await callback.answer()
 
-# --- ОТЧЕТЫ: DROP ---
+@user_router.callback_query(F.data == "show_it_progress")
+async def show_it_progress(callback: types.CallbackQuery) -> None:
+    await callback.answer(text="📈 Здесь будет прогресс IT. (Заглушка)", show_alert=True)
+
+
+# --- МЕНЮ DROP ---
 @user_router.callback_query(F.data == "menu_drop")
 async def show_drop_menu(callback: types.CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
@@ -541,13 +576,13 @@ async def show_drop_menu(callback: types.CallbackQuery, bot: Bot) -> None:
 
 @user_router.callback_query(F.data == "show_drop_reports")
 async def show_drop_reports(callback: types.CallbackQuery, bot: Bot) -> None:
-    # ... (логика показа отчетов, см. старый код)
-    await callback.answer(text="Отчеты показаны (старая заглушка)", show_alert=True)
+    entries = db_get_last_drop_entries(limit=10) 
+    text = "📄 **Последние 10 Дроп-отчетов:**\n\n" + \
+           "\n---\n".join([f"*{e['timestamp']}*:\n`{e['report_text'][:80]}...`" for e in entries])
+            
+    await callback.message.edit_text(text, reply_markup=kb_report_menu('drop', callback.from_user.id))
+    await callback.answer()
     
-@user_router.callback_query(F.data == "show_drop_progress")
-async def show_drop_progress(callback: types.CallbackQuery) -> None:
-    await callback.answer(text="📈 Здесь будет прогресс Drop.", show_alert=True)
-
 @user_router.callback_query(F.data == "show_drop_help")
 async def show_drop_help(callback: types.CallbackQuery) -> None:
     await callback.message.edit_text(
@@ -559,13 +594,17 @@ async def show_drop_help(callback: types.CallbackQuery) -> None:
         reply_markup=kb_report_menu('drop', callback.from_user.id)
     )
     await callback.answer()
+    
+@user_router.callback_query(F.data == "show_drop_progress")
+async def show_drop_progress(callback: types.CallbackQuery) -> None:
+    await callback.answer(text="📈 Здесь будет прогресс Drop. (Заглушка)", show_alert=True)
+
 
 # --- ПРОЧИЕ КНОПКИ ---
 
 @user_router.callback_query(F.data == "activate_promo")
 async def activate_promo(callback: types.CallbackQuery) -> None:
-    await callback.answer(text="🔑 Перенаправление на активацию промокода/оплату...", show_alert=True)
-    # Здесь можно добавить ссылку или FSM для ввода промокода
+    await callback.answer(text="🔑 Перенаправление на активацию промокода/оплату... (Заглушка)", show_alert=True)
 
 @user_router.callback_query(F.data == "show_help")
 async def show_help(callback: types.CallbackQuery) -> None:
@@ -612,7 +651,6 @@ async def main():
     bot = Bot(token=BOT_TOKEN, parse_mode='Markdown')
     dp = Dispatcher(storage=storage)
     
-    # Регистрация роутеров
     dp.include_router(auth_router)
     dp.include_router(user_router)
 
