@@ -12,7 +12,7 @@ from telethon import TelegramClient, events, errors
 from telethon.tl.types import PeerUser, Channel, Chat
 from telethon.errors.rpcerrorlist import SessionPasswordNeededError
 
-# --- Aiogram 3.x импорты (ИСПРАВЛЕНО) ---
+# --- Aiogram 3.x импорты ---
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# I. GLOBAL CONFIG & INITIALIZATION
+# I. GLOBAL CONFIG & INITIALIZATION (КЛЮЧИ И ТОКЕНЫ)
 # =========================================================================
 
 # --- СЛУЖЕБНЫЕ ПЕРЕМЕННЫЕ ---
@@ -41,9 +41,8 @@ if not os.path.exists(SESSION_DIR):
 API_ID = 12345678 # Вставьте ваш API ID
 API_HASH = 'ВАШ_API_HASH' # Вставьте ваш API Hash
 
-# --- AIOGRAM CONFIG ---
-# ⚠️ ЗАМЕНИТЕ ЭТО НА ВАШ ТОКЕН
-TOKEN = 'ВАШ_ТОКЕН_БОТА' 
+# --- AIOGRAM CONFIG (ВАШ ТОКЕН) ---
+TOKEN = '7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo' # Ваш токен, вставлен напрямую!
 
 # Инициализация Aiogram 3.x (Диспетчер и Роутер)
 router = Router() 
@@ -550,7 +549,7 @@ async def handle_auth_step3(message: types.Message, state: FSMContext, bot: Bot)
 
 def get_task_status_message():
     global ACTIVE_TELETHON_TASKS, FLOOD_TASK, FLOOD_TARGET_CHAT
-    # ... (логика формирования сообщения остается прежней)
+    
     msg = "📊 **Мониторинг активных задач:**\n\n"
     
     if FLOOD_TASK and not FLOOD_TASK.done():
@@ -662,5 +661,4 @@ async def main():
 
 if __name__ == '__main__':
     logger.info("🤖 Бот запускается...")
-    # Используем asyncio.run для запуска асинхронной функции main
     asyncio.run(main())
