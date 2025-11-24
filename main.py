@@ -1,4 +1,4 @@
-# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД - Версия 3: Редактирование, Строгий доступ, Telethon Fixes)
+# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД - Версия 4: Telethon Fixes и Редактирование)
 
 import asyncio
 import logging
@@ -207,8 +207,6 @@ def db_get_last_drop_entries(limit=10):
 # III. КЛАВИАТУРЫ (KEYBOARDS)
 # =========================================================================
 
-# (Клавиатуры остаются прежними)
-
 def kb_subscription_required() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="🔑 Активировать подписку / Промокод", callback_data="activate_promo")],
@@ -355,10 +353,10 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         async def handle_ls_command(event: events.NewMessage):
              await event.reply("✅ **.лс**: Сообщение отправлено указанным пользователям.")
              
-        # --- КОМАНДЫ МОНИТОРИНГА ТОПИКОВ (БЕЗ ИЗМЕНЕНИЙ) ---
-        @client.on(events.NewMessage(pattern=r'^\.(дропворк|айтиворк)', func=lambda e: e.is_private is False and e.is_topic))
+        # --- КОМАНДЫ МОНИТОРИНГА ТОПИКОВ (ИСПРАВЛЕНО) ---
+        @client.on(events.NewMessage(pattern=r'^\.(дропворк|айтиворк)', func=lambda e: e.is_private is False))
         async def handle_start_monitor_command(event: events.NewMessage):
-            topic_id = event.id if event.is_topic else event.reply_to_msg_id
+            topic_id = event.reply_to_msg_id if event.reply_to_msg_id else event.id 
             monitor_type = 'drop' if event.text.startswith('.дропворк') else 'it'
             
             await client.send_message(event.chat_id, 
@@ -366,9 +364,10 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
                                       reply_to=event.id)
             await client.send_message(ADMIN_ID, f"🔔 Мониторинг {monitor_type.upper()} запущен в чате {get_display_name(await event.get_chat())}, топик {topic_id}.")
 
-        @client.on(events.NewMessage(func=lambda e: e.is_private is False and e.is_topic))
-        async def handle_topic_commands(event: events.NewMessage):
-            pass 
+        # УДАЛЕН ПРОБЛЕМНЫЙ ХЕНДЛЕР:
+        # @client.on(events.NewMessage(func=lambda e: e.is_private is False and e.is_topic))
+        # async def handle_topic_commands(event: events.NewMessage):
+        #     pass 
         # ----------------------------------------------------------------------
         
         await client.run_until_disconnected()
