@@ -5,7 +5,7 @@ import sqlite3
 import random
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Set
 
 # --- Телетон импорты ---
 from telethon import TelegramClient, events, errors
@@ -18,7 +18,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.client.default import DefaultBotProperties # <-- НОВЫЙ ИМПОРТ!
+from aiogram.client.default import DefaultBotProperties 
+from aiogram.client.session.aiohttp import AiohttpSession
 
 
 # =========================================================================
@@ -29,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# I. GLOBAL CONFIG & INITIALIZATION (КЛЮЧИ И ТОКЕНЫ)
+# I. GLOBAL CONFIG & INITIALIZATION (ЧТЕНИЕ ИЗ ОКРУЖЕНИЯ)
 # =========================================================================
 
 # --- СЛУЖЕБНЫЕ ПЕРЕМЕННЫЕ ---
@@ -37,13 +38,43 @@ SESSION_DIR = 'data'
 if not os.path.exists(SESSION_DIR):
     os.makedirs(SESSION_DIR)
 
-# --- TELETHON CONFIG (ВАШИ ДАННЫЕ) ---
-# ⚠️ ЗАМЕНИТЕ ЭТО НА ВАШИ API_ID и API_HASH
-API_ID = 12345678 # Вставьте ваш API ID
-API_HASH = 'ВАШ_API_HASH' # Вставьте ваш API Hash
+# --- ЧТЕНИЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (как на вашем хостинге) ---
 
-# --- AIOGRAM CONFIG (ВАШ ТОКЕН) ---
-TOKEN = '7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo' # Ваш токен
+# 1. AIOGRAM TOKEN
+TOKEN = os.getenv('BOT_TOKEN') 
+if not TOKEN:
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная BOT_TOKEN не найдена. Бот не запустится.")
+
+# 2. TELETHON API
+API_ID_RAW = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+
+API_ID: Optional[int] = None
+if API_ID_RAW:
+    try:
+        API_ID = int(API_ID_RAW.strip())
+    except ValueError:
+        logger.error(f"❌ Переменная API_ID ('{API_ID_RAW}') должна быть числом.")
+
+if not API_ID or not API_HASH:
+    logger.warning("⚠️ Переменные Telethon (API_ID/API_HASH) не настроены. Функции .лс и .флуд работать не будут.")
+
+# 3. ADMIN ID
+ADMIN_IDS_STR = os.getenv('ADMIN_ID', '') 
+ADMIN_IDS: Set[int] = set()
+
+if ADMIN_IDS_STR:
+    try:
+        ADMIN_IDS = {int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip().isdigit()}
+        logger.info(f"✅ Администраторы загружены: {ADMIN_IDS}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга ADMIN_ID: {e}")
+
+if not ADMIN_IDS:
+    # Установим заглушку, чтобы Telethon мог работать, если ID не указан
+    ADMIN_IDS = {123456789}
+    logger.warning("⚠️ Переменная ADMIN_ID не найдена или пуста. Используется заглушка.")
+
 
 # Инициализация Aiogram 3.x (Диспетчер и Роутер)
 router = Router() 
@@ -54,10 +85,8 @@ dp = Dispatcher(storage=MemoryStorage())
 # II. IN-MEMORY STATE
 # =========================================================================
 
-# ⚠️ ЗАМЕНИТЕ ЭТО НА ВАШ ID (или список ID)
-ADMIN_IDS = {123456789} 
-
 # --- TELETHON SINGLE-SESSION STATE ---
+# Сессия будет создана с использованием вашего API_ID
 TELETHON_SESSION_NAME = f'{SESSION_DIR}/telethon_session_{API_ID}'
 TELETHON_CLIENT: Optional[TelegramClient] = None
 TELETHON_RUNNING: bool = False
@@ -206,7 +235,7 @@ async def send_flood_messages(client, chat_id, message_text, count, delay, start
 async def start_telethon_worker(bot_instance: Bot):
     global TELETHON_CLIENT, TELETHON_RUNNING
     
-    if not API_ID or not API_HASH or API_ID == 12345678:
+    if not API_ID or not API_HASH:
         logger.error("🚫 Telethon не запущен: Отсутствует или не настроен API_ID/API_HASH.")
         return
 
@@ -214,8 +243,11 @@ async def start_telethon_worker(bot_instance: Bot):
         logger.warning("🚫 Telethon Worker уже запущен.")
         return
 
-    if not os.path.exists(f'{TELETHON_SESSION_NAME}.session'):
-        logger.warning("⚠️ Файл сессии Telethon отсутствует. Запуск отложен до авторизации.")
+    # Проверяем, существует ли файл сессии (значит, аккаунт авторизован)
+    session_file_exists = os.path.exists(f'{TELETHON_SESSION_NAME}.session')
+    
+    if not session_file_exists:
+        logger.warning("⚠️ Файл сессии Telethon отсутствует. Запуск отложен до авторизации через бота.")
         TELETHON_RUNNING = False
         return
         
@@ -226,7 +258,7 @@ async def start_telethon_worker(bot_instance: Bot):
     
     # --- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ (ВНУТРИ TELETHON) ---
     
-    # 1. .лс 
+    # 1. .лс (Массовая рассылка)
     @client.on(events.NewMessage(pattern=r'^\.лс (.*)'))
     async def handle_ls_command(event: events.NewMessage):
         sender = await event.get_sender()
@@ -245,6 +277,7 @@ async def start_telethon_worker(bot_instance: Bot):
         recipient_string = parts[1].strip()
         message_text = parts[2].strip()
         
+        # В этой версии обрабатываем только одного получателя, как в вашем примере
         if recipient_string.startswith('@') or recipient_string.isdigit():
             recipients = [recipient_string]
         else:
@@ -263,6 +296,7 @@ async def start_telethon_worker(bot_instance: Bot):
         asyncio.create_task(send_mass_pm(client, task_id, recipients, message_text, sender.id, bot_instance))
         
         await event.reply(f"🚀 **Задача ЛС** запущена (ID: `{task_id}`).")
+
 
     # 4. .чекгруппу (Сбор списка участников группы)
     @client.on(events.NewMessage(pattern=r'^\.чекгруппу ?(.*)'))
@@ -288,7 +322,7 @@ async def start_telethon_worker(bot_instance: Bot):
         try:
             entity = await client.get_entity(chat_id_or_link)
             
-            if not isinstance(entity, (types.Channel, types.Chat)):
+            if not isinstance(entity, (Channel, Chat)):
                 await event.reply("❌ **Ошибка:** Указанный объект не является группой или каналом.")
                 return
 
@@ -401,8 +435,17 @@ def get_main_menu_keyboard():
     return keyboard
 
 def get_reports_menu_keyboard():
+    status_text = "❌ Неактивен"
+    try:
+        if TELETHON_CLIENT and TELETHON_CLIENT.is_connected() and TELETHON_CLIENT.is_user_authorized():
+            status_text = "✅ Авторизован"
+        elif TELETHON_CLIENT and TELETHON_CLIENT.is_connected():
+            status_text = "⚠️ Подключен, но не авторизован"
+    except Exception:
+        pass
+        
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔐 Вход в аккаунт", callback_data="auth_start")],
+        [InlineKeyboardButton(text=f"🔐 Вход в аккаунт ({status_text})", callback_data="auth_start")],
         [InlineKeyboardButton(text="⬅️ Назад в Главное меню", callback_data="main_menu")]
     ])
     return keyboard
@@ -410,7 +453,7 @@ def get_reports_menu_keyboard():
 
 # V.1. Обработка команды /start
 @router.message(F.text == "/start")
-async def handle_start(message: types.Message, bot: Bot):
+async def handle_start(message: types.Message):
     user_id = message.from_user.id
     if not is_user_admin(user_id):
         await message.answer("🛑 У вас нет прав доступа к боту.")
@@ -420,22 +463,12 @@ async def handle_start(message: types.Message, bot: Bot):
 
 # V.2. Меню Отчетов и Инструментов
 @router.message(F.text == "📄 Отчеты и Инструменты")
-async def handle_reports_menu(message: types.Message, bot: Bot):
+async def handle_reports_menu(message: types.Message):
     user_id = message.from_user.id
     if not is_user_admin(user_id):
         return
         
-    status_text = "❌ Неактивен"
-    if TELETHON_CLIENT:
-        try:
-            if await TELETHON_CLIENT.is_user_authorized():
-                status_text = "✅ Авторизован"
-            elif TELETHON_CLIENT.is_connected():
-                 status_text = "⚠️ Подключен, но не авторизован"
-        except Exception:
-            pass 
-
-    await message.answer(f"**Статус Telethon:** {status_text}\n\nВыберите действие:", reply_markup=get_reports_menu_keyboard())
+    await message.answer("Выберите действие:", reply_markup=get_reports_menu_keyboard())
 
 # V.3. Обработка callback-ов меню
 @router.callback_query(F.data.in_({"auth_start", "main_menu"}))
@@ -453,19 +486,23 @@ async def handle_menu_callbacks(callback_query: types.CallbackQuery, state: FSMC
             chat_id=user_id,
             message_id=callback_query.message.message_id,
             text="Выберите действие:",
-            reply_markup=None 
+            reply_markup=get_main_menu_keyboard() 
         )
     await callback_query.answer()
         
 # V.4. Хендлеры авторизации (Шаг 1, 2, 3)
 async def handle_auth_step1(message: types.Message, state: FSMContext, bot: Bot):
+    if not API_ID or not API_HASH:
+        await message.answer("❌ **Ошибка:** API_ID и API_HASH не настроены. Установите их в переменных окружения.")
+        await state.clear()
+        return
+
     await state.set_state(Auth.PHONE)
-    await bot.send_message(message.chat.id, "Введите номер телефона для авторизации аккаунта Telethon (в формате +79001234567):")
+    await bot.send_message(message.chat.id, "Введите номер телефона для авторизации аккаунта Telethon (например, +79001234567):")
 
 @router.message(Auth.PHONE)
 async def handle_auth_step_phone(message: types.Message, state: FSMContext, bot: Bot):
     await state.update_data(phone=message.text.strip())
-    await state.set_state(Auth.CODE)
     
     client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
 
@@ -473,7 +510,8 @@ async def handle_auth_step_phone(message: types.Message, state: FSMContext, bot:
         await client.connect()
         if not await client.is_user_authorized():
             await client.send_code_request(message.text.strip())
-            await message.answer("Введите код, который пришел на ваш телефон:")
+            await state.set_state(Auth.CODE)
+            await message.answer("Введите код, который пришел в Telegram:")
         else:
             await message.answer("⚠️ Аккаунт уже авторизован. Для переавторизации удалите файл сессии.")
             await state.clear()
@@ -491,6 +529,7 @@ async def handle_auth_step2(message: types.Message, state: FSMContext, bot: Bot)
     phone_number = data['phone']
     code = message.text.strip()
     
+    # Session is saved automatically by Telethon
     client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
 
     try:
@@ -508,9 +547,8 @@ async def handle_auth_step2(message: types.Message, state: FSMContext, bot: Bot)
                 await state.clear()
                 return
 
-            await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
+            await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Теперь перезапустите скрипт бота, чтобы активировать Telethon Worker.**")
             await state.clear()
-            await client.disconnect() 
             
         else:
             await message.answer("⚠️ Аккаунт уже авторизован, попробуйте еще раз.")
@@ -528,15 +566,15 @@ async def handle_auth_step2(message: types.Message, state: FSMContext, bot: Bot)
 async def handle_auth_step3(message: types.Message, state: FSMContext, bot: Bot):
     password = message.text.strip()
     
+    # Session is saved automatically by Telethon
     client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
 
     try:
         await client.connect()
         user = await client.sign_in(password=password)
 
-        await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
+        await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Теперь перезапустите скрипт бота, чтобы активировать Telethon Worker.**")
         await state.clear()
-        await client.disconnect() 
 
     except Exception as e:
         await message.answer(f"❌ Ошибка входа с паролем: {e}")
@@ -615,7 +653,6 @@ async def handle_task_callbacks(callback_query: types.CallbackQuery, bot: Bot):
                 text=get_task_status_message(),
                 reply_markup=get_monitoring_keyboard()
             )
-            await callback_query.answer("Статус обновлен.")
         except Exception:
              await callback_query.answer("Статус не изменился.")
 
@@ -650,8 +687,17 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_telethon_worker(bot))
 
 async def main():
+    if not TOKEN:
+        logger.error("🚫 Бот не может быть запущен: BOT_TOKEN не найден.")
+        return
+        
     # Создаем экземпляр бота (ИСПРАВЛЕНО ДЛЯ AIOGRAM 3.7.0+)
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='Markdown')) 
+    bot = Bot(
+        token=TOKEN, 
+        default=DefaultBotProperties(parse_mode='Markdown')
+        # Если у вас проблемы с подключением, можно попробовать указать сессию явно:
+        # session=AiohttpSession() 
+    ) 
     
     # Подключаем роутер к диспетчеру
     dp.include_router(router)
