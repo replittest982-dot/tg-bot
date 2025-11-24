@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta # <<< ДОБАВЛЕН timedelta
 import pytz 
 from io import BytesIO 
 import qrcode 
@@ -16,7 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile
-from aiogram.client.default import DefaultBotProperties # <<< ИСПРАВЛЕНИЕ: Новый импорт
+from aiogram.client.default import DefaultBotProperties 
 
 # --- Telethon ---
 from telethon import TelegramClient, events
@@ -62,6 +62,7 @@ def create_tables():
             subscription_active BOOLEAN DEFAULT 0,
             subscription_end_date TIMESTAMP,
             role TEXT DEFAULT 'user',
+            promo_code TEXT,       
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
@@ -92,18 +93,50 @@ def db_create_user_if_not_exists(user_id, username=None, first_name=None):
         except sqlite3.IntegrityError: pass
     conn.close()
 
+def db_activate_subscription(user_id, reason="admin_issued"):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Срок действия подписки: 30 дней от текущей даты
+    end_date = datetime.now(TIMEZONE_MSK) + timedelta(days=30)
+    
+    cursor.execute(
+        "UPDATE users SET subscription_active = 1, subscription_end_date = ? WHERE user_id = ?",
+        (end_date.isoformat(), user_id)
+    )
+    conn.commit()
+    conn.close()
+    return end_date
+
 async def db_check_user_subscription(bot: Bot, user_id):
     if user_id == ADMIN_ID: return True 
 
+    # 1. Проверка через API Telegram (вступление в канал)
     try:
         member = await bot.get_chat_member(TARGET_CHANNEL_URL, user_id)
         if member.status in ['member', 'administrator', 'creator']:
             return True
-        else:
-            return False
     except Exception as e:
-        logger.error(f"Ошибка при проверке подписки для {user_id}: {e}")
-        return False
+        # Если API выдает ошибку (пользователь не найден/заблокирован), продолжаем проверку
+        pass
+
+    # 2. Проверка через DB (например, активация админом/промокодом)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT subscription_active, subscription_end_date FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        active, end_date_str = result
+        if active and end_date_str:
+            end_date = datetime.fromisoformat(end_date_str)
+            if end_date > datetime.now(TIMEZONE_MSK).replace(tzinfo=None):
+                 return True # Активна и не просрочена
+            else:
+                 # Если просрочена, можно обновить статус в DB, но пока просто вернем False
+                 pass 
+
+    return False
 
 # Заглушки для отчетов
 def db_get_last_it_entries(limit=10):
@@ -137,24 +170,28 @@ def kb_main_menu(user_id: int) -> InlineKeyboardMarkup:
     buttons.append([
         InlineKeyboardButton(text="ℹ️ Помощь", callback_data="show_help"),
         InlineKeyboardButton(text="🔑 Подписка", callback_data="activate_promo"),
-        InlineKeyboardButton(text="❓ Спросить вопрос", callback_data="ask_question"),
+        InlineKeyboardButton(text="❓ Задать вопрос", url="t.me/yanixforever"), # <<< ИЗМЕНЕНИЕ: Ссылка на юзернейм
     ])
     
-    # Раздел Отчетов
+    # Раздел Отчетов и Инструментов
     buttons.append([
-        InlineKeyboardButton(text="📊 IT-Отчеты", callback_data="menu_it"),
-        InlineKeyboardButton(text="📝 Дроп-Отчеты", callback_data="menu_drop"),
+        InlineKeyboardButton(text="📄 Отчеты и Инструменты", callback_data="menu_reports_tools"), # <<< НОВАЯ КНОПКА
     ])
     
-    # Вход в аккаунт
-    buttons.append([
-        InlineKeyboardButton(text="🔐 Вход в аккаунт (Telethon)", callback_data="menu_auth"),
-    ])
-
     if user_id == ADMIN_ID:
         buttons.append([
             InlineKeyboardButton(text="🛠️ Админ-Панель", callback_data="admin_panel"),
         ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# НОВАЯ КЛАВИАТУРА для Отчетов и Инструментов
+def kb_general_reports_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="📊 IT-Отчеты", callback_data="menu_it")],
+        [InlineKeyboardButton(text="📝 Дроп-Отчеты", callback_data="menu_drop")],
+        [InlineKeyboardButton(text="🔐 Вход в аккаунт (Telethon)", callback_data="menu_auth")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def kb_auth_menu() -> InlineKeyboardMarkup:
@@ -162,7 +199,7 @@ def kb_auth_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📱 Войти через QR-код", callback_data="auth_qr")],
         [InlineKeyboardButton(text="🔑 Войти через API ID/Hash", callback_data="auth_api")],
         [InlineKeyboardButton(text="💬 Войти через TG SMS (Код)", callback_data="auth_sms")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_reports_tools")], # <<< ИЗМЕНЕНИЕ: Назад в Отчеты
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -179,7 +216,7 @@ def kb_terminal_input(current_code: str) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(text="9️⃣", callback_data="term_9")])
     
     buttons.append([InlineKeyboardButton(text="⬅️ Очистить", callback_data="term_C"),
-                    InlineKeyboardButton(text="0️⃣", callback_data="term_0"), # <<< Кнопка 0️⃣ ЕСТЬ!
+                    InlineKeyboardButton(text="0️⃣", callback_data="term_0"), 
                     InlineKeyboardButton(text="✅ Ввести", callback_data="term_OK")])
     
     # Текущий код
@@ -193,7 +230,7 @@ def kb_report_menu(report_type: str, user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Отчет (Последние 10)", callback_data=f"show_{report_type}_reports")],
         [InlineKeyboardButton(text="📈 Прогресс/Статус", callback_data=f"show_{report_type}_progress")],
         [InlineKeyboardButton(text="💡 Помощь по командам", callback_data=f"show_{report_type}_help")],
-        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_main")]
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_reports_tools")] # <<< ИЗМЕНЕНИЕ: Назад в Отчеты
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -284,12 +321,16 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
 # =========================================================================
 
 auth_router = Router()
+user_router = Router()
 
 class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
     waiting_for_qr_scan = State() 
+
+class AdminStates(StatesGroup): # <<< НОВЫЙ FSM ДЛЯ АДМИНА
+    waiting_for_promo_user_id = State()
 
 async def create_telethon_client_auth():
     session_path = os.path.join(SESSION_DIR, os.path.basename(SESSION_FILE))
@@ -304,13 +345,14 @@ async def command_start_handler(message: Message, state: FSMContext, bot: Bot) -
     
     is_subscribed = await db_check_user_subscription(bot, user_id)
     
-    welcome_text = f"👋 **STATPRO приветствует!**\n\n"
+    welcome_text = f"👋 **STATPRO приветствует!**\n"
+    welcome_text += f"*{[BETA] Бот находится в бета-тестировании.}*\n\n" # <<< НОВОЕ СООБЩЕНИЕ
     welcome_text += f"Ваш ID: `{user_id}`\n"
     welcome_text += f"Статус подписки: {'✅ Активна' if is_subscribed else '❌ Не активна'}"
 
     if not is_subscribed:
         await message.answer(
-            welcome_text + f"\n\n**⚠️ Доступ к отчетам закрыт.** Вступите в канал {TARGET_CHANNEL_URL} для активации.",
+            welcome_text + f"\n\n**⚠️ Доступ к отчетам закрыт.** Вступите в канал **`{TARGET_CHANNEL_URL}`** для активации.",
             reply_markup=kb_subscription_required()
         )
         return
@@ -329,19 +371,42 @@ async def back_to_main_menu_callback(callback: types.CallbackQuery) -> None:
     )
     await callback.answer()
 
+@user_router.callback_query(F.data == "menu_reports_tools")
+async def show_reports_tools_menu(callback: types.CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    
+    # Проверка подписки перед показом инструментов
+    if not await db_check_user_subscription(bot, user_id): 
+        await callback.answer(text="❌ Доступ запрещен. Нет подписки.", show_alert=True)
+        return
+        
+    await callback.message.edit_text(
+        "📄 **Отчеты и Инструменты**\n\n"
+        "Выберите раздел:",
+        reply_markup=kb_general_reports_menu() # <<< НОВАЯ КЛАВИАТУРА
+    )
+    await callback.answer()
+
 @auth_router.callback_query(F.data == "menu_auth")
-async def show_auth_menu(callback: types.CallbackQuery) -> None:
+async def show_auth_menu(callback: types.CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    if not await db_check_user_subscription(bot, user_id): 
+        await callback.answer("❌ Доступ запрещен. Вход в аккаунт доступен только подписчикам.", show_alert=True)
+        return
+        
     await callback.message.edit_text(
         "🔐 **Вход в аккаунт Telethon**\n\nВыберите удобный способ авторизации:",
         reply_markup=kb_auth_menu()
     )
     await callback.answer()
 
-# --- 1. QR-ВХОД (С ГЕНЕРАЦИЕЙ ИЗОБРАЖЕНИЯ) ---
+# --- 1. QR-ВХОД (ДОСТУПЕН ПОДПИСЧИКАМ) ---
 @auth_router.callback_query(F.data == "auth_qr")
-async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID: 
-         await callback.answer("❌ Эта команда доступна только администратору.", show_alert=True)
+async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    user_id = callback.from_user.id
+    
+    if not await db_check_user_subscription(bot, user_id):
+         await callback.answer("❌ Вход в аккаунт доступен только подписчикам.", show_alert=True)
          return
     
     await callback.message.edit_text("⏳ **Запускаю QR-сессию...**")
@@ -397,13 +462,15 @@ async def cmd_qr_start(callback: types.CallbackQuery, state: FSMContext):
 async def cmd_api_start(callback: types.CallbackQuery, state: FSMContext):
      await callback.answer("⏳ API вход временно недоступен. Используйте SMS или QR.", show_alert=True)
 
-# --- 3. SMS ВХОД ---
+# --- 3. SMS ВХОД (ДОСТУПЕН ПОДПИСЧИКАМ) ---
 @auth_router.callback_query(F.data == "auth_sms")
-async def cmd_auth_start_sms(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID: 
-         await callback.answer("❌ Эта команда доступна только администратору.", show_alert=True)
-         return
+async def cmd_auth_start_sms(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    user_id = callback.from_user.id
     
+    if not await db_check_user_subscription(bot, user_id): 
+         await callback.answer("❌ Вход в аккаунт доступен только подписчикам.", show_alert=True)
+         return
+         
     await callback.message.edit_text(
         "🔒 **Начинаем вход в Telegram.**\n\n"
         "Пожалуйста, введите ваш **номер телефона** (например, 79991234567):"
@@ -447,7 +514,7 @@ async def process_code_terminal(callback: types.CallbackQuery, state: FSMContext
     current_code = data.get('current_code', "")
     action = callback.data.split('_')[1]
 
-    if action.isdigit(): # <<< action.isdigit() ловит цифры 0-9
+    if action.isdigit(): 
         if len(current_code) < 5: 
             current_code += action
     elif action == 'C': 
@@ -518,10 +585,9 @@ async def process_password(message: Message, state: FSMContext):
 
 
 # =========================================================================
-# VI. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ
+# VI. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ И АДМИНА
 # =========================================================================
 
-user_router = Router()
 
 # --- МЕНЮ IT ---
 @user_router.callback_query(F.data == "menu_it")
@@ -608,29 +674,64 @@ async def activate_promo(callback: types.CallbackQuery) -> None:
 async def show_help(callback: types.CallbackQuery) -> None:
     await callback.message.edit_text(
         f"ℹ️ **Раздел Помощи**\n\n"
-        f"Для доступа к отчетам необходимо членство в канале {TARGET_CHANNEL_URL}.",
+        f"Для доступа к отчетам необходимо членство в канале **`{TARGET_CHANNEL_URL}`**.",
         reply_markup=kb_back_to_main(callback.from_user.id)
     )
     await callback.answer()
 
-@user_router.callback_query(F.data == "ask_question")
-async def ask_question(callback: types.CallbackQuery) -> None:
-    await callback.message.edit_text(
-        "❓ **Задайте свой вопрос**\n\n"
-        "Пожалуйста, свяжитесь с Администратором напрямую.",
-        reply_markup=kb_back_to_main(callback.from_user.id)
-    )
-    await callback.answer()
 
+# --- АДМИН-ПАНЕЛЬ ---
 @user_router.callback_query(F.data == "admin_panel")
-async def admin_panel_placeholder(callback: types.CallbackQuery) -> None:
+async def show_admin_panel(callback: types.CallbackQuery, state: FSMContext) -> None:
      user_id = callback.from_user.id
-     if user_id == ADMIN_ID:
-        await callback.message.edit_text(
-            "🛠️ **Админ-Панель.**",
-            reply_markup=kb_back_to_main(user_id)
-        )
+     if user_id != ADMIN_ID:
+         await callback.answer("🚫 Доступ запрещен.", show_alert=True)
+         return
+         
+     kb_admin = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Выдать подписку (30 дней)", callback_data="admin_issue_promo")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_main")]
+     ])
+     
+     await callback.message.edit_text(
+         "🛠️ **Админ-Панель.**\n\n"
+         "Выберите действие:",
+         reply_markup=kb_admin
+     )
      await callback.answer()
+
+@user_router.callback_query(F.data == "admin_issue_promo")
+async def cmd_admin_issue_promo(callback: types.CallbackQuery, state: FSMContext):
+     await callback.message.edit_text(
+         "🔑 **Выдача подписки.**\n\n"
+         "Введите **ID пользователя**, которому нужно активировать подписку (30 дней).",
+         reply_markup=kb_back_to_main(callback.from_user.id)
+     )
+     await state.set_state(AdminStates.waiting_for_promo_user_id)
+     await callback.answer()
+
+@user_router.message(AdminStates.waiting_for_promo_user_id, F.text.regexp(r'^\d+$'))
+async def process_admin_issued_promo(message: Message, state: FSMContext):
+    target_user_id = int(message.text.strip())
+    
+    try:
+        end_date = db_activate_subscription(target_user_id)
+        
+        await message.bot.send_message(
+            target_user_id,
+            f"🎉 **Ваша подписка активирована администратором!**\nСрок действия: до {end_date.strftime('%d.%m.%Y')}",
+            parse_mode='Markdown'
+        )
+        
+        await message.answer(f"✅ Подписка для пользователя ID `{target_user_id}` активирована до {end_date.strftime('%d.%m.%Y')}.", 
+                             reply_markup=kb_back_to_main(ADMIN_ID))
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче подписки: {e}")
+        await message.answer("❌ Ошибка при активации. Убедитесь, что пользователь уже общался с ботом.",
+                             reply_markup=kb_back_to_main(ADMIN_ID))
+    
+    await state.clear()
+
 
 # =========================================================================
 # VII. ГЛАВНАЯ ТОЧКА ЗАПУСКА
