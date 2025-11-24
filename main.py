@@ -17,9 +17,8 @@ from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile, FSInputFile
 from aiogram.client.default import DefaultBotProperties 
-from aiogram.client.session.aiohttp import AiohttpSession
 
 
 # =========================================================================
@@ -38,7 +37,7 @@ SESSION_DIR = 'data'
 if not os.path.exists(SESSION_DIR):
     os.makedirs(SESSION_DIR)
 
-# --- ЧТЕНИЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (как на вашем хостинге) ---
+# --- ЧТЕНИЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 
 # 1. AIOGRAM TOKEN
 TOKEN = os.getenv('BOT_TOKEN') 
@@ -56,22 +55,20 @@ if API_ID_RAW:
     except ValueError:
         logger.error(f"❌ Переменная API_ID ('{API_ID_RAW}') должна быть числом.")
 
-if not API_ID or not API_HASH:
-    logger.warning("⚠️ Переменные Telethon (API_ID/API_HASH) не настроены. Функции .лс и .флуд работать не будут.")
-
 # 3. ADMIN ID
 ADMIN_IDS_STR = os.getenv('ADMIN_ID', '') 
 ADMIN_IDS: Set[int] = set()
 
 if ADMIN_IDS_STR:
     try:
+        # Разбиваем строку по запятым и преобразуем каждое значение в int
         ADMIN_IDS = {int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip().isdigit()}
         logger.info(f"✅ Администраторы загружены: {ADMIN_IDS}")
     except Exception as e:
         logger.error(f"❌ Ошибка парсинга ADMIN_ID: {e}")
 
 if not ADMIN_IDS:
-    # Установим заглушку, чтобы Telethon мог работать, если ID не указан
+    # Заглушка, если ADMIN_ID не указан
     ADMIN_IDS = {123456789}
     logger.warning("⚠️ Переменная ADMIN_ID не найдена или пуста. Используется заглушка.")
 
@@ -251,7 +248,8 @@ async def start_telethon_worker(bot_instance: Bot):
         TELETHON_RUNNING = False
         return
         
-    TELETHON_CLIENT = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH, reconnects=None)
+    # ИСПРАВЛЕНИЕ: Удален аргумент 'reconnects=None'
+    TELETHON_CLIENT = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH) 
     client = TELETHON_CLIENT
     
     TELETHON_RUNNING = True
@@ -277,7 +275,6 @@ async def start_telethon_worker(bot_instance: Bot):
         recipient_string = parts[1].strip()
         message_text = parts[2].strip()
         
-        # В этой версии обрабатываем только одного получателя, как в вашем примере
         if recipient_string.startswith('@') or recipient_string.isdigit():
             recipients = [recipient_string]
         else:
@@ -339,8 +336,8 @@ async def start_telethon_worker(bot_instance: Bot):
                 
             caption = f"✅ **Сбор участников завершен** из `{chat_id_or_link}`.\n➡️ Всего участников: **{total_count}**"
             
-            # Используем bot_instance для отправки документа
-            await bot_instance.send_document(sender.id, InputFile(output_file), caption=caption)
+            # Используем bot_instance для отправки документа, используя FSInputFile для Aiogram 3
+            await bot_instance.send_document(sender.id, FSInputFile(output_file), caption=caption)
             os.remove(output_file) 
 
         except Exception as e:
@@ -504,6 +501,7 @@ async def handle_auth_step1(message: types.Message, state: FSMContext, bot: Bot)
 async def handle_auth_step_phone(message: types.Message, state: FSMContext, bot: Bot):
     await state.update_data(phone=message.text.strip())
     
+    # Session is saved automatically by Telethon
     client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
 
     try:
@@ -691,12 +689,10 @@ async def main():
         logger.error("🚫 Бот не может быть запущен: BOT_TOKEN не найден.")
         return
         
-    # Создаем экземпляр бота (ИСПРАВЛЕНО ДЛЯ AIOGRAM 3.7.0+)
+    # Создаем экземпляр бота (Исправленный синтаксис для Aiogram 3.7.0+)
     bot = Bot(
         token=TOKEN, 
         default=DefaultBotProperties(parse_mode='Markdown')
-        # Если у вас проблемы с подключением, можно попробовать указать сессию явно:
-        # session=AiohttpSession() 
     ) 
     
     # Подключаем роутер к диспетчеру
@@ -708,4 +704,8 @@ async def main():
 
 if __name__ == '__main__':
     logger.info("🤖 Бот запускается...")
-    asyncio.run(main())
+    # Обернем запуск в try/except на случай критических ошибок при инициализации
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"❌ Критическая ошибка при запуске main(): {e}")
