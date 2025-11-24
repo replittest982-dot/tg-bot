@@ -9,15 +9,16 @@ from typing import Optional
 
 # --- Телетон импорты ---
 from telethon import TelegramClient, events, errors
-from telethon.tl.types import PeerUser, Channel, Chat, InputPeerUser, User, InputPeerChannel
+from telethon.tl.types import PeerUser, Channel, Chat
 from telethon.errors.rpcerrorlist import SessionPasswordNeededError
 
-# --- Aiogram импорты (ИСПРАВЛЕНО: удален executor) ---
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor # Используем импорт executor для запуска
+# --- Aiogram 3.x импорты (ИСПРАВЛЕНО) ---
+from aiogram import Bot, Dispatcher, types, Router, F
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+
 
 # =========================================================================
 # 0. НАСТРОЙКА ЛОГГИРОВАНИЯ
@@ -43,8 +44,10 @@ API_HASH = 'ВАШ_API_HASH' # Вставьте ваш API Hash
 # --- AIOGRAM CONFIG ---
 # ⚠️ ЗАМЕНИТЕ ЭТО НА ВАШ ТОКЕН
 TOKEN = 'ВАШ_ТОКЕН_БОТА' 
-bot = Bot(token=TOKEN, parse_mode=types.ParseMode.MARKDOWN)
-dp = Dispatcher(bot, storage=MemoryStorage())
+
+# Инициализация Aiogram 3.x (Диспетчер и Роутер)
+router = Router() 
+dp = Dispatcher(storage=MemoryStorage())
 
 
 # =========================================================================
@@ -86,13 +89,9 @@ def create_tables():
         """)
         conn.commit()
 
-# --- Вспомогательные функции DB ---
 def is_user_admin(user_id: int) -> bool:
-    # Проверка из ADMIN_IDS (быстрее)
     if user_id in ADMIN_IDS:
         return True
-    
-    # Проверка из БД (если нужно)
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -100,7 +99,6 @@ def is_user_admin(user_id: int) -> bool:
             result = cursor.fetchone()
             return result is not None and result[0] == 1
     except sqlite3.OperationalError:
-        # Если БД заблокирована/недоступна, считаем, что админ по ID
         return False
 
 
@@ -109,7 +107,7 @@ def is_user_admin(user_id: int) -> bool:
 # =========================================================================
 
 # --- ЛОГИКА МАССОВОЙ РАССЫЛКИ (.лс) ---
-async def send_mass_pm(client, task_id, user_ids_or_usernames, message_text, started_by_id):
+async def send_mass_pm(client, task_id, user_ids_or_usernames, message_text, started_by_id, bot_instance: Bot):
     global ACTIVE_TELETHON_TASKS
     
     task_data = ACTIVE_TELETHON_TASKS.get(task_id)
@@ -117,7 +115,7 @@ async def send_mass_pm(client, task_id, user_ids_or_usernames, message_text, sta
         return
 
     if not client.is_connected():
-        await bot.send_message(started_by_id, f"❌ **Ошибка `.лс`**: Telethon-аккаунт отключен. Задача отменена.")
+        await bot_instance.send_message(started_by_id, f"❌ **Ошибка `.лс`**: Telethon-аккаунт отключен. Задача отменена.")
         ACTIVE_TELETHON_TASKS.pop(task_id, None)
         return
     
@@ -148,17 +146,17 @@ async def send_mass_pm(client, task_id, user_ids_or_usernames, message_text, sta
     
     report_message += f"➡️ Всего отправлено: **{sent_count}/{total_recipients}**\n"
         
-    await bot.send_message(started_by_id, report_message)
+    await bot_instance.send_message(started_by_id, report_message)
     ACTIVE_TELETHON_TASKS.pop(task_id, None)
 
 
 # --- ЛОГИКА ФЛУДА (.флуд) ---
-async def send_flood_messages(client, chat_id, message_text, count, delay, started_by_id):
+async def send_flood_messages(client, chat_id, message_text, count, delay, started_by_id, bot_instance: Bot):
     """Реализация асинхронной рассылки по списку получателей с контролем количества и задержки."""
     global FLOOD_TASK, FLOOD_TARGET_CHAT
     
     if not client.is_connected():
-        await bot.send_message(started_by_id, "❌ **Ошибка `.флуд`**: Telethon-аккаунт отключен.")
+        await bot_instance.send_message(started_by_id, "❌ **Ошибка `.флуд`**: Telethon-аккаунт отключен.")
         FLOOD_TASK = None
         FLOOD_TARGET_CHAT = None
         return
@@ -166,7 +164,7 @@ async def send_flood_messages(client, chat_id, message_text, count, delay, start
     try:
         target_entity = await client.get_entity(chat_id)
     except Exception as e:
-        await bot.send_message(started_by_id, f"❌ Не удалось получить доступ к текущему чату (ID {chat_id}): {e}")
+        await bot_instance.send_message(started_by_id, f"❌ Не удалось получить доступ к текущему чату (ID {chat_id}): {e}")
         FLOOD_TASK = None
         FLOOD_TARGET_CHAT = None
         return
@@ -188,7 +186,7 @@ async def send_flood_messages(client, chat_id, message_text, count, delay, start
 
         except errors.FloodWaitError as e:
             wait_time = e.seconds + 5
-            await bot.send_message(started_by_id, f"⚠️ **ОЖИДАНИЕ ФЛУДА**: Ждем **{wait_time}** секунд.")
+            await bot_instance.send_message(started_by_id, f"⚠️ **ОЖИДАНИЕ ФЛУДА**: Ждем **{wait_time}** секунд.")
             await asyncio.sleep(wait_time)
             continue 
             
@@ -196,16 +194,16 @@ async def send_flood_messages(client, chat_id, message_text, count, delay, start
             break
         except Exception as e:
             logger.error(f"❌ Критическая ошибка при флуде: {e}")
-            await bot.send_message(started_by_id, f"❌ Критическая ошибка при флуде: {e}. Флуд остановлен.")
+            await bot_instance.send_message(started_by_id, f"❌ Критическая ошибка при флуде: {e}. Флуд остановлен.")
             break
 
     logger.info(f"✅ Флуд-задача завершена. Отправлено всего: {sent_count}/{count}.")
-    await bot.send_message(started_by_id, f"✅ **Флуд завершен**. Всего отправлено: **{sent_count}/{count}**.")
+    await bot_instance.send_message(started_by_id, f"✅ **Флуд завершен**. Всего отправлено: **{sent_count}/{count}**.")
     FLOOD_TASK = None
     FLOOD_TARGET_CHAT = None
 
 
-async def start_telethon_worker(bot: Bot, dp: Dispatcher):
+async def start_telethon_worker(bot_instance: Bot):
     global TELETHON_CLIENT, TELETHON_RUNNING
     
     if not API_ID or not API_HASH or API_ID == 12345678:
@@ -221,13 +219,12 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         TELETHON_RUNNING = False
         return
         
-    # --- ИНИЦИАЛИЗАЦИЯ КЛИЕНТА (УСТОЙЧИВОСТЬ К БЛОКИРОВКЕ) ---
     TELETHON_CLIENT = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH, reconnects=None)
     client = TELETHON_CLIENT
     
     TELETHON_RUNNING = True
     
-    # --- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ---
+    # --- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ (ВНУТРИ TELETHON) ---
     
     # 1. .лс 
     @client.on(events.NewMessage(pattern=r'^\.лс (.*)'))
@@ -262,21 +259,10 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
             'total': len(recipients)
         }
         
-        asyncio.create_task(send_mass_pm(client, task_id, recipients, message_text, sender.id))
+        # Передаем bot_instance для отправки отчетов
+        asyncio.create_task(send_mass_pm(client, task_id, recipients, message_text, sender.id, bot_instance))
         
-        await event.reply(f"🚀 **Задача ЛС** запущена (ID: `{task_id}`). Получателей: {len(recipients)}")
-
-    # 2. .чек лс 
-    @client.on(events.NewMessage(pattern=r'^\.чек лс'))
-    async def handle_check_ls_command(event: events.NewMessage):
-        # ... (Логика проверки статуса .лс)
-        pass
-
-    # 3. .лсстоп
-    @client.on(events.NewMessage(pattern=r'^\.лсстоп (\w+)'))
-    async def handle_ls_stop_command(event: events.NewMessage):
-        # ... (Логика остановки .лс)
-        pass
+        await event.reply(f"🚀 **Задача ЛС** запущена (ID: `{task_id}`).")
 
     # 4. .чекгруппу (Сбор списка участников группы)
     @client.on(events.NewMessage(pattern=r'^\.чекгруппу ?(.*)'))
@@ -312,18 +298,17 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
                 participants_list.append(f"ID: {user.id}, Username: {username}")
                 
             total_count = len(participants_list)
-            
             output_file = f"participants_{entity.id}.txt"
+            
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(participants_list))
                 
             caption = f"✅ **Сбор участников завершен** из `{chat_id_or_link}`.\n➡️ Всего участников: **{total_count}**"
             
-            await bot.send_document(sender.id, types.InputFile(output_file), caption=caption)
+            # Используем bot_instance для отправки документа
+            await bot_instance.send_document(sender.id, InputFile(output_file), caption=caption)
             os.remove(output_file) 
 
-        except errors.ChatAdminRequiredError:
-            await event.reply("❌ **Ошибка:** Для сбора участников требуются права администратора в этом чате/канале.")
         except Exception as e:
             await event.reply(f"❌ **Критическая ошибка при сборе:** {e}")
 
@@ -343,13 +328,12 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
                 await event.reply(f"⚠️ Флуд уже активен в этом чате. Сначала остановите его командой `.флудстоп`.")
                 return
             else:
-                 await event.reply(f"⚠️ Флуд уже активен в другом чате (`{FLOOD_TARGET_CHAT}`). Дождитесь завершения или остановите его.")
+                 await event.reply(f"⚠️ Флуд уже активен в другом чате (`{FLOOD_TARGET_CHAT}`).")
                  return
 
-        # Формат: .флуд [кол-во] [задержка] [текст]
         parts = event.text.split(' ', 3)
         if len(parts) < 4:
-            await event.reply("❌ Неверный формат.\nИспользуйте: `.флуд [кол-во] [задержка_сек] [текст]`\nПример: `.флуд 10 5 Привет!`")
+            await event.reply("❌ Неверный формат.\nИспользуйте: `.флуд [кол-во] [задержка_сек] [текст]`")
             return
             
         try:
@@ -363,11 +347,11 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
             return
             
         message_text = parts[3].strip()
-        
         FLOOD_TARGET_CHAT = target_chat_id
         
+        # Передаем bot_instance для отправки отчетов
         FLOOD_TASK = asyncio.create_task(send_flood_messages(
-            client, target_chat_id, message_text, count, delay, sender.id
+            client, target_chat_id, message_text, count, delay, sender.id, bot_instance
         ))
         
         await event.reply(f"🚀 Запуск флуда в **текущем чате**...")
@@ -375,7 +359,7 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
     # 6. .флудстоп 
     @client.on(events.NewMessage(pattern=r'^\.флудстоп'))
     async def handle_flood_stop_command(event: events.NewMessage):
-        global FLOOD_TASK, FLOOD_TARGET_CHAT
+        global FLOOD_TASK
         sender = await event.get_sender()
         if not is_user_admin(sender.id):
             return
@@ -400,7 +384,7 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
 
 
 # =========================================================================
-# V. HANDLERS (AIOGRAM)
+# V. HANDLERS (AIOGRAM 3.x)
 # =========================================================================
 
 # --- FSM для авторизации ---
@@ -411,36 +395,36 @@ class Auth(StatesGroup):
 
 # --- Вспомогательные клавиатуры ---
 def get_main_menu_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row("📄 Отчеты и Инструменты", "📈 Мониторинг задач")
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [types.KeyboardButton(text="📄 Отчеты и Инструменты"), types.KeyboardButton(text="📈 Мониторинг задач")]
+    ])
     return keyboard
 
 def get_reports_menu_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        types.InlineKeyboardButton("🔐 Вход в аккаунт", callback_data="auth_start"),
-        types.InlineKeyboardButton("⬅️ Назад в Главное меню", callback_data="main_menu")
-    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔐 Вход в аккаунт", callback_data="auth_start")],
+        [InlineKeyboardButton(text="⬅️ Назад в Главное меню", callback_data="main_menu")]
+    ])
     return keyboard
 
+
 # V.1. Обработка команды /start
-@dp.message_handler(commands=['start'], state='*')
-async def handle_start(message: types.Message):
+@router.message(F.text == "/start")
+async def handle_start(message: types.Message, bot: Bot):
     user_id = message.from_user.id
     if not is_user_admin(user_id):
-        await message.reply("🛑 У вас нет прав доступа к боту.")
+        await message.answer("🛑 У вас нет прав доступа к боту.")
         return
         
-    await message.reply("Привет! Выберите действие:", reply_markup=get_main_menu_keyboard())
+    await message.answer("Привет! Выберите действие:", reply_markup=get_main_menu_keyboard())
 
 # V.2. Меню Отчетов и Инструментов
-@dp.message_handler(text="📄 Отчеты и Инструменты", state='*')
-async def handle_reports_menu(message: types.Message):
+@router.message(F.text == "📄 Отчеты и Инструменты")
+async def handle_reports_menu(message: types.Message, bot: Bot):
     user_id = message.from_user.id
     if not is_user_admin(user_id):
         return
         
-    # Проверка статуса Telethon (более надежная)
     status_text = "❌ Неактивен"
     if TELETHON_CLIENT:
         try:
@@ -449,20 +433,20 @@ async def handle_reports_menu(message: types.Message):
             elif TELETHON_CLIENT.is_connected():
                  status_text = "⚠️ Подключен, но не авторизован"
         except Exception:
-            pass # Если клиент не инициализирован или ошибка
+            pass 
 
-    await message.reply(f"**Статус Telethon:** {status_text}\n\nВыберите действие:", reply_markup=get_reports_menu_keyboard())
+    await message.answer(f"**Статус Telethon:** {status_text}\n\nВыберите действие:", reply_markup=get_reports_menu_keyboard())
 
 # V.3. Обработка callback-ов меню
-@dp.callback_query_handler(lambda c: c.data == 'auth_start' or c.data == 'main_menu', state='*')
-async def handle_menu_callbacks(callback_query: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.in_({"auth_start", "main_menu"}))
+async def handle_menu_callbacks(callback_query: types.CallbackQuery, state: FSMContext, bot: Bot):
     user_id = callback_query.from_user.id
     if not is_user_admin(user_id):
         await callback_query.answer("🛑 Нет прав доступа.")
         return
         
     if callback_query.data == 'auth_start':
-        await handle_auth_step1(callback_query.message, state) 
+        await handle_auth_step1(callback_query.message, state, bot)
         
     elif callback_query.data == 'main_menu':
         await bot.edit_message_text(
@@ -471,15 +455,15 @@ async def handle_menu_callbacks(callback_query: types.CallbackQuery, state: FSMC
             text="Выберите действие:",
             reply_markup=None 
         )
-        await callback_query.answer()
+    await callback_query.answer()
         
 # V.4. Хендлеры авторизации (Шаг 1, 2, 3)
-async def handle_auth_step1(message: types.Message, state: FSMContext):
+async def handle_auth_step1(message: types.Message, state: FSMContext, bot: Bot):
     await state.set_state(Auth.PHONE)
     await bot.send_message(message.chat.id, "Введите номер телефона для авторизации аккаунта Telethon (в формате +79001234567):")
 
-@dp.message_handler(state=Auth.PHONE)
-async def handle_auth_step_phone(message: types.Message, state: FSMContext):
+@router.message(Auth.PHONE)
+async def handle_auth_step_phone(message: types.Message, state: FSMContext, bot: Bot):
     await state.update_data(phone=message.text.strip())
     await state.set_state(Auth.CODE)
     
@@ -489,20 +473,20 @@ async def handle_auth_step_phone(message: types.Message, state: FSMContext):
         await client.connect()
         if not await client.is_user_authorized():
             await client.send_code_request(message.text.strip())
-            await message.reply("Введите код, который пришел на ваш телефон:")
+            await message.answer("Введите код, который пришел на ваш телефон:")
         else:
-            await message.reply("⚠️ Аккаунт уже авторизован. Для переавторизации удалите файл сессии.")
-            await state.finish()
+            await message.answer("⚠️ Аккаунт уже авторизован. Для переавторизации удалите файл сессии.")
+            await state.clear()
             
     except Exception as e:
-        await message.reply(f"❌ Ошибка: {e}")
-        await state.finish()
+        await message.answer(f"❌ Ошибка: {e}")
+        await state.clear()
     finally:
         if client.is_connected():
             await client.disconnect()
 
-@dp.message_handler(state=Auth.CODE)
-async def handle_auth_step2(message: types.Message, state: FSMContext):
+@router.message(Auth.CODE)
+async def handle_auth_step2(message: types.Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     phone_number = data['phone']
     code = message.text.strip()
@@ -517,31 +501,31 @@ async def handle_auth_step2(message: types.Message, state: FSMContext):
                 user = await client.sign_in(phone_number, code)
             except SessionPasswordNeededError:
                 await state.set_state(Auth.PASSWORD)
-                await message.reply("🔒 Требуется двухфакторная аутентификация. Введите пароль:")
+                await message.answer("🔒 Требуется двухфакторная аутентификация. Введите пароль:")
                 return
             except Exception as e:
-                await message.reply(f"❌ Ошибка входа: {e}")
-                await state.finish()
+                await message.answer(f"❌ Ошибка входа: {e}")
+                await state.clear()
                 return
 
-            await message.reply(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
-            await state.finish()
+            await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
+            await state.clear()
             await client.disconnect() 
             
         else:
-            await message.reply("⚠️ Аккаунт уже авторизован, попробуйте еще раз.")
-            await state.finish()
+            await message.answer("⚠️ Аккаунт уже авторизован, попробуйте еще раз.")
+            await state.clear()
             
     except Exception as e:
-        await message.reply(f"❌ Критическая ошибка: {e}")
-        await state.finish()
+        await message.answer(f"❌ Критическая ошибка: {e}")
+        await state.clear()
     finally:
         if client.is_connected():
             await client.disconnect()
 
 
-@dp.message_handler(state=Auth.PASSWORD)
-async def handle_auth_step3(message: types.Message, state: FSMContext):
+@router.message(Auth.PASSWORD)
+async def handle_auth_step3(message: types.Message, state: FSMContext, bot: Bot):
     password = message.text.strip()
     
     client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
@@ -550,26 +534,25 @@ async def handle_auth_step3(message: types.Message, state: FSMContext):
         await client.connect()
         user = await client.sign_in(password=password)
 
-        await message.reply(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
-        await state.finish()
+        await message.answer(f"✅ Аккаунт @{user.username or user.first_name} успешно авторизован! **Перезапустите бота, чтобы активировать аккаунт.**")
+        await state.clear()
         await client.disconnect() 
 
     except Exception as e:
-        await message.reply(f"❌ Ошибка входа с паролем: {e}")
-        await state.finish()
+        await message.answer(f"❌ Ошибка входа с паролем: {e}")
+        await state.clear()
     finally:
         if client.is_connected():
             await client.disconnect()
 
 
-# V.5. Мониторинг задач (для кнопки)
+# V.5. Мониторинг задач (Aiogram 3.x)
 
 def get_task_status_message():
     global ACTIVE_TELETHON_TASKS, FLOOD_TASK, FLOOD_TARGET_CHAT
-    
+    # ... (логика формирования сообщения остается прежней)
     msg = "📊 **Мониторинг активных задач:**\n\n"
     
-    # 1. Статус Флуд-задачи
     if FLOOD_TASK and not FLOOD_TASK.done():
         status_text = 'Работает' if not FLOOD_TASK.cancelling() else 'Запрос на остановку'
         msg += f"🟢 **Флуд** (Chat ID: `{FLOOD_TARGET_CHAT}`)\n"
@@ -577,13 +560,11 @@ def get_task_status_message():
     else:
         msg += "🔴 **Флуд** - Неактивен\n\n"
         
-    # 2. Статус .лс задач
     if ACTIVE_TELETHON_TASKS:
         msg += "📈 **Массовая рассылка (.лс)**:\n"
         for task_id, data in ACTIVE_TELETHON_TASKS.items():
             progress = f"{data.get('progress', 0)}/{data.get('total', '??')}"
             status_emoji = '🔄' if data['status'] == 'Running' else '🛑'
-            
             msg += f"• `{task_id}`: {status_emoji} **{data['status']}** ({progress})\n"
         msg += "\n"
     else:
@@ -591,29 +572,95 @@ def get_task_status_message():
         
     return msg
 
-@dp.message_handler(text="📈 Мониторинг задач", state='*')
+def get_monitoring_keyboard():
+    keyboard = []
+    
+    # Добавление кнопок отмены, если есть активные .лс задачи
+    for task_id, data in ACTIVE_TELETHON_TASKS.items():
+        if data['status'] == 'Running':
+            keyboard.append([InlineKeyboardButton(text=f"🛑 Отменить .лс {task_id}", callback_data=f"cancel_ls_task_{task_id}")])
+    
+    # Добавление кнопки отмены флуда
+    if FLOOD_TASK and not FLOOD_TASK.done():
+        keyboard.append([InlineKeyboardButton(text="🛑 Отменить Флуд", callback_data="cancel_flood_task")])
+        
+    keyboard.append([InlineKeyboardButton(text="🔄 Обновить статус", callback_data="refresh_status")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+@router.message(F.text == "📈 Мониторинг задач")
 async def handle_monitoring_menu(message: types.Message):
-    # ... (Логика отображения меню мониторинга)
-    pass # Реализация в callback-ах
+    user_id = message.from_user.id
+    if not is_user_admin(user_id):
+        return
+        
+    await message.answer(get_task_status_message(), reply_markup=get_monitoring_keyboard())
 
-@dp.callback_query_handler(lambda c: c.data.startswith('cancel_ls_task_') or c.data == 'refresh_status' or c.data == 'cancel_flood_task', state='*')
-async def handle_task_callbacks(callback_query: types.CallbackQuery):
-    # ... (Логика обработки callback-ов)
-    pass # Реализация в callback-ах
+
+@router.callback_query(F.data.in_({"refresh_status", "cancel_flood_task"}) | F.data.startswith("cancel_ls_task_"))
+async def handle_task_callbacks(callback_query: types.CallbackQuery, bot: Bot):
+    user_id = callback_query.from_user.id
+    if not is_user_admin(user_id):
+        await callback_query.answer("🛑 Нет прав доступа.")
+        return
+        
+    data = callback_query.data
+    
+    if data == 'refresh_status':
+        try:
+            # Используем edit_message_text, чтобы обновить сообщение
+            await bot.edit_message_text(
+                chat_id=callback_query.message.chat.id,
+                message_id=callback_query.message.message_id,
+                text=get_task_status_message(),
+                reply_markup=get_monitoring_keyboard()
+            )
+            await callback_query.answer("Статус обновлен.")
+        except Exception:
+             await callback_query.answer("Статус не изменился.")
+
+    elif data.startswith('cancel_ls_task_'):
+        task_id = data.split('_')[-1]
+        if task_id in ACTIVE_TELETHON_TASKS and ACTIVE_TELETHON_TASKS[task_id]['status'] == 'Running':
+            ACTIVE_TELETHON_TASKS[task_id]['status'] = 'Stopped'
+            await callback_query.answer(f"Задача .лс {task_id} помечена на остановку.")
+        else:
+            await callback_query.answer(f"Задача {task_id} не найдена или уже остановлена.")
+
+    elif data == 'cancel_flood_task':
+        global FLOOD_TASK
+        if FLOOD_TASK and not FLOOD_TASK.done():
+            FLOOD_TASK.cancel()
+            await callback_query.answer("Флуд-задача запросила остановку.")
+        else:
+            await callback_query.answer("Активная флуд-задача не найдена.")
+    
+    await callback_query.answer()
 
 
 # =========================================================================
-# VI. MAIN EXECUTION (Исправленный для Aiogram 2.x/3.x обход)
+# VI. MAIN EXECUTION (Aiogram 3.x Launch)
 # =========================================================================
 
-async def on_startup(dispatcher):
+async def on_startup(bot: Bot):
     create_tables()
     logger.info("Базы данных инициализированы.")
     
     # Запускаем worker при старте
-    asyncio.create_task(start_telethon_worker(bot, dp))
+    asyncio.create_task(start_telethon_worker(bot))
+
+async def main():
+    # Создаем экземпляр бота
+    bot = Bot(token=TOKEN, parse_mode='Markdown')
+    
+    # Подключаем роутер к диспетчеру
+    dp.include_router(router)
+    
+    # Запускаем инициализацию и Polling
+    await on_startup(bot)
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     logger.info("🤖 Бот запускается...")
-    # ИСПОЛЬЗУЕМ executor.start_polling, который корректно импортирован выше.
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    # Используем asyncio.run для запуска асинхронной функции main
+    asyncio.run(main())
