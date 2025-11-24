@@ -12,12 +12,13 @@ from telethon import TelegramClient, events, errors
 from telethon.tl.types import PeerUser, Channel, Chat
 from telethon.errors.rpcerrorlist import SessionPasswordNeededError
 
-# --- Aiogram 3.x импорты ---
+# --- Aiogram 3.x импорты (ОБНОВЛЕНО ДЛЯ 3.7.0+) ---
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from aiogram.client.default import DefaultBotProperties # <-- НОВЫЙ ИМПОРТ!
 
 
 # =========================================================================
@@ -42,7 +43,7 @@ API_ID = 12345678 # Вставьте ваш API ID
 API_HASH = 'ВАШ_API_HASH' # Вставьте ваш API Hash
 
 # --- AIOGRAM CONFIG (ВАШ ТОКЕН) ---
-TOKEN = '7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo' # Ваш токен, вставлен напрямую!
+TOKEN = '7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo' # Ваш токен
 
 # Инициализация Aiogram 3.x (Диспетчер и Роутер)
 router = Router() 
@@ -649,8 +650,8 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_telethon_worker(bot))
 
 async def main():
-    # Создаем экземпляр бота
-    bot = Bot(token=TOKEN, parse_mode='Markdown')
+    # Создаем экземпляр бота (ИСПРАВЛЕНО ДЛЯ AIOGRAM 3.7.0+)
+    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='Markdown')) 
     
     # Подключаем роутер к диспетчеру
     dp.include_router(router)
