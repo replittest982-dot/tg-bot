@@ -1,4 +1,4 @@
-# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД С КАСТОМНЫМИ КОМАНДАМИ)
+# main.py (ФИНАЛЬНЫЙ МОНОЛИТНЫЙ КОД - ГОТОВ К РАЗВЕРТЫВАНИЮ НА САЙТЕ)
 
 import asyncio
 import logging
@@ -6,6 +6,8 @@ import os
 import sqlite3
 from datetime import datetime
 import pytz 
+
+# --- УДАЛЕНО: from dotenv import load_dotenv и load_dotenv() ---
 
 # --- Aiogram и FSM ---
 from aiogram import Bot, Dispatcher, Router, F, types
@@ -16,15 +18,20 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Telethon ---
-from telethon import TelegramClient, events # Добавлен events для кастомных команд
+from telethon import TelegramClient, events
 
-# --- НАСТРОЙКИ (КОНФИГ) ---
+# =========================================================================
+# I. НАСТРОЙКИ (КОНФИГ) - ЧТЕНИЕ ИЗ ОКРУЖЕНИЯ
+# =========================================================================
 
-BOT_TOKEN = "7868097991:AAE745izKWA__gG20IxRoVpgQjnW_RMNjTo"
-ADMIN_ID = 6256576302 
-API_ID = 35775411
-API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
-TARGET_CHANNEL_URL = "@STAT_PRO1" # !!! ОБНОВЛЕННЫЙ КАНАЛ !!!
+# Чтение из переменных окружения сайта/платформы
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH")
+
+# Прочие настройки (не секретные)
+TARGET_CHANNEL_URL = "@STAT_PRO1" 
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 
@@ -33,7 +40,6 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
-
 
 # =========================================================================
 # I. БАЗА ДАННЫХ (DB)
@@ -79,7 +85,6 @@ def db_create_user_if_not_exists(user_id, username=None, first_name=None):
     conn.close()
 
 async def db_check_user_subscription(bot: Bot, user_id):
-    """Проверяет подписку через членство в TARGET_CHANNEL_URL (@STAT_PRO1)."""
     if user_id == ADMIN_ID:
         return True 
 
@@ -147,9 +152,13 @@ SESSION_FILE = f'{SESSION_DIR}/telethon_session_{API_ID}'
 TELETHON_RUNNING = False
 
 async def start_telethon_worker(bot: Bot, dp: Dispatcher):
-    """Запускает и поддерживает Telethon-клиента."""
     global TELETHON_RUNNING
     
+    # ПРОВЕРКА КЛЮЧЕЙ
+    if not API_ID or not API_HASH:
+        logger.error("🚫 Telethon не запущен: Отсутствует API_ID или API_HASH в окружении.")
+        return
+        
     session_filepath = f'{SESSION_FILE}.session'
     if not os.path.exists(session_filepath):
         logger.error("🚫 Telethon не запущен: Файл сессии отсутствует.")
@@ -164,29 +173,19 @@ async def start_telethon_worker(bot: Bot, dp: Dispatcher):
         TELETHON_RUNNING = True
 
         # --- СТРУКТУРА ДЛЯ ОБРАБОТКИ КАСТОМНЫХ КОМАНД TELETHON ---
-        # NOTE: Telethon реагирует на сообщения, содержащие команду.
         
-        # .чекгруппу (Проверка членства в группе)
         @client.on(events.NewMessage(pattern=r'^\.чекгруппу'))
         async def handle_check_group_command(event):
-             # Логика: .чекгруппу [группа/юзернейм] [юзернейм для проверки]
              await event.reply("✅ Команда .чекгруппу обработана. Выполняется проверка пользователя в группе.")
 
-        # .лс (Личное сообщение)
         @client.on(events.NewMessage(pattern=r'^\.лс'))
         async def handle_ls_command(event):
-             # Логика: .лс [получатель] [текст]
              await event.reply("✅ Команда .лс обработана. Сообщение отправлено.")
 
-        # .флуд (Флуд-рассылка)
         @client.on(events.NewMessage(pattern=r'^\.флуд'))
         async def handle_flood_command(event):
-             # Логика: .флуд [текст] [задержка]
              await event.reply("✅ Команда .флуд обработана. Запущена рассылка.")
-            
-        # ----------------------------------------------------------------------
         
-        # Основной цикл работы Telethon
         await client.run_until_disconnected()
 
     except Exception as e:
@@ -417,6 +416,11 @@ async def admin_panel_placeholder(callback: types.CallbackQuery) -> None:
 # =========================================================================
 
 async def main():
+    # Проверка наличия токенов
+    if not BOT_TOKEN or not API_ID or not API_HASH:
+        logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Один или несколько API ключей/токенов не найдены в переменных окружения. Проверьте настройки на вашем сайте!")
+        return
+
     logger.info("Инициализация базы данных и проверка таблиц...")
     os.makedirs('data', exist_ok=True) 
     create_tables()
