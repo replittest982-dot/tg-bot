@@ -4,8 +4,6 @@ import os
 import sqlite3
 import pytz
 import re
-import random
-import string
 from datetime import datetime, timedelta
 
 # Импорты aiogram
@@ -15,18 +13,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, StateFilter # ✅ ИСПРАВЛЕНИЕ: StateFilter добавлен
+from aiogram.filters import Command, StateFilter 
 from aiogram.client.default import DefaultBotProperties
 
 # Импорты telethon
 from telethon import TelegramClient, events
+# Импорт типов для работы с чатами и статусами
+from telethon.tl.types import Channel, Chat, UserStatusOnline, UserStatusRecently
 from telethon.errors import (
     UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, 
     PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, 
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
     UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
 )
-from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.utils import get_display_name
 
 # =========================================================================
@@ -41,7 +40,7 @@ API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1" # Обязательный канал для подписки
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
-DB_TIMEOUT = 10 # Таймаут для подключения к SQLite
+DB_TIMEOUT = 10 
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,6 +51,8 @@ ACTIVE_TELETHON_CLIENTS = {}
 ACTIVE_TELETHON_WORKERS = {} 
 TEMP_AUTH_CLIENTS = {} 
 FLOOD_TASKS = {} 
+# ✅ Хранилище прогресса для .статус
+PROCESS_PROGRESS = {} # {user_id: {'type': 'flood', 'total': 100, 'done': 10, 'peer': entity}}
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -65,7 +66,7 @@ user_router = Router()
 class TelethonAuth(StatesGroup):
     PHONE = State()
     CODE = State()
-    PASSWORD = State() # Шаг для 2FA-пароля
+    PASSWORD = State() 
 
 class PromoStates(StatesGroup):
     waiting_for_code = State()
@@ -79,7 +80,7 @@ class AdminStates(StatesGroup):
     sub_days_input = State()
 
 # =========================================================================
-# III. БАЗА ДАННЫХ (без изменений)
+# III. БАЗА ДАННЫХ
 # =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME)
@@ -205,19 +206,15 @@ async def check_access(user_id: int, bot: Bot):
 def get_cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]])
 
-# --- НОВАЯ КЛАВИАТУРА ДЛЯ ВВОДА КОДА ---
 def get_code_kb(current_code_text=""):
     kb = []
-    # Отображаем текущий введенный код (если есть)
     kb.append([InlineKeyboardButton(text=f"Код: {current_code_text if current_code_text else '...'} / Длина: {len(current_code_text)}", callback_data="ignore")])
     
-    # Цифры 1-9
     row1 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(1, 4)]
     row2 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(4, 7)]
     row3 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(7, 10)]
     kb.extend([row1, row2, row3])
     
-    # Удалить, 0, Отправить
     row4 = [
         InlineKeyboardButton(text="⬅️ Удалить", callback_data="code_input_delete"),
         InlineKeyboardButton(text="0️⃣", callback_data="code_input_0"),
@@ -225,11 +222,9 @@ def get_code_kb(current_code_text=""):
     ]
     kb.append(row4)
     
-    # Отмена
     kb.append([InlineKeyboardButton(text="❌ Отмена Авторизации", callback_data="cancel_action")])
     
     return InlineKeyboardMarkup(inline_keyboard=kb)
-# ----------------------------------------
 
 def get_main_kb(user_id):
     user = db_get_user(user_id)
@@ -270,11 +265,10 @@ def get_admin_kb():
     ])
 
 # =========================================================================
-# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО - без изменений)
+# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО С ИСПРАВЛЕНИЯМИ КОМАНД)
 # =========================================================================
 
 async def stop_worker(user_id):
-    # Логика worker'а без изменений
     if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] and not FLOOD_TASKS[user_id].done():
         FLOOD_TASKS[user_id].cancel()
         del FLOOD_TASKS[user_id]
@@ -288,11 +282,14 @@ async def stop_worker(user_id):
             await ACTIVE_TELETHON_CLIENTS[user_id].disconnect()
         except: pass
         del ACTIVE_TELETHON_CLIENTS[user_id]
+        
     db_set_session_status(user_id, False)
+    # Очистка прогресса при остановке
+    if user_id in PROCESS_PROGRESS:
+        del PROCESS_PROGRESS[user_id]
     logger.info(f"Worker {user_id} stopped.")
 
 async def run_worker(user_id):
-    # Логика worker'а без изменений
     await stop_worker(user_id)
     path = get_session_path(user_id)
     client = TelegramClient(path, API_ID, API_HASH)
@@ -310,20 +307,33 @@ async def run_worker(user_id):
         # --- ЛОГИКА ФЛУДА И КОМАНД ---
         async def flood_task(peer, message, count, delay):
             try:
-                for i in range(count):
+                is_unlimited = count <= 0
+                max_iterations = count if not is_unlimited else 999999999 
+
+                PROCESS_PROGRESS[user_id] = {'type': 'flood', 'total': count, 'done': 0, 'peer': peer}
+                
+                for i in range(max_iterations):
                     if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] is False:
                         await client.send_message(user_id, "🛑 Флуд остановлен по команде .стопфлуд.")
                         break
+                    
+                    if not is_unlimited and i >= count: 
+                        break 
+                        
                     await client.send_message(peer, message)
+                    PROCESS_PROGRESS[user_id]['done'] = i + 1
                     await asyncio.sleep(delay)
-                await client.send_message(user_id, "✅ Флуд завершен.")
+                    
+                await client.send_message(user_id, "✅ Флуд завершен." if not is_unlimited else "✅ Бесконечный флуд остановлен вручную.")
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 await client.send_message(user_id, f"❌ Ошибка при флуде: {e}")
             finally:
-                if user_id in FLOOD_TASKS:
+                if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] is not False:
                     del FLOOD_TASKS[user_id]
+                if user_id in PROCESS_PROGRESS:
+                    del PROCESS_PROGRESS[user_id]
         
         @client.on(events.NewMessage)
         async def handler(event):
@@ -337,36 +347,66 @@ async def run_worker(user_id):
 
             # .ЛС [текст] [список @юзернеймов/ID]
             if cmd == '.лс' and len(parts) >= 3:
-                text = parts[1]
-                recipients = parts[2:]
+                recipient_start_index = -1
+                
+                # Ищем начало списка получателей (начиная с @ или полностью числовой ID)
+                for i in range(1, len(parts)):
+                    part = parts[i]
+                    # Эвристика для определения адресата: @username или числовой ID > 5 цифр
+                    if part.startswith('@') or (part.isdigit() and len(part) > 5): 
+                        recipient_start_index = i
+                        break
+
+                if recipient_start_index != -1:
+                    text_parts = parts[1:recipient_start_index]
+                    text = ' '.join(text_parts)
+                    recipients = parts[recipient_start_index:]
+                else:
+                    return await event.reply("❌ Не удалось разобрать команду. Укажите получателей в конце (например, @username или ID).")
+
+                if not text or not recipients:
+                    return await event.reply("❌ Неверный формат .лс. Убедитесь, что указаны и текст, и хотя бы один адресат.")
+                
                 results = []
                 for target in recipients:
                     try:
-                        await client.send_message(target, text)
+                        await client.send_message(target, text) 
                         results.append(f"✅ {target}: Отправлено")
                     except Exception as e:
                         results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
                 await event.reply("<b>Результаты .лс:</b>\n" + "\n".join(results), parse_mode='HTML')
 
-            # .ФЛУД [кол-во] [текст] [задержка] [@чат]
+            # .ФЛУД [кол-во] [текст] [задержка] [@чат/ID]
             elif cmd == '.флуд' and len(parts) >= 5:
                 if user_id in FLOOD_TASKS:
                     return await event.reply("⚠️ Флуд уже запущен. Используйте .стопфлуд.")
                     
                 try:
                     count = int(parts[1])
-                    message = parts[2]
-                    delay = float(parts[3])
-                    target_chat = parts[4]
+                    target_chat = parts[-1]
+                    delay = float(parts[-2])
                     
-                    if count > 50 or delay < 0.5:
-                        return await event.reply("❌ Макс. кол-во: 50. Мин. задержка: 0.5 сек.")
+                    # Текст - это все между [кол-во] (parts[1]) и [задержка] (parts[-2])
+                    message_parts = parts[2:-2] 
+                    message = ' '.join(message_parts)
+
+                    if delay < 0.5:
+                        return await event.reply("❌ Макс. кол-во: **безлимитно** (или 0). Мин. задержка: 0.5 сек.")
                     
+                    if not message:
+                         return await event.reply("❌ Сообщение для флуда не может быть пустым.")
+                         
                     peer = await client.get_input_entity(target_chat)
                     
                     task = asyncio.create_task(flood_task(peer, message, count, delay))
                     FLOOD_TASKS[user_id] = task
-                    await event.reply(f"🔥 **Флуд запущен!**\nЧат: {target_chat}\nСообщений: {count}\nЗадержка: {delay} сек.", parse_mode='HTML')
+                    await event.reply(
+                        f"🔥 **Флуд запущен!**\n"
+                        f"Чат: {target_chat}\n"
+                        f"Сообщений: {'Безлимитно' if count <= 0 else count}\n"
+                        f"Задержка: {delay} сек.", 
+                        parse_mode='HTML'
+                    )
                     
                 except ValueError:
                     await event.reply("❌ Неверный формат чисел (кол-во/задержка).")
@@ -378,42 +418,102 @@ async def run_worker(user_id):
             # .СТОПФЛУД
             elif cmd == '.стопфлуд':
                 if user_id in FLOOD_TASKS:
-                    FLOOD_TASKS[user_id] = False # Флаг для остановки внутри задачи
+                    FLOOD_TASKS[user_id] = False 
                     await event.reply("🛑 Запрос на остановку флуда принят. Ожидайте.")
                 else:
                     await event.reply("⚠️ Флуд не запущен.")
             
-            # .ЧЕКГРУППУ [@чат]
-            elif cmd == '.чекгруппу' and len(parts) == 2:
-                target_chat_str = parts[1]
+            # ✅ .СТАТУС (Прогресс)
+            elif cmd == '.статус':
+                if user_id in PROCESS_PROGRESS:
+                    progress = PROCESS_PROGRESS[user_id]
+                    p_type = progress['type']
+                    
+                    if p_type == 'flood':
+                        total = progress['total']
+                        done = progress['done']
+                        
+                        status_text = (
+                            f"⚡️ **СТАТУС ФЛУДА:**\n"
+                            f" • Цель: {get_display_name(await client.get_entity(progress['peer']))}\n"
+                            f" • Отправлено: **{done}**\n"
+                            f" • Всего: **{'Безлимитно' if total <= 0 else total}**\n"
+                            f" • Прогресс: **{'{:.2f}'.format(done/total*100) + '%' if total > 0 else '—'}**"
+                        )
+                    else:
+                        status_text = f"⚙️ Активный процесс: {p_type}. Данные: {progress}"
+                else:
+                    status_text = "✨ Активных процессов Worker'а нет."
+                
+                await event.reply(status_text, parse_mode='HTML')
+
+
+            # ✅ .ЧЕКГРУППУ [опц: @чат/ID] [опц: мин_ID-макс_ID]
+            elif cmd == '.чекгруппу':
+                target_chat_str = None
+                id_range_str = None
+
+                # Парсинг аргументов
+                if len(parts) >= 2:
+                    last_arg = parts[-1]
+                    # Проверяем, является ли последний аргумент диапазоном ID
+                    if re.match(r'^\d+-\d+$', last_arg):
+                        id_range_str = last_arg
+                        if len(parts) > 2:
+                            target_chat_str = parts[1]
+                    else:
+                        target_chat_str = parts[1]
+
+                # Если аргумент чата не указан, берем текущий чат
+                if not target_chat_str:
+                    target_chat_str = event.chat_id
+                    if not target_chat_str:
+                        return await event.reply("❌ Не удалось определить чат. Используйте: .чекгруппу [@чат/ID] [мин_ID-макс_ID] в ЛС.")
+
+                min_id, max_id = None, None
+                if id_range_str:
+                    try:
+                        min_id, max_id = map(int, id_range_str.split('-'))
+                        if min_id >= max_id:
+                             return await event.reply("❌ Неверный диапазон ID: минимальный ID должен быть меньше максимального.")
+                    except ValueError:
+                         return await event.reply("❌ Неверный формат диапазона ID. Используйте: MIN_ID-MAX_ID.")
+
                 try:
                     chat_entity = await client.get_entity(target_chat_str)
                     
-                    if not isinstance(chat_entity, (Channel, Chat)):
-                         return await event.reply("❌ Цель должна быть чатом или каналом.")
-                         
                     participants = []
-                    if isinstance(chat_entity, Channel) and chat_entity.megagroup:
-                        participants = await client.get_participants(chat_entity)
-                    else:
-                        return await event.reply("❌ Данная команда работает только в супергруппах/каналах.")
                     
+                    # Используем iter_participants для эффективного перебора
+                    async for p in client.iter_participants(chat_entity, limit=None):
+                        user_id_int = p.id
+                        
+                        # Применяем фильтр ID
+                        if id_range_str:
+                            if min_id is not None and user_id_int < min_id:
+                                continue
+                            if max_id is not None and user_id_int > max_id:
+                                continue
+                        
+                        participants.append(p)
+
                     total_users = len(participants)
-                    online_users = sum(1 for p in participants if isinstance(p.status, (types.UserStatusOnline, types.UserStatusRecently)))
+                    # Фильтруем по статусу 'онлайн' или 'недавно'
+                    online_users = sum(1 for p in participants if isinstance(p.status, (UserStatusOnline, UserStatusRecently)))
+                    
+                    range_info = f" ({id_range_str})" if id_range_str else ""
                     
                     response = (
-                        f"📊 **Анализ чата {get_display_name(chat_entity)}**:\n"
-                        f" • Всего участников: **{total_users}**\n"
+                        f"📊 **Анализ чата {get_display_name(chat_entity)}**{range_info}:\n"
+                        f" • Всего участников (по фильтру): **{total_users}**\n"
                         f" • Онлайн / Недавно: **{online_users}**\n"
                     )
                     await event.reply(response, parse_mode='HTML')
 
-                except (UsernameInvalidError, PeerIdInvalidError):
-                    await event.reply("❌ Чат не найден или неверный формат.")
                 except ChatAdminRequiredError:
                     await event.reply("❌ Бот не является администратором в этом чате или не имеет прав на получение списка участников.")
                 except Exception as e:
-                    await event.reply(f"❌ Критическая ошибка при чеке: {type(e).__name__}")
+                    await event.reply(f"❌ Критическая ошибка при чеке: {type(e).__name__} - Убедитесь, что чат доступен. {e}")
 
 
         worker_task = asyncio.create_task(client.run_until_disconnected())
@@ -431,10 +531,6 @@ async def run_worker(user_id):
         if user_id in ACTIVE_TELETHON_WORKERS: del ACTIVE_TELETHON_WORKERS[user_id]
         db_set_session_status(user_id, False)
 
-async def start_workers():
-    users = db_get_active_telethon_users()
-    for uid in users:
-        asyncio.create_task(run_worker(uid))
 
 # =========================================================================
 # VI. ХЕНДЛЕРЫ BOT
@@ -504,10 +600,9 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
         if not client.is_connected(): await client.connect()
         result = await client.send_code_request(phone)
         
-        await state.update_data(phone=phone, phone_hash=result.phone_code_hash, current_code="") # Добавлено поле для сборки кода
+        await state.update_data(phone=phone, phone_hash=result.phone_code_hash, current_code="") 
         await state.set_state(TelethonAuth.CODE)
         
-        # --- ИСПОЛЬЗУЕМ НОВУЮ КЛАВИАТУРУ ---
         await msg.answer("✉️ **Код подтверждения отправлен.**\nВведите его, используя кнопки ниже или отправьте текстом:", reply_markup=get_code_kb())
 
     except PhoneNumberInvalidError:
@@ -517,16 +612,11 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
         await msg.answer(f"❌ Ошибка отправки кода: {e}", reply_markup=get_main_kb(uid))
         await state.clear()
 
-# --- ХЕНДЛЕР ВВОДА КОДА (ТЕКСТОВОЕ СООБЩЕНИЕ ИЛИ КНОПКА ОТПРАВИТЬ) ---
 @user_router.message(TelethonAuth.CODE)
 async def auth_msg_code(msg: Message, state: FSMContext):
-    # --- ОЧИСТКА ВВОДА: Удаляем все, кроме цифр ---
     code = re.sub(r'\D', '', msg.text.strip())
-    # -----------------------------------------------
-    
     await process_code_submit(msg, state, code)
 
-# --- ХЕНДЛЕР НАЖАТИЯ КНОПОК НА КЛАВИАТУРЕ КОДА ---
 @user_router.callback_query(F.data.startswith("code_input_"), StateFilter(TelethonAuth.CODE))
 async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -536,8 +626,7 @@ async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
 
     if action.isdigit():
-        # Добавление цифры
-        if len(current_code) < 10: # Ограничиваем длину
+        if len(current_code) < 10: 
             new_code = current_code + action
             await state.update_data(current_code=new_code)
             await call.message.edit_reply_markup(reply_markup=get_code_kb(new_code))
@@ -545,21 +634,18 @@ async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
             await call.answer("Максимальная длина кода.", show_alert=True)
             
     elif action == 'delete':
-        # Удаление последней цифры
         new_code = current_code[:-1]
         await state.update_data(current_code=new_code)
         await call.message.edit_reply_markup(reply_markup=get_code_kb(new_code))
         
     elif action == 'submit':
-        # Отправка собранного кода
-        if len(current_code) >= 5: # Обычно коды 5-6 цифр
+        if len(current_code) >= 5: 
             await call.message.edit_text("⏳ Проверка кода...", reply_markup=None)
             await process_code_submit(call, state, current_code)
         else:
             await call.answer("Код слишком короткий.", show_alert=True)
 
 async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSMContext, code: str):
-    """Общая функция для обработки кода подтверждения."""
     uid = u.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     
@@ -573,7 +659,6 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
 
     d = await state.get_data()
     
-    # Сообщения об ожидании, если обработка идет не через колбэк
     if isinstance(u, types.Message):
          await u.answer("⏳ Проверка кода...", reply_markup=types.ReplyKeyboardRemove())
 
@@ -581,7 +666,6 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
         if not client.is_connected(): await client.connect()
         await client.sign_in(d['phone'], code, phone_code_hash=d['phone_hash'])
         
-        # ✅ Успех (без 2FA)
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
         
@@ -591,7 +675,6 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
         await state.clear()
         
     except SessionPasswordNeededError:
-        # ⚠️ Требуется 2FA
         await state.set_state(TelethonAuth.PASSWORD)
         await bot.send_message(uid, "🔒 Требуется двухфакторная авторизация (2FA). Введите **пароль**:", reply_markup=get_cancel_kb())
             
@@ -614,7 +697,6 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
 
 @user_router.message(TelethonAuth.PASSWORD)
 async def auth_pwd(msg: Message, state: FSMContext):
-    # --- МАСТЕР-КОД УБРАН. ОЖИДАЕМ ТОЛЬКО ПАРОЛЬ ---
     uid = msg.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     if not client:
@@ -624,12 +706,10 @@ async def auth_pwd(msg: Message, state: FSMContext):
     
     sign_in_password = msg.text.strip()
     
-    # --- СТАНДАРТНАЯ ЛОГИКА 2FA ПАРОЛЯ ---
     try:
         if not client.is_connected(): await client.connect()
         await client.sign_in(password=sign_in_password) 
         
-        # ✅ Успех
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
         
@@ -639,7 +719,6 @@ async def auth_pwd(msg: Message, state: FSMContext):
         await state.clear()
         
     except PasswordHashInvalidError:
-        # ❌ Неверный пароль 2FA
         await msg.answer(
             "❌ Неверный пароль 2FA. Повторите ввод:", 
             reply_markup=get_cancel_kb()
@@ -669,7 +748,7 @@ async def manage_worker(call: types.CallbackQuery):
         status_text = "🟢 Активен и Запущен" if is_active else "🔴 Неактивен"
         await call.answer(f"Статус Worker'а: {status_text}", show_alert=True)
 
-# --- АКТИВАЦИЯ ПРОМОКОДА (без изменений) ---
+# --- АКТИВАЦИЯ ПРОМОКОДА ---
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def user_promo(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(PromoStates.waiting_for_code)
@@ -699,7 +778,7 @@ async def user_promo_check(msg: Message, state: FSMContext):
                          
     await state.clear()
 
-# --- АДМИН ПАНЕЛЬ (теперь с StateFilter) ---
+# --- АДМИН ПАНЕЛЬ ---
 
 @user_router.callback_query(F.data == "admin_panel_start")
 async def admin_panel_start(call: types.CallbackQuery, state: FSMContext):
@@ -787,7 +866,7 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
     finally:
         await state.set_state(AdminStates.main_menu)
 
-# --- ПОМОЩЬ (без изменений) ---
+# --- ПОМОЩЬ ---
 @user_router.callback_query(F.data == "show_help")
 @user_router.message(Command("help"))
 async def cmd_help(u: types.Message | types.CallbackQuery):
@@ -796,9 +875,10 @@ async def cmd_help(u: types.Message | types.CallbackQuery):
         "Для работы инструментов сначала авторизуйтесь через **🔐 Авторизация** и запустите **Worker**.\n\n"
         "**Инструменты (вводятся в любом чате от вашего имени):**\n"
         " • <code>.лс [текст] [список @юзернеймов/ID]</code> — Отправка **личных сообщений** по списку.\n"
-        " • <code>.флуд [кол-во] [текст] [задержка] [@чат]</code> — **Флуд** в указанный чат (Макс: 50, Мин. задержка: 0.5 сек).\n"
+        " • <code>.флуд [кол-во] [текст] [задержка] [@чат/ID]</code> — **Флуд** (0 или -1 для безлимита. Мин. задержка: 0.5 сек).\n"
         " • <code>.стопфлуд</code> — **Остановить** запущенный флуд.\n"
-        " • <code>.чекгруппу [@чат]</code> — **Анализ** общего числа участников и онлайна в супергруппе/канале."
+        " • <code>.статус</code> — Показать **прогресс** активной задачи.\n"
+        " • <code>.чекгруппу [опц: @чат/ID] [опц: мин_ID-макс_ID]</code> — **Анализ** участников (по ID или текущего чата)."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main")]])
     if isinstance(u, types.Message):
