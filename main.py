@@ -33,7 +33,7 @@ import qrcode
 
 # !!! ВАШИ КЛЮЧИ !!! 
 # ОБЯЗАТЕЛЬНО ВСТАВЬТЕ СЮДА НОВЫЙ РАБОЧИЙ ТОКЕН!
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ИЗ_БОТФАЗЕРА") 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7868097991:AAEb8Ckg8AGRorqtV_tE0-f1B-mCQfJTWaM") 
 # Bothost использует переменные окружения. Используем os.getenv.
 ADMIN_ID = 6256576302  
 API_ID = 35775411
