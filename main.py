@@ -51,7 +51,6 @@ ACTIVE_TELETHON_CLIENTS = {}
 ACTIVE_TELETHON_WORKERS = {} 
 TEMP_AUTH_CLIENTS = {} 
 FLOOD_TASKS = {} 
-# ✅ Хранилище прогресса для .статус
 PROCESS_PROGRESS = {} # {user_id: {'type': 'flood', 'total': 100, 'done': 10, 'peer': entity}}
 
 storage = MemoryStorage()
@@ -289,6 +288,13 @@ async def stop_worker(user_id):
         del PROCESS_PROGRESS[user_id]
     logger.info(f"Worker {user_id} stopped.")
 
+# ✅ ИСПРАВЛЕНО: Добавление отсутствующей функции start_workers
+async def start_workers():
+    """Запускает worker'ы для всех пользователей, у которых активна сессия в БД."""
+    users = db_get_active_telethon_users()
+    for uid in users:
+        asyncio.create_task(run_worker(uid))
+
 async def run_worker(user_id):
     await stop_worker(user_id)
     path = get_session_path(user_id)
@@ -349,10 +355,8 @@ async def run_worker(user_id):
             if cmd == '.лс' and len(parts) >= 3:
                 recipient_start_index = -1
                 
-                # Ищем начало списка получателей (начиная с @ или полностью числовой ID)
                 for i in range(1, len(parts)):
                     part = parts[i]
-                    # Эвристика для определения адресата: @username или числовой ID > 5 цифр
                     if part.startswith('@') or (part.isdigit() and len(part) > 5): 
                         recipient_start_index = i
                         break
@@ -386,7 +390,6 @@ async def run_worker(user_id):
                     target_chat = parts[-1]
                     delay = float(parts[-2])
                     
-                    # Текст - это все между [кол-во] (parts[1]) и [задержка] (parts[-2])
                     message_parts = parts[2:-2] 
                     message = ' '.join(message_parts)
 
@@ -423,7 +426,7 @@ async def run_worker(user_id):
                 else:
                     await event.reply("⚠️ Флуд не запущен.")
             
-            # ✅ .СТАТУС (Прогресс)
+            # .СТАТУС (Прогресс)
             elif cmd == '.статус':
                 if user_id in PROCESS_PROGRESS:
                     progress = PROCESS_PROGRESS[user_id]
@@ -448,7 +451,7 @@ async def run_worker(user_id):
                 await event.reply(status_text, parse_mode='HTML')
 
 
-            # ✅ .ЧЕКГРУППУ [опц: @чат/ID] [опц: мин_ID-макс_ID]
+            # .ЧЕКГРУППУ [опц: @чат/ID] [опц: мин_ID-макс_ID]
             elif cmd == '.чекгруппу':
                 target_chat_str = None
                 id_range_str = None
@@ -464,7 +467,7 @@ async def run_worker(user_id):
                     else:
                         target_chat_str = parts[1]
 
-                # Если аргумент чата не указан, берем текущий чат
+                # Если аргумент чата не указан, берем текущий чат (работает в группе/канале)
                 if not target_chat_str:
                     target_chat_str = event.chat_id
                     if not target_chat_str:
@@ -498,7 +501,6 @@ async def run_worker(user_id):
                         participants.append(p)
 
                     total_users = len(participants)
-                    # Фильтруем по статусу 'онлайн' или 'недавно'
                     online_users = sum(1 for p in participants if isinstance(p.status, (UserStatusOnline, UserStatusRecently)))
                     
                     range_info = f" ({id_range_str})" if id_range_str else ""
@@ -892,6 +894,7 @@ async def main():
     logger.info("START BOT")
     db_init()
     dp.include_router(user_router)
+    # ✅ ИСПРАВЛЕНО: Вызов функции start_workers теперь корректен
     await start_workers()
     await dp.start_polling(bot)
 
