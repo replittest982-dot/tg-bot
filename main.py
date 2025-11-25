@@ -208,7 +208,9 @@ async def check_access(user_id: int, bot: Bot):
             pass
 
     if not channel_subscribed:
-        return False, f"❌ Для доступа к функциям подпишитесь на наш канал: {TARGET_CHANNEL_URL}"
+        # Используем .format() для надежности
+        msg_text = "❌ Для доступа к функциям подпишитесь на наш канал: {}".format(TARGET_CHANNEL_URL)
+        return False, msg_text
 
     if db_check_subscription(user_id): 
         return True, ""
@@ -220,7 +222,8 @@ def get_cancel_kb():
 
 def get_code_kb(current_code_text=""):
     kb = []
-    kb.append([InlineKeyboardButton(text=f"Код: {current_code_text if current_code_text else '...'} / Длина: {len(current_code_text)}", callback_data="ignore")])
+    # Используем .format() для надежности
+    kb.append([InlineKeyboardButton(text="Код: {} / Длина: {}".format(current_code_text if current_code_text else '...', len(current_code_text)), callback_data="ignore")])
     
     row1 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(1, 4)]
     row2 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(4, 7)]
@@ -267,7 +270,8 @@ def get_main_kb(user_id):
 def get_no_access_kb(is_channel_reason):
     kb = []
     if is_channel_reason:
-        kb.append([InlineKeyboardButton(text="✅ Подписаться на канал", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}")])
+        # Используем .format() для надежности
+        kb.append([InlineKeyboardButton(text="✅ Подписаться на канал", url="https://t.me/{}".format(TARGET_CHANNEL_URL.lstrip('@')))])
     
     kb.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
     
@@ -308,7 +312,8 @@ async def send_long_message(client, user_id, text, parse_mode='HTML', max_len=40
         parts.append(current_part.strip())
         
     for i, part in enumerate(parts):
-        header = f"📊 **Часть {i+1}/{len(parts)}**\n"
+        # Используем .format() для надежности
+        header = "📊 **Часть {}/{}**\n".format(i+1, len(parts))
         
         message_to_send = header + part
         
@@ -340,7 +345,7 @@ async def stop_worker(user_id):
     db_set_session_status(user_id, False)
     if user_id in PROCESS_PROGRESS:
         del PROCESS_PROGRESS[user_id]
-    logger.info(f"Worker {user_id} stopped.")
+    logger.info("Worker {} stopped.".format(user_id))
 
 async def start_workers():
     """Запускает worker'ы для всех пользователей, у которых активна сессия в БД."""
@@ -364,7 +369,7 @@ async def run_worker(user_id):
 
         await client.start()
         db_set_session_status(user_id, True)
-        logger.info(f"Worker {user_id} started successfully.")
+        logger.info("Worker {} started successfully.".format(user_id))
 
         # --- ЛОГИКА ФЛУДА И КОМАНД ---
         async def flood_task(peer, message, count, delay, chat_id):
@@ -376,7 +381,8 @@ async def run_worker(user_id):
                 
                 for i in range(max_iterations):
                     if user_id in FLOOD_TASKS and chat_id not in FLOOD_TASKS[user_id]:
-                        await client.send_message(user_id, f"🛑 Флуд в чате `{get_display_name(peer)}` остановлен по команде .стопфлуд.")
+                        # Используем .format() для надежности
+                        await client.send_message(user_id, "🛑 Флуд в чате `{}` остановлен по команде .стопфлуд.".format(get_display_name(peer)))
                         break
                     
                     if not is_unlimited and i >= count: 
@@ -390,7 +396,8 @@ async def run_worker(user_id):
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                await client.send_message(user_id, f"❌ Ошибка при флуде: {e}")
+                # Используем .format() для надежности
+                await client.send_message(user_id, "❌ Ошибка при флуде: {}".format(e))
             finally:
                 if user_id in FLOOD_TASKS and chat_id in FLOOD_TASKS[user_id]:
                     del FLOOD_TASKS[user_id][chat_id]
@@ -409,7 +416,8 @@ async def run_worker(user_id):
             
             chat_id = event.chat_id
             if chat_id is None:
-                 return await client.send_message(user_id, "❌ `.чекгруппу` должен быть вызван из группы/канала или с указанием его юзернейма/ID.")
+                 await client.send_message(user_id, "❌ `.чекгруппу` должен быть вызван из группы/канала или с указанием его юзернейма/ID.")
+                 return
                  
             try:
                 try:
@@ -420,7 +428,8 @@ async def run_worker(user_id):
                 unique_users = {} 
                 limit = 1000000 
                 
-                await client.send_message(user_id, f"⏳ Начинаю сканирование **всех** сообщений в чате `{get_display_name(chat_entity)}` для сбора пользователей. Это может занять время.")
+                # Используем .format() для надежности
+                await client.send_message(user_id, "⏳ Начинаю сканирование **всех** сообщений в чате `{}` для сбора пользователей. Это может занять время.".format(get_display_name(chat_entity)))
                 
                 PROCESS_PROGRESS[user_id] = {'type': 'checkgroup', 'peer': chat_entity, 'done_msg': 0}
                 
@@ -448,25 +457,35 @@ async def run_worker(user_id):
                 total_found = len(unique_users)
                 if total_found > 0:
                     report_data_raw = []
-                    range_info = f" (Фильтр ID: {min_id or 'Все'}-{max_id or 'Все'})" if min_id is not None or max_id is not None else ""
+                    # Используем .format() для надежности
+                    range_info = " (Фильтр ID: {}-{})".format(min_id or 'Все', max_id or 'Все') if min_id is not None or max_id is not None else ""
                     
                     for uid, p in unique_users.items():
                         full_name = ' '.join(filter(None, [p.first_name, p.last_name]))
+                        # Используем .format() для надежности
                         report_data_raw.append(
-                             f"👤 Имя: {full_name if full_name else 'Нет имени'}\n"
-                             f"🔗 Юзернейм: @{p.username}" if p.username else f"🔗 Юзернейм: Нет\n"
-                             f"🆔 ID: {uid}"
+                             "👤 Имя: {}\n🔗 Юзернейм: @{}🆔 ID: {}".format(
+                                 full_name if full_name else 'Нет имени', 
+                                 p.username if p.username else 'Нет', 
+                                 uid
+                             )
                         )
                         
+                    # Используем .format() для надежности
                     header_text = (
-                        f"📊 Отчет .ЧЕКГРУППУ (по истории сообщений) {range_info}\n"
-                        f"Чат: {get_display_name(chat_entity)}\n"
-                        f" • Просканировано сообщений: {PROCESS_PROGRESS[user_id]['done_msg']}\n"
-                        f" • Найдено уникальных пользователей: {total_found}\n"
-                        f"\nСписок пользователей (Имя, Юзернейм, ID):"
+                        "📊 Отчет .ЧЕКГРУППУ (по истории сообщений) {}\n"
+                        "Чат: {}\n"
+                        " • Просканировано сообщений: {}\n"
+                        " • Найдено уникальных пользователей: {}\n"
+                        "\nСписок пользователей (Имя, Юзернейм, ID):".format(
+                            range_info,
+                            get_display_name(chat_entity),
+                            PROCESS_PROGRESS[user_id]['done_msg'],
+                            total_found
+                        )
                     )
                     
-                    # Полный отчет для сохранения. Используем <pre> для форматирования в файле/частях
+                    # Полный отчет для сохранения. 
                     full_report_text = header_text + "\n" + "\n".join(report_data_raw)
                     
                     # Сохраняем отчет во временное хранилище
@@ -474,10 +493,10 @@ async def run_worker(user_id):
                     PROCESS_PROGRESS[user_id]['peer_name'] = get_display_name(chat_entity)
 
                     # Отправляем уведомление с кнопками выбора
+                    # Используем .format() для надежности
                     await client.send_message(
                         user_id, 
-                        f"✅ **Сбор данных завершен!** Найдено **{total_found}** пользователей.\n"
-                        f"Выберите, как получить отчет по чату `{get_display_name(chat_entity)}`:",
+                        "✅ **Сбор данных завершен!** Найдено **{}** пользователей.\nВыберите, как получить отчет по чату `{}`:".format(total_found, get_display_name(chat_entity)),
                         buttons=[
                             [Button.inline("📄 Отправить файлом (.txt)", data="send_checkgroup_file_worker")],
                             [Button.inline("💬 Отправить сообщениями (по частям)", data="send_checkgroup_messages_worker")],
@@ -489,9 +508,11 @@ async def run_worker(user_id):
                     await send_long_message(client, user_id, response, parse_mode='HTML')
                 
             except RpcCallFailError as e:
-                 await client.send_message(user_id, f"❌ Ошибка RPC при .чекгруппу (чат недоступен): {type(e).__name__}")
+                 # Используем .format() для надежности
+                 await client.send_message(user_id, "❌ Ошибка RPC при .чекгруппу (чат недоступен): {}".format(type(e).__name__))
             except Exception as e:
-                await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__} - {e}")
+                # Используем .format() для надежности
+                await client.send_message(user_id, "❌ Критическая ошибка при .чекгруппу: {} - {}".format(type(e).__name__, e))
                 
             finally:
                 # Очистка прогресса, если отчет не сохранен или отправлен сразу
@@ -534,20 +555,25 @@ async def run_worker(user_id):
                     for target in recipients:
                         try:
                             if not (target.startswith('@') or target.isdigit() or re.match(r'^-?\d+$', target)):
-                                results.append(f"❌ {target}: Пропущен (Не похож на @юзернейм или ID)")
+                                # Используем .format() для надежности
+                                results.append("❌ {}: Пропущен (Не похож на @юзернейм или ID)".format(target))
                                 continue
                                 
                             await client.send_message(target, text) 
-                            results.append(f"✅ {target}: Отправлено")
+                            # Используем .format() для надежности
+                            results.append("✅ {}: Отправлено".format(target))
                         except ValueError: 
-                            results.append(f"❌ {target}: Ошибка (Некорректный ID/Юзернейм)")
+                            # Используем .format() для надежности
+                            results.append("❌ {}: Ошибка (Некорректный ID/Юзернейм)".format(target))
                         except Exception as e:
-                            results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
+                            # Используем .format() для надежности
+                            results.append("❌ {}: Ошибка ({})".format(target, type(e).__name__))
                             
                     await event.reply("<b>Результаты .лс:</b>\n" + "\n".join(results), parse_mode='HTML')
                     
                 except Exception as e:
-                     await event.reply(f"❌ Критическая ошибка .лс: {type(e).__name__}. Проверьте формат.")
+                     # Используем .format() для надежности
+                     await event.reply("❌ Критическая ошибка .лс: {}. Проверьте формат.".format(type(e).__name__))
             
             # .ТХТ (или .ТАБЛИЦА)
             elif cmd in ('.тхт', '.таблица'):
@@ -564,7 +590,8 @@ async def run_worker(user_id):
                 filename = reply_msg.document.attributes[0].file_name if reply_msg.document.attributes else ""
                 
                 if not mime_type or not ('text' in mime_type or filename.endswith(('.txt', '.log', '.csv', '.ini', '.cfg'))):
-                     return await event.reply(f"❌ Ожидается текстовый файл. Обнаружено: `{mime_type}`.")
+                     # Используем .format() для надежности
+                     return await event.reply("❌ Ожидается текстовый файл. Обнаружено: `{}`.".format(mime_type))
                 
                 
                 try:
@@ -576,14 +603,16 @@ async def run_worker(user_id):
                         with open(downloaded_file_path, 'r', encoding='utf-8', errors='ignore') as f:
                             file_content = f.read()
                         
-                        formatted_content = f"📖 **Содержимое файла** (`{filename}`):\n"
+                        # Используем .format() для надежности
+                        formatted_content = "📖 **Содержимое файла** (`{}`):\n".format(filename)
                         # Оборачиваем в <pre> для сохранения форматирования (столбцов)
                         formatted_content += "<pre>" + file_content + "</pre>"
                         
                         await send_long_message(client, user_id, formatted_content, parse_mode='HTML')
                         
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка при обработке файла: {type(e).__name__} - {e}")
+                    # Используем .format() для надежности
+                    await event.reply("❌ Ошибка при обработке файла: {} - {}".format(type(e).__name__, e))
                 finally:
                     pass
             
@@ -627,11 +656,13 @@ async def run_worker(user_id):
                         
                     FLOOD_TASKS[user_id][flood_chat_id] = task
                     
+                    # Используем .format() для надежности
                     await event.reply(
-                        f"🔥 **Флуд запущен!**\n"
-                        f"Чат: `{get_display_name(peer)}`\n"
-                        f"Сообщений: {'Безлимитно' if count <= 0 else count}\n"
-                        f"Задержка: {delay} сек.", 
+                        "🔥 **Флуд запущен!**\nЧат: `{}`\nСообщений: {}\nЗадержка: {} сек.".format(
+                            get_display_name(peer),
+                            'Безлимитно' if count <= 0 else count,
+                            delay
+                        ), 
                         parse_mode='HTML'
                     )
                     
@@ -644,7 +675,8 @@ async def run_worker(user_id):
                 except ValueError:
                     await event.reply("❌ Неверный формат чисел (кол-во/задержка).")
                 except (UsernameInvalidError, PeerIdInvalidError, Exception) as e:
-                    await event.reply(f"❌ Ошибка при подготовке флуда: Чат не найден или неверный формат. ({type(e).__name__})")
+                    # Используем .format() для надежности
+                    await event.reply("❌ Ошибка при подготовке флуда: Чат не найден или неверный формат. ({})".format(type(e).__name__))
             
             # .СТОПФЛУД 
             elif cmd == '.стопфлуд':
@@ -677,24 +709,36 @@ async def run_worker(user_id):
                         done = progress['done']
                         peer_name = get_display_name(await client.get_entity(progress['peer']))
                         
+                        # Используем .format() для надежности
                         status_text = (
-                            f"⚡️ **СТАТУС ФЛУДА:**\n"
-                            f" • Цель: `{peer_name}`\n"
-                            f" • Отправлено: **{done}**\n"
-                            f" • Всего: **{'Безлимитно' if total <= 0 else total}**\n"
-                            f" • Прогресс: **{'{:.2f}'.format(done/total*100) + '%' if total > 0 else '—'}**"
+                            "⚡️ **СТАТУС ФЛУДА:**\n"
+                            " • Цель: `{}`\n"
+                            " • Отправлено: **{}**\n"
+                            " • Всего: **{}**\n"
+                            " • Прогресс: **{}**".format(
+                                peer_name,
+                                done,
+                                'Безлимитно' if total <= 0 else total,
+                                '{:.2f}%'.format(done/total*100) if total > 0 else '—'
+                            )
                         )
                     elif p_type == 'checkgroup':
                         peer_name = progress.get('peer_name', 'Неизвестно')
                         done_msg = progress['done_msg']
+                        # Используем .format() для надежности
                         status_text = (
-                            f"🔎 **СТАТУС АНАЛИЗА ЧАТА:**\n"
-                            f" • Цель: `{peer_name}`\n"
-                            f" • Просканировано сообщений: **{done_msg}**\n"
-                            f" • Статус: **{'Сбор данных...' if 'report_data' not in progress else 'Сбор завершен! Ожидание выбора формата.'}**"
+                            "🔎 **СТАТУС АНАЛИЗА ЧАТА:**\n"
+                            " • Цель: `{}`\n"
+                            " • Просканировано сообщений: **{}**\n"
+                            " • Статус: **{}**".format(
+                                peer_name,
+                                done_msg,
+                                'Сбор данных...' if 'report_data' not in progress else 'Сбор завершен! Ожидание выбора формата.'
+                            )
                         )
                     else:
-                        status_text = f"⚙️ Активный процесс: {p_type}. Данные: {progress}"
+                        # Используем .format() для надежности
+                        status_text = "⚙️ Активный процесс: {}. Данные: {}".format(p_type, progress)
                 else:
                     status_text = "✨ Активных процессов Worker'а нет."
                 
@@ -752,10 +796,12 @@ async def run_worker(user_id):
                         await event.answer("⏳ Отправляю файл...")
                         
                         file_bytes = io.BytesIO(report_data.encode('utf-8'))
-                        file_bytes.name = f"checkgroup_report_{peer_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                        # Используем .format() для надежности
+                        file_bytes.name = "checkgroup_report_{}_{}.txt".format(peer_name.replace(' ', '_'), datetime.now().strftime('%Y%m%d_%H%M%S'))
                         
-                        await client.send_file(user_id, file_bytes, caption=f"📄 Отчет по чату `{peer_name}`")
-                        await event.edit(f"✅ Отчет по чату `{peer_name}` отправлен файлом.")
+                        # Используем .format() для надежности
+                        await client.send_file(user_id, file_bytes, caption="📄 Отчет по чату `{}`".format(peer_name))
+                        await event.edit("✅ Отчет по чату `{}` отправлен файлом.".format(peer_name))
                         
                     elif data == 'send_checkgroup_messages_worker':
                         await event.answer("⏳ Отправляю сообщения...")
@@ -773,11 +819,13 @@ async def run_worker(user_id):
                             report_html = report_data 
                         
                         await send_long_message(client, user_id, report_html, parse_mode='HTML')
-                        await event.edit(f"✅ Отчет по чату `{peer_name}` отправлен по частям.")
+                        # Используем .format() для надежности
+                        await event.edit("✅ Отчет по чату `{}` отправлен по частям.".format(peer_name))
 
                     elif data == 'delete_checkgroup_report_worker':
                         await event.answer("❌ Отчет удален.")
-                        await event.edit(f"❌ Отчет по чату `{peer_name}` удален.")
+                        # Используем .format() для надежности
+                        await event.edit("❌ Отчет по чату `{}` удален.".format(peer_name))
 
                     # Очистка прогресса после отправки/удаления
                     if user_id in PROCESS_PROGRESS:
@@ -800,8 +848,10 @@ async def run_worker(user_id):
         await bot.send_message(user_id, "⚠️ Сессия недействительна. Пожалуйста, авторизуйтесь заново.")
         db_set_session_status(user_id, False)
     except Exception as e:
-        logger.error(f"Worker {user_id} critical error: {e}")
-        await bot.send_message(user_id, f"❌ Критическая ошибка воркера: {type(e).__name__}")
+        # Используем .format() для надежности
+        logger.error("Worker {} critical error: {}".format(user_id, e))
+        # Используем .format() для надежности
+        await bot.send_message(user_id, "❌ Критическая ошибка воркера: {}".format(type(e).__name__))
     finally:
         if user_id in ACTIVE_TELETHON_CLIENTS: del ACTIVE_TELETHON_CLIENTS[user_id]
         if user_id in ACTIVE_TELETHON_WORKERS: del ACTIVE_TELETHON_WORKERS[user_id]
@@ -837,12 +887,13 @@ async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
     
     has_access, msg = await check_access(user_id, bot)
     
-    text = f"👋 <b>Привет!</b> Ваш ID: <code>{user_id}</code>\n"
+    # Используем .format() для надежности
     sub = db_get_user(user_id).get('subscription_end_date')
-    text += f"Подписка до: <code>{sub if sub else 'Нет'}</code>\n\n"
+    text = "👋 <b>Привет!</b> Ваш ID: <code>{}</code>\nПодписка до: <code>{}</code>\n\n".format(user_id, sub if sub else 'Нет')
     
     if not has_access:
-        text += f"⚠️ <b>Доступ ограничен.</b>\n{msg}"
+        # Используем .format() для надежности
+        text += "⚠️ <b>Доступ ограничен.</b>\n{}".format(msg)
         is_channel_reason = f"Для доступа к функциям подпишитесь на наш канал" in msg
         kb = get_no_access_kb(is_channel_reason)
     else:
@@ -880,12 +931,13 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await state.update_data(qr_login=qr_login)
         await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
 
+        # Используем .format() для надежности
         await call.message.edit_text(
             "📲 **Авторизация по QR-коду**\n"
             "1. Откройте **Настройки** -> **Устройства** -> **Привязать настольное устройство**.\n"
             "2. Нажмите на ссылку ниже, чтобы ваш Telegram-клиент отобразил QR-код для сканирования:\n\n"
-            f"🔗 [Нажмите для отображения QR-кода]({qr_login.url})\n\n"
-            "Ожидаю сканирования (2 минуты)...", 
+            "🔗 [Нажмите для отображения QR-кода]({})\n\n"
+            "Ожидаю сканирования (2 минуты)...".format(qr_login.url), 
             reply_markup=get_cancel_kb(),
             disable_web_page_preview=False
         )
@@ -893,8 +945,9 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         asyncio.create_task(wait_for_qr_login(uid, client, state, call.message.chat.id, call.message.message_id))
 
     except Exception as e:
-        logger.error(f"QR auth start error: {e}")
-        await call.message.edit_text(f"❌ Ошибка QR-авторизации: {type(e).__name__}", reply_markup=get_main_kb(uid))
+        logger.error("QR auth start error: {}".format(e))
+        # Используем .format() для надежности
+        await call.message.edit_text("❌ Ошибка QR-авторизации: {}".format(type(e).__name__), reply_markup=get_main_kb(uid))
         await state.clear()
 
 async def wait_for_qr_login(uid, client, state, chat_id, message_id):
@@ -937,14 +990,15 @@ async def wait_for_qr_login(uid, client, state, chat_id, message_id):
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
         
         if await state.get_state() == TelethonAuth.WAITING_FOR_QR_LOGIN:
+             # Используем .format() для надежности
              await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=message_id, 
-                text=f"❌ Ошибка при входе по QR-коду: {type(e).__name__}. Попробуйте Вход по Номеру/Коду.", 
+                text="❌ Ошибка при входе по QR-коду: {}. Попробуйте Вход по Номеру/Коду.".format(type(e).__name__), 
                 reply_markup=get_main_kb(uid)
             )
              await state.clear()
-        logger.error(f"QR login wait error: {e}")
+        logger.error("QR login wait error: {}".format(e))
 
 
 # --- АВТОРИЗАЦИЯ: ВХОД ПО НОМЕРУ/КОДУ (Старый метод) ---
@@ -992,8 +1046,9 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
     except PhoneNumberInvalidError:
         await msg.answer("❌ Неверный формат номера телефона.", reply_markup=get_cancel_kb())
     except Exception as e:
-        logger.error(f"Auth phone step error: {e}")
-        await msg.answer(f"❌ Ошибка отправки кода: {e}", reply_markup=get_main_kb(uid))
+        logger.error("Auth phone step error: {}".format(e))
+        # Используем .format() для надежности
+        await msg.answer("❌ Ошибка отправки кода: {}".format(e), reply_markup=get_main_kb(uid))
         await state.clear()
 
 @user_router.message(TelethonAuth.CODE)
@@ -1033,12 +1088,14 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
     uid = u.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     
+    # Используем .format() для надежности
     if not client:
         await (u.message if isinstance(u, types.CallbackQuery) else u).answer("⚠️ Сессия авторизации истекла. Начните заново.", reply_markup=get_main_kb(uid))
         await state.clear()
         return
 
     if not code:
+        # Используем .format() для надежности
         return await (u.message if isinstance(u, types.CallbackQuery) else u).answer("❌ Код не распознан. Пожалуйста, введите только цифры.", reply_markup=get_code_kb(code))
 
     d = await state.get_data()
@@ -1065,18 +1122,19 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
     except (PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
+        # Используем .format() для надежности
         await bot.send_message(uid, 
-            f"❌ Код недействителен или истек. Начните авторизацию сначала. "
-            f"Если ошибка повторяется, <b>полностью перезапустите Python-скрипт.</b>\nОшибка: {type(e).__name__}", 
+            "❌ Код недействителен или истек. Начните авторизацию сначала. Если ошибка повторяется, <b>полностью перезапустите Python-скрипт.</b>\nОшибка: {}".format(type(e).__name__), 
             reply_markup=get_main_kb(uid)
         )
         await state.clear()
         
     except Exception as e:
-        logger.error(f"Auth code step error: {e}")
+        logger.error("Auth code step error: {}".format(e))
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
-        await bot.send_message(uid, f"❌ Неизвестная ошибка: {e}", reply_markup=get_main_kb(uid))
+        # Используем .format() для надежности
+        await bot.send_message(uid, "❌ Неизвестная ошибка: {}".format(e), reply_markup=get_main_kb(uid))
         await state.clear()
 
 @user_router.message(TelethonAuth.PASSWORD)
@@ -1108,10 +1166,11 @@ async def auth_pwd(msg: Message, state: FSMContext):
             reply_markup=get_cancel_kb()
         )
     except Exception as e:
-        logger.error(f"Auth password step error: {e}")
+        logger.error("Auth password step error: {}".format(e))
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
-        await msg.answer(f"❌ Неизвестная ошибка 2FA: {e}", reply_markup=get_main_kb(uid))
+        # Используем .format() для надежности
+        await msg.answer("❌ Неизвестная ошибка 2FA: {}".format(e), reply_markup=get_main_kb(uid))
         await state.clear()
 
 # --- УПРАВЛЕНИЕ WORKER'ОМ ---
@@ -1120,6 +1179,7 @@ async def manage_worker(call: types.CallbackQuery):
     uid = call.from_user.id
     
     if call.data == 'telethon_start_session':
+        # Используем .format() для надежности
         if not os.path.exists(get_session_path(uid) + '.session'):
             return await call.answer("⚠️ Файл сессии не найден. Требуется авторизация.", show_alert=True)
             
@@ -1135,7 +1195,8 @@ async def manage_worker(call: types.CallbackQuery):
     elif call.data == 'telethon_check_status':
         is_active = uid in ACTIVE_TELETHON_WORKERS
         status_text = "🟢 Активен и Запущен" if is_active else "🔴 Неактивен"
-        await call.answer(f"Статус Worker'а: {status_text}", show_alert=True)
+        # Используем .format() для надежности
+        await call.answer("Статус Worker'а: {}".format(status_text), show_alert=True)
         
 # --- ПРОГРЕСС АКТИВНЫХ ЗАДАЧ ---
 @user_router.callback_query(F.data == "show_progress")
@@ -1154,20 +1215,30 @@ async def show_progress_handler(call: types.CallbackQuery):
         total = progress['total']
         done = progress['done']
         
+        # Используем .format() для надежности
         status_text += (
-            f" • **Тип:** Флуд\n"
-            f" • Отправлено: **{done}**\n"
-            f" • Всего: **{'Безлимитно' if total <= 0 else total}**\n"
-            f" • Прогресс: **{'{:.2f}'.format(done/total*100) + '%' if total > 0 else '—'}**"
+            " • **Тип:** Флуд\n"
+            " • Отправлено: **{}**\n"
+            " • Всего: **{}**\n"
+            " • Прогресс: **{}**".format(
+                done,
+                'Безлимитно' if total <= 0 else total,
+                '{:.2f}%'.format(done/total*100) if total > 0 else '—'
+            )
         )
     elif p_type == 'checkgroup':
         peer_name = progress.get('peer_name', 'Неизвестно')
         done_msg = progress['done_msg']
+        # Используем .format() для надежности
         status_text += (
-            f" • **Тип:** Анализ Чата\n"
-            f" • Цель: `{peer_name}`\n"
-            f" • Просканировано сообщений: **{done_msg}**\n"
-            f" • Статус: **{'Сбор данных...' if 'report_data' not in progress else 'Сбор завершен! (Ожидание выбора формата в ЛС Worker\'а)'}**"
+            " • **Тип:** Анализ Чата\n"
+            " • Цель: `{}`\n"
+            " • Просканировано сообщений: **{}**\n"
+            " • Статус: **{}**".format(
+                peer_name,
+                done_msg,
+                'Сбор данных...' if 'report_data' not in progress else 'Сбор завершен! (Ожидание выбора формата в ЛС Worker\'а)'
+            )
         )
 
     await call.message.edit_text(status_text, reply_markup=get_main_kb(uid))
@@ -1186,17 +1257,20 @@ async def user_promo_check(msg: Message, state: FSMContext):
     
     if p and p['is_active'] and (p['max_uses'] is None or p['current_uses'] < p['max_uses']):
         db_use_promo(code)
-        end = db_update_subscription(msg.from_user.id, p['days'])
+        days_granted = p['days']
+        end = db_update_subscription(msg.from_user.id, days_granted)
         
         has_access, _ = await check_access(msg.from_user.id, bot)
         
-        await msg.answer(
-            f"✅ Промокод <code>{code}</code> активирован!\nПодписка продлена до <b>{end}</b>. "
-            f"Теперь вы можете использовать все функции." if has_access else 
-            f"✅ Промокод активирован, подписка продлена до <b>{end}</b>. "
-            f"Для полного доступа, пожалуйста, подпишитесь на наш канал: {TARGET_CHANNEL_URL}", 
-            reply_markup=get_main_kb(msg.from_user.id)
-        )
+        # Используем .format() для надежности
+        message_text = "✅ Промокод <code>{0}</code> активирован!\nПодписка продлена до <b>{1}</b>. ".format(code, end)
+        
+        if not has_access:
+            message_text += "Для полного доступа, пожалуйста, подпишитесь на наш канал: {}".format(TARGET_CHANNEL_URL)
+        else:
+            message_text += "Теперь вы можете использовать все функции."
+
+        await msg.answer(message_text, reply_markup=get_main_kb(msg.from_user.id))
     else:
         await msg.answer("❌ Неверный, истекший код или превышен лимит использований.", 
                          reply_markup=get_main_kb(msg.from_user.id))
@@ -1217,7 +1291,8 @@ async def admin_create_promo(call: types.CallbackQuery, state: FSMContext):
     new_code = generate_promo_code()
     await state.update_data(code=new_code) # Сохраняем сгенерированный код
     await state.set_state(AdminStates.promo_days_input)
-    await call.message.edit_text(f"📝 **Генерация промокода:** `{new_code}`\n\n📅 Сколько дней подписки дает промокод? (например, `7`):", reply_markup=get_cancel_kb())
+    # Используем .format() для надежности
+    await call.message.edit_text("📝 **Генерация промокода:** `{}`\n\n📅 Сколько дней подписки дает промокод? (например, `7`):".format(new_code), reply_markup=get_cancel_kb())
 
 @user_router.message(AdminStates.promo_days_input)
 async def admin_promo_days_input(msg: Message, state: FSMContext):
@@ -1237,11 +1312,13 @@ async def admin_promo_uses_input(msg: Message, state: FSMContext):
         
         db_add_promo(data['code'], data['days'], max_uses if max_uses > 0 else None)
         
+        # Используем .format() для надежности
         await msg.answer(
-            f"✅ Промокод создан:\n"
-            f"Код: <code>{data['code']}</code>\n"
-            f"Дни: {data['days']}\n"
-            f"Лимит: {max_uses if max_uses > 0 else 'Нет'}", 
+            "✅ Промокод создан:\nКод: <code>{}</code>\nДни: {}\nЛимит: {}".format(
+                data['code'], 
+                data['days'], 
+                max_uses if max_uses > 0 else 'Нет'
+            ), 
             reply_markup=get_admin_kb()
         )
     except ValueError:
@@ -1260,10 +1337,14 @@ async def admin_sub_user_id_input(msg: Message, state: FSMContext):
         target_id = int(msg.text.strip())
         await state.update_data(target_id=target_id)
         await state.set_state(AdminStates.sub_days_input)
-        await msg.answer(f"📅 ID {target_id} принят. Сколько дней выдать?", reply_markup=get_cancel_kb())
+        # Используем .format() для надежности
+        await msg.answer("📅 ID {} принят. Сколько дней выдать?".format(target_id), reply_markup=get_cancel_kb())
     except ValueError:
         await msg.answer("❌ Введите корректный числовой ID.", reply_markup=get_cancel_kb())
 
+# =========================================================================
+# !!! ИСПРАВЛЕННЫЙ БЛОК ДЛЯ ОШИБКИ 1171 !!!
+# =========================================================================
 @user_router.message(AdminStates.sub_days_input)
 async def admin_sub_days_input(msg: Message, state: FSMContext):
     try:
@@ -1273,16 +1354,22 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
         
         end = db_update_subscription(target_id, days)
         
-        # БЛОК 1: ОТВЕТ АДМИНУ (Используем многострочную f-строку, но без переноса строк для аргументов)
+        # БЛОК 1: ОТВЕТ АДМИНУ - ИСПОЛЬЗУЕМ .format() для гарантированной работы
+        admin_message_text = "✅ Подписка выдана пользователю <code>{}</code> на {} дней.\nНовая дата окончания: <b>{}</b>".format(target_id, days, end)
+        
         await msg.answer(
-            f"✅ Подписка выдана пользователю <code>{target_id}</code> на {days} дней.\n"
-            f"Новая дата окончания: <b>{end}</b>", 
+            admin_message_text, 
             reply_markup=get_admin_kb()
         )
         
-        # БЛОК 2: ОТПРАВКА ПОЛЬЗОВАТЕЛЮ (Используем однострочную f-строку)
-        # Эта строка теперь очень короткая, чтобы не вызвать ошибку 1171 из-за неверного переноса
-        await bot.send_message(target_id, f"🎉 Вам выдана подписка на {days} дней до {end}!", reply_markup=get_main_kb(target_id))
+        # БЛОК 2: ОТПРАВКА ПОЛЬЗОВАТЕЛЮ - ИСПОЛЬЗУЕМ .format()
+        user_message_text = "🎉 Вам выдана подписка на {} дней до {}!".format(days, end)
+        
+        await bot.send_message(
+            target_id, 
+            user_message_text, 
+            reply_markup=get_main_kb(target_id)
+        )
 
     except ValueError:
         await msg.answer("❌ Введите корректное число дней.", reply_markup=get_cancel_kb())
@@ -1290,6 +1377,7 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
         await msg.answer("⚠️ Не удалось уведомить пользователя (бот заблокирован).", reply_markup=get_admin_kb())
     finally:
         await state.set_state(AdminStates.main_menu)
+# =========================================================================
 
 # --- ПОМОЩЬ ---
 @user_router.callback_query(F.data == "show_help")
