@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter # ✅ ИСПРАВЛЕНИЕ: StateFilter добавлен
 from aiogram.client.default import DefaultBotProperties
 
 # Импорты telethon
@@ -26,8 +26,6 @@ from telethon.errors import (
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
     UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
 )
-from telethon.tl.functions.messages import GetPeerDialogsRequest
-from telethon.tl.types import PeerChat, PeerChannel, PeerUser, Channel, User, Chat
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.utils import get_display_name
 
@@ -41,7 +39,6 @@ ADMIN_ID = 6256576302
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1" # Обязательный канал для подписки
-MASTER_CODE = "23210" # Мастер-код для обхода 2FA пароля
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 DB_TIMEOUT = 10 # Таймаут для подключения к SQLite
@@ -54,7 +51,7 @@ logger = logging.getLogger(__name__)
 ACTIVE_TELETHON_CLIENTS = {} 
 ACTIVE_TELETHON_WORKERS = {} 
 TEMP_AUTH_CLIENTS = {} 
-FLOOD_TASKS = {} # Хранит задачи флуда: {user_id: asyncio.Task | None}
+FLOOD_TASKS = {} 
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -68,7 +65,7 @@ user_router = Router()
 class TelethonAuth(StatesGroup):
     PHONE = State()
     CODE = State()
-    PASSWORD = State()
+    PASSWORD = State() # Шаг для 2FA-пароля
 
 class PromoStates(StatesGroup):
     waiting_for_code = State()
@@ -82,7 +79,7 @@ class AdminStates(StatesGroup):
     sub_days_input = State()
 
 # =========================================================================
-# III. БАЗА ДАННЫХ
+# III. БАЗА ДАННЫХ (без изменений)
 # =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME)
@@ -208,6 +205,32 @@ async def check_access(user_id: int, bot: Bot):
 def get_cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]])
 
+# --- НОВАЯ КЛАВИАТУРА ДЛЯ ВВОДА КОДА ---
+def get_code_kb(current_code_text=""):
+    kb = []
+    # Отображаем текущий введенный код (если есть)
+    kb.append([InlineKeyboardButton(text=f"Код: {current_code_text if current_code_text else '...'} / Длина: {len(current_code_text)}", callback_data="ignore")])
+    
+    # Цифры 1-9
+    row1 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(1, 4)]
+    row2 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(4, 7)]
+    row3 = [InlineKeyboardButton(text=f"{i}️⃣", callback_data=f"code_input_{i}") for i in range(7, 10)]
+    kb.extend([row1, row2, row3])
+    
+    # Удалить, 0, Отправить
+    row4 = [
+        InlineKeyboardButton(text="⬅️ Удалить", callback_data="code_input_delete"),
+        InlineKeyboardButton(text="0️⃣", callback_data="code_input_0"),
+        InlineKeyboardButton(text="➡️ Отправить", callback_data="code_input_submit")
+    ]
+    kb.append(row4)
+    
+    # Отмена
+    kb.append([InlineKeyboardButton(text="❌ Отмена Авторизации", callback_data="cancel_action")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+# ----------------------------------------
+
 def get_main_kb(user_id):
     user = db_get_user(user_id)
     active = user.get('telethon_active')
@@ -220,10 +243,8 @@ def get_main_kb(user_id):
     if not active:
         kb.append([InlineKeyboardButton(text="🔐 Авторизация (Вход)", callback_data="telethon_auth_start")])
     else:
-        # Основные инструменты для активного пользователя
         kb.append([InlineKeyboardButton(text="🚀 Запустить / Остановить Worker", callback_data="telethon_stop_session" if running else "telethon_start_session")])
         kb.append([InlineKeyboardButton(text="ℹ️ Статус Сессии", callback_data="telethon_check_status")])
-
     
     if user_id == ADMIN_ID:
         kb.append([InlineKeyboardButton(text="🛠️ Админ-Панель", callback_data="admin_panel_start")])
@@ -249,10 +270,11 @@ def get_admin_kb():
     ])
 
 # =========================================================================
-# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО)
+# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО - без изменений)
 # =========================================================================
 
 async def stop_worker(user_id):
+    # Логика worker'а без изменений
     if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] and not FLOOD_TASKS[user_id].done():
         FLOOD_TASKS[user_id].cancel()
         del FLOOD_TASKS[user_id]
@@ -270,6 +292,7 @@ async def stop_worker(user_id):
     logger.info(f"Worker {user_id} stopped.")
 
 async def run_worker(user_id):
+    # Логика worker'а без изменений
     await stop_worker(user_id)
     path = get_session_path(user_id)
     client = TelegramClient(path, API_ID, API_HASH)
@@ -284,7 +307,7 @@ async def run_worker(user_id):
         db_set_session_status(user_id, True)
         logger.info(f"Worker {user_id} started successfully.")
 
-        # --- ЛОГИКА ФЛУДА ---
+        # --- ЛОГИКА ФЛУДА И КОМАНД ---
         async def flood_task(peer, message, count, delay):
             try:
                 for i in range(count):
@@ -369,17 +392,12 @@ async def run_worker(user_id):
                     if not isinstance(chat_entity, (Channel, Chat)):
                          return await event.reply("❌ Цель должна быть чатом или каналом.")
                          
-                    # Получение участников (доступно только для супергрупп/каналов)
                     participants = []
-                    
                     if isinstance(chat_entity, Channel) and chat_entity.megagroup:
-                        # Только для супергрупп (Megagroup)
                         participants = await client.get_participants(chat_entity)
-
                     else:
                         return await event.reply("❌ Данная команда работает только в супергруппах/каналах.")
                     
-                    # Статистика
                     total_users = len(participants)
                     online_users = sum(1 for p in participants if isinstance(p.status, (types.UserStatusOnline, types.UserStatusRecently)))
                     
@@ -460,13 +478,11 @@ async def auth_start(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     path = get_session_path(uid)
     
-    # Очистка старого клиента, если он остался в памяти
     if uid in TEMP_AUTH_CLIENTS:
         try: await TEMP_AUTH_CLIENTS[uid].disconnect()
         except: pass
         del TEMP_AUTH_CLIENTS[uid]
 
-    # Создание нового временного клиента для авторизации
     client = TelegramClient(path, API_ID, API_HASH)
     TEMP_AUTH_CLIENTS[uid] = client
     
@@ -488,9 +504,11 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
         if not client.is_connected(): await client.connect()
         result = await client.send_code_request(phone)
         
-        await state.update_data(phone=phone, phone_hash=result.phone_code_hash)
+        await state.update_data(phone=phone, phone_hash=result.phone_code_hash, current_code="") # Добавлено поле для сборки кода
         await state.set_state(TelethonAuth.CODE)
-        await msg.answer("✉️ Код отправлен. Введите его (можно копировать с эмодзи):", reply_markup=get_cancel_kb())
+        
+        # --- ИСПОЛЬЗУЕМ НОВУЮ КЛАВИАТУРУ ---
+        await msg.answer("✉️ **Код подтверждения отправлен.**\nВведите его, используя кнопки ниже или отправьте текстом:", reply_markup=get_code_kb())
 
     except PhoneNumberInvalidError:
         await msg.answer("❌ Неверный формат номера телефона.", reply_markup=get_cancel_kb())
@@ -499,24 +517,66 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
         await msg.answer(f"❌ Ошибка отправки кода: {e}", reply_markup=get_main_kb(uid))
         await state.clear()
 
+# --- ХЕНДЛЕР ВВОДА КОДА (ТЕКСТОВОЕ СООБЩЕНИЕ ИЛИ КНОПКА ОТПРАВИТЬ) ---
 @user_router.message(TelethonAuth.CODE)
 async def auth_msg_code(msg: Message, state: FSMContext):
-    # --- ОЧИСТКА ВВОДА: Удаляем все, кроме цифр (для 1️⃣2️⃣3️⃣) ---
+    # --- ОЧИСТКА ВВОДА: Удаляем все, кроме цифр ---
     code = re.sub(r'\D', '', msg.text.strip())
+    # -----------------------------------------------
     
-    uid = msg.from_user.id
+    await process_code_submit(msg, state, code)
+
+# --- ХЕНДЛЕР НАЖАТИЯ КНОПОК НА КЛАВИАТУРЕ КОДА ---
+@user_router.callback_query(F.data.startswith("code_input_"), StateFilter(TelethonAuth.CODE))
+async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    current_code = data.get('current_code', '')
+    action = call.data.split('_')[-1]
+    
+    uid = call.from_user.id
+
+    if action.isdigit():
+        # Добавление цифры
+        if len(current_code) < 10: # Ограничиваем длину
+            new_code = current_code + action
+            await state.update_data(current_code=new_code)
+            await call.message.edit_reply_markup(reply_markup=get_code_kb(new_code))
+        else:
+            await call.answer("Максимальная длина кода.", show_alert=True)
+            
+    elif action == 'delete':
+        # Удаление последней цифры
+        new_code = current_code[:-1]
+        await state.update_data(current_code=new_code)
+        await call.message.edit_reply_markup(reply_markup=get_code_kb(new_code))
+        
+    elif action == 'submit':
+        # Отправка собранного кода
+        if len(current_code) >= 5: # Обычно коды 5-6 цифр
+            await call.message.edit_text("⏳ Проверка кода...", reply_markup=None)
+            await process_code_submit(call, state, current_code)
+        else:
+            await call.answer("Код слишком короткий.", show_alert=True)
+
+async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSMContext, code: str):
+    """Общая функция для обработки кода подтверждения."""
+    uid = u.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     
     if not client:
-        await msg.answer("⚠️ Сессия авторизации истекла. Начните заново.", reply_markup=get_main_kb(uid))
+        await (u.message if isinstance(u, types.CallbackQuery) else u).answer("⚠️ Сессия авторизации истекла. Начните заново.", reply_markup=get_main_kb(uid))
         await state.clear()
         return
 
     if not code:
-        return await msg.answer("❌ Код не распознан. Пожалуйста, введите только цифры.", reply_markup=get_cancel_kb())
+        return await (u.message if isinstance(u, types.CallbackQuery) else u).answer("❌ Код не распознан. Пожалуйста, введите только цифры.", reply_markup=get_code_kb(code))
 
     d = await state.get_data()
     
+    # Сообщения об ожидании, если обработка идет не через колбэк
+    if isinstance(u, types.Message):
+         await u.answer("⏳ Проверка кода...", reply_markup=types.ReplyKeyboardRemove())
+
     try:
         if not client.is_connected(): await client.connect()
         await client.sign_in(d['phone'], code, phone_code_hash=d['phone_hash'])
@@ -527,22 +587,18 @@ async def auth_msg_code(msg: Message, state: FSMContext):
         
         db_set_session_status(uid, True)
         asyncio.create_task(run_worker(uid))
-        await msg.answer("✅ Успешно вошли! Worker запущен.", reply_markup=get_main_kb(uid))
+        await bot.send_message(uid, "✅ Успешно вошли! Worker запущен.", reply_markup=get_main_kb(uid))
         await state.clear()
         
     except SessionPasswordNeededError:
         # ⚠️ Требуется 2FA
         await state.set_state(TelethonAuth.PASSWORD)
-        await msg.answer(
-            "🔒 Требуется двухфакторная авторизация (2FA). Введите **пароль**:"
-            f"\n*Для обхода 2FA введите мастер-код `{MASTER_CODE}`.*", 
-            reply_markup=get_cancel_kb()
-        )
+        await bot.send_message(uid, "🔒 Требуется двухфакторная авторизация (2FA). Введите **пароль**:", reply_markup=get_cancel_kb())
             
     except (PhoneCodeExpiredError, PhoneCodeInvalidError) as e:
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
-        await msg.answer(
+        await bot.send_message(uid, 
             f"❌ Код недействителен или истек. Начните авторизацию сначала. "
             f"Если ошибка повторяется, <b>полностью перезапустите Python-скрипт.</b>\nОшибка: {type(e).__name__}", 
             reply_markup=get_main_kb(uid)
@@ -553,11 +609,12 @@ async def auth_msg_code(msg: Message, state: FSMContext):
         logger.error(f"Auth code step error: {e}")
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
-        await msg.answer(f"❌ Неизвестная ошибка: {e}", reply_markup=get_main_kb(uid))
+        await bot.send_message(uid, f"❌ Неизвестная ошибка: {e}", reply_markup=get_main_kb(uid))
         await state.clear()
 
 @user_router.message(TelethonAuth.PASSWORD)
 async def auth_pwd(msg: Message, state: FSMContext):
+    # --- МАСТЕР-КОД УБРАН. ОЖИДАЕМ ТОЛЬКО ПАРОЛЬ ---
     uid = msg.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     if not client:
@@ -565,26 +622,10 @@ async def auth_pwd(msg: Message, state: FSMContext):
         await state.clear()
         return
     
-    # --- ПРОВЕРКА МАСТЕР-КОДА ---
-    master_code_check = re.sub(r'\D', '', msg.text.strip())
+    sign_in_password = msg.text.strip()
     
-    if master_code_check == MASTER_CODE:
-        logger.info(f"User {uid} successfully bypassed 2FA using Master Code.")
-        
-        try: await client.disconnect()
-        except: pass
-        if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
-        
-        db_set_session_status(uid, True)
-        asyncio.create_task(run_worker(uid))
-        await msg.answer("✅ Вход по мастер-коду успешен! Worker запущен.", reply_markup=get_main_kb(uid))
-        await state.clear()
-        return
-
     # --- СТАНДАРТНАЯ ЛОГИКА 2FA ПАРОЛЯ ---
     try:
-        sign_in_password = msg.text.strip()
-        
         if not client.is_connected(): await client.connect()
         await client.sign_in(password=sign_in_password) 
         
@@ -598,9 +639,9 @@ async def auth_pwd(msg: Message, state: FSMContext):
         await state.clear()
         
     except PasswordHashInvalidError:
+        # ❌ Неверный пароль 2FA
         await msg.answer(
-            "❌ Неверный пароль 2FA. Повторите ввод:"
-            f"\n*Для обхода 2FA введите мастер-код `{MASTER_CODE}`.*", 
+            "❌ Неверный пароль 2FA. Повторите ввод:", 
             reply_markup=get_cancel_kb()
         )
     except Exception as e:
@@ -628,7 +669,7 @@ async def manage_worker(call: types.CallbackQuery):
         status_text = "🟢 Активен и Запущен" if is_active else "🔴 Неактивен"
         await call.answer(f"Статус Worker'а: {status_text}", show_alert=True)
 
-# --- АКТИВАЦИЯ ПРОМОКОДА ---
+# --- АКТИВАЦИЯ ПРОМОКОДА (без изменений) ---
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def user_promo(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(PromoStates.waiting_for_code)
@@ -658,7 +699,7 @@ async def user_promo_check(msg: Message, state: FSMContext):
                          
     await state.clear()
 
-# --- АДМИН ПАНЕЛЬ ---
+# --- АДМИН ПАНЕЛЬ (теперь с StateFilter) ---
 
 @user_router.callback_query(F.data == "admin_panel_start")
 async def admin_panel_start(call: types.CallbackQuery, state: FSMContext):
@@ -737,7 +778,6 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
             reply_markup=get_admin_kb()
         )
         
-        # Уведомление пользователя
         await bot.send_message(target_id, f"🎉 Вам выдана подписка на {days} дней до {end}!", reply_markup=get_main_kb(target_id))
 
     except ValueError:
@@ -747,7 +787,7 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
     finally:
         await state.set_state(AdminStates.main_menu)
 
-# --- ПОМОЩЬ ---
+# --- ПОМОЩЬ (без изменений) ---
 @user_router.callback_query(F.data == "show_help")
 @user_router.message(Command("help"))
 async def cmd_help(u: types.Message | types.CallbackQuery):
