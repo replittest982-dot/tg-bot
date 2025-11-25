@@ -24,9 +24,9 @@ from telethon.errors import (
     UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, 
     PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, 
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
-    UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
+    UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError, 
+    RpcCallFailError
 )
-# ✅ Исправлено: Удалено is_user_id из импорта
 from telethon.utils import get_display_name 
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import GetMessagesViewsRequest
@@ -36,7 +36,7 @@ from telethon.tl.types import ChannelParticipantsRecent, InputChannel
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# !!! ЗАМЕНЕННЫЙ ВАШ НОВЫЙ BOT_TOKEN !!!
+# !!! ВАШ НОВЫЙ BOT_TOKEN !!!
 BOT_TOKEN = "7868097991:AAFWAAw1357IWkGXr9cOpqY11xBtnB0xJSg" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
@@ -54,8 +54,9 @@ logger = logging.getLogger(__name__)
 ACTIVE_TELETHON_CLIENTS = {} 
 ACTIVE_TELETHON_WORKERS = {} 
 TEMP_AUTH_CLIENTS = {} 
-FLOOD_TASKS = {} 
-PROCESS_PROGRESS = {} # {user_id: {'type': 'flood', 'total': 100, 'done': 10, 'peer': entity}}
+# Изменено: хранит задачи флуда по chat_id
+FLOOD_TASKS = {} # {user_id: {chat_id: task}}
+PROCESS_PROGRESS = {} # {user_id: {'type': 'flood', 'total': 100, 'done': 10, 'peer': entity, 'chat_id': 12345}}
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -70,6 +71,8 @@ class TelethonAuth(StatesGroup):
     PHONE = State()
     CODE = State()
     PASSWORD = State() 
+    # Состояние для QR-кода
+    WAITING_FOR_QR_LOGIN = State()
 
 class PromoStates(StatesGroup):
     waiting_for_code = State()
@@ -239,7 +242,9 @@ def get_main_kb(user_id):
     kb.append([InlineKeyboardButton(text="❓ Помощь / Команды", callback_data="show_help")]) 
     
     if not active:
-        kb.append([InlineKeyboardButton(text="🔐 Авторизация (Вход)", callback_data="telethon_auth_start")])
+        # Добавляем возможность входа по QR-коду
+        kb.append([InlineKeyboardButton(text="📲 Вход по QR-коду (Рекоменд.)", callback_data="telethon_auth_qr_start")])
+        kb.append([InlineKeyboardButton(text="🔐 Вход по Номеру/Коду (Старый)", callback_data="telethon_auth_phone_start")])
     else:
         kb.append([InlineKeyboardButton(text="🚀 Запустить / Остановить Worker", callback_data="telethon_stop_session" if running else "telethon_start_session")])
         kb.append([InlineKeyboardButton(text="ℹ️ Статус Сессии", callback_data="telethon_check_status")])
@@ -272,8 +277,11 @@ def get_admin_kb():
 # =========================================================================
 
 async def stop_worker(user_id):
-    if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] and not FLOOD_TASKS[user_id].done():
-        FLOOD_TASKS[user_id].cancel()
+    # Отменяем все задачи флуда, связанные с этим пользователем
+    if user_id in FLOOD_TASKS:
+        for chat_id, task in FLOOD_TASKS[user_id].items():
+            if task and not task.done():
+                task.cancel()
         del FLOOD_TASKS[user_id]
 
     if user_id in ACTIVE_TELETHON_WORKERS:
@@ -314,17 +322,19 @@ async def run_worker(user_id):
         logger.info(f"Worker {user_id} started successfully.")
 
         # --- ЛОГИКА ФЛУДА И КОМАНД ---
-        async def flood_task(peer, message, count, delay):
+        async def flood_task(peer, message, count, delay, chat_id):
             try:
                 is_unlimited = count <= 0
                 max_iterations = count if not is_unlimited else 999999999 
-
-                PROCESS_PROGRESS[user_id] = {'type': 'flood', 'total': count, 'done': 0, 'peer': peer}
+                
+                # Добавляем chat_id в прогресс для .статус
+                PROCESS_PROGRESS[user_id] = {'type': 'flood', 'total': count, 'done': 0, 'peer': peer, 'chat_id': chat_id}
                 
                 for i in range(max_iterations):
                     # Проверка на отмену (для .стопфлуд)
-                    if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] is False:
-                        await client.send_message(user_id, "🛑 Флуд остановлен по команде .стопфлуд.")
+                    # Проверяем наличие chat_id в списке активных задач
+                    if user_id in FLOOD_TASKS and chat_id not in FLOOD_TASKS[user_id]:
+                        await client.send_message(user_id, f"🛑 Флуд в чате `{get_display_name(peer)}` остановлен по команде .стопфлуд.")
                         break
                     
                     if not is_unlimited and i >= count: 
@@ -340,95 +350,95 @@ async def run_worker(user_id):
             except Exception as e:
                 await client.send_message(user_id, f"❌ Ошибка при флуде: {e}")
             finally:
-                if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] is not False:
-                    del FLOOD_TASKS[user_id]
-                if user_id in PROCESS_PROGRESS:
+                # Очистка задачи после завершения/ошибки
+                if user_id in FLOOD_TASKS and chat_id in FLOOD_TASKS[user_id]:
+                    del FLOOD_TASKS[user_id][chat_id]
+                    if not FLOOD_TASKS[user_id]:
+                        del FLOOD_TASKS[user_id]
+                # Очистка прогресса, если это была активная задача
+                if user_id in PROCESS_PROGRESS and PROCESS_PROGRESS[user_id].get('chat_id') == chat_id:
                     del PROCESS_PROGRESS[user_id]
         
-        # --- Парсинг .ЧЕКГРУППУ ---
+        # --- Парсинг .ЧЕКГРУППУ (ИСПРАВЛЕНО НА СКАНИРОВАНИЕ СООБЩЕНИЙ) ---
         async def check_group_task(event, target_chat_str, min_id, max_id):
+            
+            chat_id = event.chat_id
+            if chat_id is None:
+                 return await client.send_message(user_id, "❌ `.чекгруппу` должен быть вызван из группы/канала или с указанием его юзернейма/ID.")
+                 
             try:
-                chat_entity = await client.get_entity(target_chat_str)
+                # Определяем сущность чата
+                try:
+                    chat_entity = await client.get_entity(target_chat_str)
+                except Exception:
+                    chat_entity = await client.get_entity(chat_id)
+
+                # Собираем пользователей из истории сообщений
+                unique_users = {} # {user_id: user_object}
+                limit = 1000000 # Ставим большой лимит для обхода 'всех соо'
                 
-                # Подготовка данных для отчета
-                report_data = []
+                await client.send_message(user_id, f"⏳ Начинаю сканирование **всех** сообщений в чате `{get_display_name(chat_entity)}` для сбора пользователей. Это может занять время.")
                 
-                # Если это Channel/Group, используем итератор
-                if isinstance(chat_entity, (Channel, Chat)):
+                PROCESS_PROGRESS[user_id] = {'type': 'checkgroup', 'peer': chat_entity, 'done_msg': 0}
+                
+                async for message in client.iter_messages(chat_entity, limit=limit):
+                    # Обновление прогресса
+                    PROCESS_PROGRESS[user_id]['done_msg'] += 1
                     
-                    # Отправка промежуточного сообщения в ЛС
-                    await client.send_message(user_id, f"⏳ Начинаю сканирование чата `{get_display_name(chat_entity)}` с фильтром ID {min_id or 'Нет'}-{max_id or 'Нет'} (отчет придет сюда).")
-                    
-                    limit = None
-                    total_scanned = 0
-                    
-                    try:
-                        # Используем iter_participants для перебора всех участников
-                        async for p in client.iter_participants(chat_entity, limit=limit):
-                            user_id_int = p.id
-                            total_scanned += 1
+                    # Проверяем автора сообщения
+                    if message.sender and isinstance(message.sender, User) and message.sender_id not in unique_users:
+                        user_id_int = message.sender.id
+                        
+                        # Фильтр ID (применяем только к реальным пользователям)
+                        if (min_id is None or user_id_int >= min_id) and \
+                           (max_id is None or user_id_int <= max_id):
                             
-                            # Применяем фильтр ID
-                            if min_id is not None and user_id_int < min_id:
-                                continue
-                            if max_id is not None and user_id_int > max_id:
-                                continue
-                            
-                            # Формируем имя: first_name + last_name
-                            full_name = ' '.join(filter(None, [p.first_name, p.last_name]))
-                            
-                            report_data.append({
-                                'name': full_name if full_name else 'Нет имени',
-                                'username': f"@{p.username}" if p.username else 'Нет',
-                                'id': user_id_int
-                            })
-                            
-                    except ChatAdminRequiredError:
-                        report_data.append({'error': "Бот не является администратором в этом чате или не имеет прав на получение списка участников."})
-                    except Exception as e:
-                        report_data.append({'error': f"Критическая ошибка при сканировании: {type(e).__name__}"})
-                else:
-                    report_data.append({'error': "Объект не является чатом или каналом."})
+                            unique_users[user_id_int] = message.sender
+                        
+                        # Ограничение на 1000 собранных пользователей для предотвращения зависания
+                        if len(unique_users) >= 1000 and min_id is None and max_id is None:
+                            # Продолжаем сканирование, но прекращаем сохранять, если лимит в 1000 достигнут без фильтров
+                            pass
+
 
                 # Формирование финального отчета
-                if report_data and 'error' in report_data[0]:
-                    response = f"❌ **Ошибка при анализе чата**:\n{report_data[0]['error']}"
-                else:
-                    total_found = len(report_data)
-                    
-                    if total_found > 0:
-                        header = "-------------------------------------------\n"
-                        details = ""
-                        for item in report_data:
-                            details += (
-                                f"👤 Имя: {item['name']}\n"
-                                f"🔗 Юзернейм: {item['username']}\n"
-                                f"🆔 ID: <code>{item['id']}</code>\n"
-                                f"{header}"
-                            )
-                        
-                        range_info = f" (Фильтр ID: {min_id or 'Все'}-{max_id or 'Все'})" if min_id is not None or max_id is not None else ""
-                        response = (
-                            f"📊 **Отчет .ЧЕКГРУППУ** {range_info}\n"
-                            f"Чат: `{get_display_name(chat_entity)}`\n"
-                            f" • Найдено пользователей по фильтру: **{total_found}**\n"
-                            f"\n"
-                            f"**Список пользователей (Имя, Юзернейм, ID):**\n"
-                            f"{header}"
-                            f"{details}"
+                total_found = len(unique_users)
+                if total_found > 0:
+                    report_data = []
+                    for uid, p in unique_users.items():
+                        full_name = ' '.join(filter(None, [p.first_name, p.last_name]))
+                        report_data.append(
+                             f"👤 Имя: {full_name if full_name else 'Нет имени'}\n"
+                             f"🔗 Юзернейм: @{p.username}" if p.username else f"🔗 Юзернейм: Нет\n"
+                             f"🆔 ID: <code>{uid}</code>"
                         )
-                    else:
-                        response = "✅ **Отчет .ЧЕКГРУППУ:**\nПо указанным критериям (чат/диапазон ID) пользователи не найдены."
+                        
+                    header = "-------------------------------------------\n"
+                    range_info = f" (Фильтр ID: {min_id or 'Все'}-{max_id or 'Все'})" if min_id is not None or max_id is not None else ""
+                    
+                    response = (
+                        f"📊 **Отчет .ЧЕКГРУППУ** (по истории сообщений) {range_info}\n"
+                        f"Чат: `{get_display_name(chat_entity)}`\n"
+                        f" • Просканировано сообщений: **{PROCESS_PROGRESS[user_id]['done_msg']}**\n"
+                        f" • Найдено уникальных пользователей: **{total_found}**\n"
+                        f"\n"
+                        f"**Список пользователей (Имя, Юзернейм, ID):**\n"
+                        f"{header}"
+                        f"{header.join(report_data)}"
+                    )
+                else:
+                    response = "✅ **Отчет .ЧЕКГРУППУ:**\nПо указанным критериям (чат/диапазон ID) пользователи не найдены в истории сообщений."
                 
                 # Отправка отчета в ЛС пользователя
                 await client.send_message(user_id, response, parse_mode='HTML')
 
+            except RpcCallFailError as e:
+                 await client.send_message(user_id, f"❌ Ошибка RPC при .чекгруппу (возможно, чат слишком большой или недоступен): {type(e).__name__}")
             except Exception as e:
-                # В случае любой критической ошибки
                 await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__} - {e}")
                 
             finally:
-                 # Сброс прогресса, если был
+                 # Сброс прогресса
                 if user_id in PROCESS_PROGRESS:
                     del PROCESS_PROGRESS[user_id]
 
@@ -442,37 +452,42 @@ async def run_worker(user_id):
             parts = msg.split()
             if not parts: return
             cmd = parts[0].lower()
+            current_chat_id = event.chat_id
 
-            # .ЛС [текст сообщения] TO: [@юзернейм/ID] [@юзернейм/ID]...
+            # .ЛС [текст сообщения]
+            # [адресат1]
+            # [адресат2]
             if cmd == '.лс':
                 try:
-                    # Ищем разделитель "TO:" (case-insensitive)
-                    to_index = -1
-                    for i, part in enumerate(parts):
-                        if part.upper() == 'TO:':
-                            to_index = i
-                            break
+                    full_text = event.text
+                    lines = full_text.split('\n')
                     
-                    if to_index == -1 or to_index == 0:
-                        return await event.reply("❌ Неверный формат .лс. Используйте: `.лс [сообщение] TO: [@юзернейм1] [ID2]`")
+                    # Проверяем, что есть команда и хотя бы одна строка для адресата
+                    if len(lines) < 2:
+                        return await event.reply("❌ Неверный формат .лс. Используйте:\n`.лс [сообщение]`\n`[@адресат1]`\n`[ID2]`\n\n**Адресаты должны быть с новой строки!**")
 
-                    # Сообщение - это все между командой и 'TO:'
-                    text_parts = parts[1:to_index]
-                    text = ' '.join(text_parts)
+                    # Адресаты - это все, начиная со второй строки
+                    recipients = [line.strip() for line in lines[1:] if line.strip()]
                     
-                    # Получатели - это все после 'TO:'
-                    recipients = parts[to_index + 1:]
+                    # Сообщение - это первая строка (после команды)
+                    # Убираем команду .лс из первой строки
+                    message_line = lines[0].strip()
+                    text = message_line[len(cmd):].strip() 
                     
                     if not text or not recipients:
-                        return await event.reply("❌ Неверный формат .лс. Убедитесь, что указаны и текст, и хотя бы один адресат после `TO:`.")
+                        return await event.reply("❌ Неверный формат .лс. Убедитесь, что указаны и текст, и хотя бы один адресат с новой строки.")
                     
                     results = []
                     for target in recipients:
                         try:
-                            # Telethon сам разбирается с юзернеймами/ID
+                            # Проверяем, чтобы строка была похожа на юзернейм или ID
+                            if not (target.startswith('@') or target.isdigit() or re.match(r'^-?\d+$', target)):
+                                results.append(f"❌ {target}: Пропущен (Не похож на @юзернейм или ID)")
+                                continue
+                                
                             await client.send_message(target, text) 
                             results.append(f"✅ {target}: Отправлено")
-                        except ValueError: # Ловим ошибки, связанные с некорректным ID/Юзернеймом
+                        except ValueError: 
                             results.append(f"❌ {target}: Ошибка (Некорректный ID/Юзернейм)")
                         except Exception as e:
                             results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
@@ -483,17 +498,37 @@ async def run_worker(user_id):
                      await event.reply(f"❌ Критическая ошибка .лс: {type(e).__name__}. Проверьте формат.")
                      
             # .ФЛУД [кол-во] [текст] [задержка] [@чат/ID]
-            elif cmd == '.флуд' and len(parts) >= 5:
-                if user_id in FLOOD_TASKS:
-                    return await event.reply("⚠️ Флуд уже запущен. Используйте .стопфлуд.")
-                    
+            # Теперь, если чат не указан, флуд идет в текущий чат
+            elif cmd == '.флуд' and len(parts) >= 4:
+                
+                # Проверка, запущен ли флуд в этом чате
+                if user_id in FLOOD_TASKS and current_chat_id in FLOOD_TASKS[user_id]:
+                    return await event.reply("⚠️ Флуд **уже запущен** в этом чате. Используйте `.стопфлуд` здесь.")
+                
                 try:
                     count = int(parts[1])
-                    target_chat = parts[-1]
-                    delay = float(parts[-2])
+                    delay = float(parts[-1])
                     
-                    message_parts = parts[2:-2] 
+                    # Определяем, куда флудить
+                    target_chat_str = None
+                    message_parts = parts[2:-1] 
+                    
+                    # Проверяем, был ли указан чат в конце
+                    if message_parts and (message_parts[-1].startswith('@') or re.match(r'^-?\d+$', message_parts[-1])):
+                        target_chat_str = message_parts.pop() # Используем последний элемент как чат
+                    
                     message = ' '.join(message_parts)
+
+                    if target_chat_str is None:
+                        # Если чат не указан, флудим в текущий чат
+                        if current_chat_id is None:
+                            return await event.reply("❌ Укажите чат или запустите команду в группе/канале.")
+                        peer = await client.get_entity(current_chat_id)
+                        flood_chat_id = current_chat_id
+                    else:
+                        # Флудим в указанный чат
+                        peer = await client.get_input_entity(target_chat_str)
+                        flood_chat_id = (await client.get_entity(target_chat_str)).id
 
                     if delay < 0.5:
                         return await event.reply("❌ Макс. кол-во: **безлимитно** (или 0). Мин. задержка: 0.5 сек.")
@@ -501,13 +536,17 @@ async def run_worker(user_id):
                     if not message:
                          return await event.reply("❌ Сообщение для флуда не может быть пустым.")
                          
-                    peer = await client.get_input_entity(target_chat)
                     
-                    task = asyncio.create_task(flood_task(peer, message, count, delay))
-                    FLOOD_TASKS[user_id] = task
+                    # Создаем задачу флуда и сохраняем ее с привязкой к чату
+                    task = asyncio.create_task(flood_task(peer, message, count, delay, flood_chat_id))
+                    if user_id not in FLOOD_TASKS:
+                        FLOOD_TASKS[user_id] = {}
+                        
+                    FLOOD_TASKS[user_id][flood_chat_id] = task
+                    
                     await event.reply(
                         f"🔥 **Флуд запущен!**\n"
-                        f"Чат: {target_chat}\n"
+                        f"Чат: `{get_display_name(peer)}`\n"
                         f"Сообщений: {'Безлимитно' if count <= 0 else count}\n"
                         f"Задержка: {delay} сек.", 
                         parse_mode='HTML'
@@ -518,13 +557,21 @@ async def run_worker(user_id):
                 except (UsernameInvalidError, PeerIdInvalidError, Exception) as e:
                     await event.reply(f"❌ Ошибка при подготовке флуда: Чат не найден или неверный формат. ({type(e).__name__})")
             
-            # .СТОПФЛУД
+            # .СТОПФЛУД (Работает только в текущем чате)
             elif cmd == '.стопфлуд':
-                if user_id in FLOOD_TASKS:
-                    FLOOD_TASKS[user_id] = False 
-                    await event.reply("🛑 Запрос на остановку флуда принят. Ожидайте.")
+                if user_id in FLOOD_TASKS and current_chat_id in FLOOD_TASKS[user_id]:
+                    # Отменяем задачу флуда в текущем чате
+                    task_to_cancel = FLOOD_TASKS[user_id].pop(current_chat_id)
+                    if not FLOOD_TASKS[user_id]:
+                        del FLOOD_TASKS[user_id]
+                        
+                    if task_to_cancel and not task_to_cancel.done():
+                        task_to_cancel.cancel()
+                        await event.reply("🛑 Флуд **в этом чате** остановлен.")
+                    else:
+                        await event.reply("⚠️ Флуд не был активен в этом чате, или задача уже завершилась.")
                 else:
-                    await event.reply("⚠️ Флуд не запущен.")
+                    await event.reply("⚠️ Флуд **в этом чате** не запущен.")
             
             # .СТАТУС (Прогресс)
             elif cmd == '.статус':
@@ -535,13 +582,22 @@ async def run_worker(user_id):
                     if p_type == 'flood':
                         total = progress['total']
                         done = progress['done']
+                        peer_name = get_display_name(await client.get_entity(progress['peer']))
                         
                         status_text = (
                             f"⚡️ **СТАТУС ФЛУДА:**\n"
-                            f" • Цель: {get_display_name(await client.get_entity(progress['peer']))}\n"
+                            f" • Цель: `{peer_name}`\n"
                             f" • Отправлено: **{done}**\n"
                             f" • Всего: **{'Безлимитно' if total <= 0 else total}**\n"
                             f" • Прогресс: **{'{:.2f}'.format(done/total*100) + '%' if total > 0 else '—'}**"
+                        )
+                    elif p_type == 'checkgroup':
+                        peer_name = get_display_name(progress['peer'])
+                        done_msg = progress['done_msg']
+                        status_text = (
+                            f"🔎 **СТАТУС АНАЛИЗА ЧАТА:**\n"
+                            f" • Цель: `{peer_name}`\n"
+                            f" • Просканировано сообщений: **{done_msg}**"
                         )
                     else:
                         status_text = f"⚙️ Активный процесс: {p_type}. Данные: {progress}"
@@ -553,6 +609,10 @@ async def run_worker(user_id):
 
             # .ЧЕКГРУППУ [опц: @чат/ID] [опц: мин_ID-макс_ID]
             elif cmd == '.чекгруппу':
+                # Проверка, нет ли уже активного процесса сканирования
+                if user_id in PROCESS_PROGRESS and PROCESS_PROGRESS[user_id]['type'] == 'checkgroup':
+                    return await event.reply("⚠️ Процесс сканирования чата уже запущен. Дождитесь его завершения.")
+                    
                 target_chat_str = None
                 id_range_str = None
 
@@ -568,10 +628,10 @@ async def run_worker(user_id):
                     id_range_str = parts[2]
                 
                 # Если аргумент чата не указан, берем текущий чат
-                if not target_chat_str:
-                    target_chat_str = event.chat_id
-                    if not target_chat_str:
-                        return await event.reply("❌ Не удалось определить чат. Используйте: `.чекгруппу [@чат/ID] [мин_ID-макс_ID]` в ЛС.")
+                if not target_chat_str and current_chat_id:
+                    target_chat_str = current_chat_id
+                elif not target_chat_str:
+                    return await event.reply("❌ Не удалось определить чат. Используйте: `.чекгруппу [@чат/ID] [мин_ID-макс_ID]` в ЛС.")
 
                 min_id, max_id = None, None
                 if id_range_str:
@@ -583,7 +643,7 @@ async def run_worker(user_id):
                     except ValueError:
                          return await event.reply("❌ Неверный формат диапазона ID. Используйте: `MIN_ID-MAX_ID`.")
                 
-                # Запуск асинхронной задачи, чтобы не блокировать обработчик
+                # Запуск асинхронной задачи
                 asyncio.create_task(check_group_task(event, target_chat_str, min_id, max_id))
                 await event.reply("⏳ **Начинаю анализ группы...** Отчет будет отправлен вам в ЛС.", parse_mode='HTML')
 
@@ -609,6 +669,16 @@ async def run_worker(user_id):
 # =========================================================================
 
 # --- ОСНОВНОЕ МЕНЮ И СТАРТ ---
+@user_router.callback_query(F.data == "cancel_action")
+async def cancel_handler(call: types.CallbackQuery, state: FSMContext):
+    uid = call.from_user.id
+    if uid in TEMP_AUTH_CLIENTS:
+        try: await TEMP_AUTH_CLIENTS[uid].disconnect()
+        except: pass
+        del TEMP_AUTH_CLIENTS[uid]
+    await state.clear()
+    await cmd_start(call, state)
+
 @user_router.callback_query(F.data == "back_to_main")
 @user_router.message(Command("start"))
 async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
@@ -635,10 +705,111 @@ async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
     else: 
         await u.message.edit_text(text, reply_markup=kb)
 
-# --- АВТОРИЗАЦИЯ: ВХОД В АККАУНТ ---
+# --- АВТОРИЗАЦИЯ: ВХОД ПО QR-КОДУ ---
 
-@user_router.callback_query(F.data == "telethon_auth_start")
-async def auth_start(call: types.CallbackQuery, state: FSMContext):
+@user_router.callback_query(F.data == "telethon_auth_qr_start")
+async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
+    has_access, _ = await check_access(call.from_user.id, bot)
+    if not has_access:
+        return await call.answer("Доступ к авторизации ограничен. Активируйте подписку.", show_alert=True)
+    
+    uid = call.from_user.id
+    path = get_session_path(uid)
+    
+    # Очистка старых данных/клиентов
+    if uid in TEMP_AUTH_CLIENTS:
+        try: await TEMP_AUTH_CLIENTS[uid].disconnect()
+        except: pass
+        del TEMP_AUTH_CLIENTS[uid]
+
+    client = TelegramClient(path, API_ID, API_HASH)
+    TEMP_AUTH_CLIENTS[uid] = client
+
+    try:
+        if not client.is_connected(): await client.connect()
+        
+        # Запрос QR-кода
+        qr_login = await client.qr_login()
+        await state.update_data(qr_login=qr_login)
+        await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
+
+        # Отправка QR-кода (в виде URL для aiogram)
+        await call.message.edit_text(
+            "📲 **Авторизация по QR-коду**\n"
+            "1. Откройте **Настройки** -> **Устройства** -> **Привязать настольное устройство**.\n"
+            "2. Отсканируйте код по ссылке ниже.\n\n"
+            f"🔗 [Нажмите для отображения QR-кода]({qr_login.url})\n\n"
+            "Ожидаю сканирования...", 
+            reply_markup=get_cancel_kb(),
+            disable_web_page_preview=False
+        )
+        
+        # Ожидание логина (должно быть в отдельной задаче)
+        asyncio.create_task(wait_for_qr_login(uid, client, state, call.message.chat.id, call.message.message_id))
+
+    except Exception as e:
+        logger.error(f"QR auth start error: {e}")
+        await call.message.edit_text(f"❌ Ошибка QR-авторизации: {e}", reply_markup=get_main_kb(uid))
+        await state.clear()
+
+async def wait_for_qr_login(uid, client, state, chat_id, message_id):
+    try:
+        data = await state.get_data()
+        qr_login = data.get('qr_login')
+
+        # Ожидание завершения логина
+        await qr_login.wait(timeout=120) 
+        
+        # Если успешно
+        await client.disconnect()
+        if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
+        
+        db_set_session_status(uid, True)
+        asyncio.create_task(run_worker(uid))
+        
+        await bot.edit_message_text(
+            chat_id=chat_id, 
+            message_id=message_id, 
+            text="✅ Успешно вошли по QR-коду! Worker запущен.", 
+            reply_markup=get_main_kb(uid)
+        )
+        await state.clear()
+        
+    except asyncio.TimeoutError:
+        # Если таймаут
+        await client.log_out() 
+        await client.disconnect()
+        if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
+        
+        if await state.get_state() == TelethonAuth.WAITING_FOR_QR_LOGIN:
+            await bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=message_id, 
+                text="❌ Время ожидания QR-кода истекло. Начните заново.", 
+                reply_markup=get_main_kb(uid)
+            )
+            await state.clear()
+            
+    except Exception as e:
+        # Если другая ошибка (например, 2FA, которую QR не обрабатывает сам)
+        await client.disconnect()
+        if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
+        
+        if await state.get_state() == TelethonAuth.WAITING_FOR_QR_LOGIN:
+             await bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=message_id, 
+                text=f"❌ Ошибка при входе по QR-коду: {type(e).__name__}. Попробуйте Вход по Номеру/Коду.", 
+                reply_markup=get_main_kb(uid)
+            )
+             await state.clear()
+        logger.error(f"QR login wait error: {e}")
+
+
+# --- АВТОРИЗАЦИЯ: ВХОД ПО НОМЕРУ/КОДУ (Старый метод) ---
+
+@user_router.callback_query(F.data == "telethon_auth_phone_start")
+async def auth_phone_start(call: types.CallbackQuery, state: FSMContext):
     has_access, _ = await check_access(call.from_user.id, bot)
     if not has_access:
         return await call.answer("Доступ к авторизации ограничен. Активируйте подписку.", show_alert=True)
@@ -944,13 +1115,15 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
 async def cmd_help(u: types.Message | types.CallbackQuery):
     help_text = (
         "📚 <b>Справка и Команды (Worker):</b>\n\n"
-        "Для работы инструментов сначала авторизуйтесь через **🔐 Авторизация** и запустите **Worker**.\n\n"
+        "Для работы инструментов сначала авторизуйтесь через одну из **🔐 Вход...** опций и запустите **Worker**.\n\n"
         "**Инструменты (вводятся в любом чате от вашего имени):**\n"
-        " • <code>.лс [сообщение] TO: [@юзернейм1] [ID2]</code> — Отправка **личных сообщений** по списку.\n"
-        " • <code>.флуд [кол-во] [текст] [задержка] [@чат/ID]</code> — **Флуд** (0 или -1 для безлимита. Мин. задержка: 0.5 сек).\n"
-        " • <code>.стопфлуд</code> — **Остановить** запущенный флуд.\n"
+        " • <code>.лс [сообщение]</code>\n"
+        "   <code>[@юзернейм1]</code>\n"
+        "   <code>[ID2]</code> — Отправка **личных сообщений** по списку адресатов, указанных с новой строки.\n"
+        " • <code>.флуд [кол-во] [текст] [задержка] [опц: @чат/ID]</code> — **Флуд**. Если чат не указан, флуд идет в текущий чат. (0/-1 для безлимита. Мин. задержка: 0.5 сек).\n"
+        " • <code>.стопфлуд</code> — **Остановить** флуд **только в текущем чате**.\n"
         " • <code>.статус</code> — Показать **прогресс** активной задачи.\n"
-        " • <code>.чекгруппу [опц: @чат/ID] [опц: мин_ID-макс_ID]</code> — **Анализ** участников (отчет в ЛС)."
+        " • <code>.чекгруппу [опц: @чат/ID] [опц: мин_ID-макс_ID]</code> — **Анализ** **всех** пользователей, писавших в чат (по истории сообщений). Отчет в ЛС."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main")]])
     if isinstance(u, types.Message):
