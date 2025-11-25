@@ -32,9 +32,8 @@ import qrcode
 # =========================================================================
 
 # !!! ВАШИ КЛЮЧИ !!! 
-# ЖЕСТКО ПРОПИСАННЫЙ ТОКЕН. ВСТАВЬТЕ СЮДА ВАШ АКТУАЛЬНЫЙ ТОКЕН!
-# ИЗ-ЗА ПРОБЛЕМЫ 'Unauthorized' МЫ УБРАЛИ os.getenv.
-BOT_TOKEN = "ТОКЕН_ДЛЯ_ЗАМЕНЫ_ОТ_БОТФАЗЕРА" 
+# ЖЕСТКО ПРОПИСАННЫЙ ТОКЕН. 
+BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
@@ -52,6 +51,7 @@ ACTIVE_TELETHON_WORKERS = {}
 ACTIVE_TELETHON_TASKS = {} 
 
 storage = MemoryStorage()
+# Инициализация бота с новым токеном
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='Markdown'))
 dp = Dispatcher(storage=storage)
 user_router = Router()
