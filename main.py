@@ -37,7 +37,6 @@ import qrcode
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# ВАШ ТОКЕН (ЖЕСТКО ПРОПИСАН)
 BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
@@ -51,9 +50,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Глобальные хранилища
-ACTIVE_TELETHON_CLIENTS = {} # Для запущенных воркеров (мониторинг)
-ACTIVE_TELETHON_WORKERS = {} # Задачи asyncio
-TEMP_AUTH_CLIENTS = {}       # ВАЖНО: Для хранения клиентов во время входа (чтобы код не сгорал)
+ACTIVE_TELETHON_CLIENTS = {} 
+ACTIVE_TELETHON_WORKERS = {} 
+TEMP_AUTH_CLIENTS = {}       
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -61,7 +60,7 @@ dp = Dispatcher(storage=storage)
 user_router = Router()
 
 # =========================================================================
-# II. FSM И БД
+# II. FSM
 # =========================================================================
 
 class TelethonAuth(StatesGroup):
@@ -95,6 +94,10 @@ class TelethonCommands(StatesGroup):
     waiting_ls_params = State()
     waiting_flood_params = State()
     waiting_check_params = State()
+
+# =========================================================================
+# III. БАЗА ДАННЫХ
+# =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME)
 
@@ -220,6 +223,13 @@ def db_add_promo(code, days, max_uses):
     cur.execute("INSERT INTO promo_codes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
     conn.commit()
 
+# --- ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
+def db_get_active_telethon_users():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE telethon_active=1")
+    return [row[0] for row in cur.fetchall()]
+
 # =========================================================================
 # IV. УТИЛИТЫ И КЛАВИАТУРЫ
 # =========================================================================
@@ -312,6 +322,10 @@ def get_admin_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]
     ])
 
+def generate_promo_code(length=10):
+    characters = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(characters) for _ in range(length))
+
 # =========================================================================
 # V. TELETHON WORKER
 # =========================================================================
@@ -346,23 +360,33 @@ async def run_worker(user_id):
         it_chat = user.get('it_chat_id')
         drop_chat = user.get('drop_chat_id')
         
-        IT_REGEX = {k: r'.*' for k in ['.встал', '.кьар', '.ошибка']} # Упрощенный regex
-        DROP_REGEX = r'^\+?\d{5,15}.*' # Упрощенный regex
+        IT_REGEX = {k: r'.*' for k in ['.встал', '.кьар', '.ошибка']}
+        DROP_REGEX = r'^\+?\d{5,15}.*'
 
         @client.on(events.NewMessage)
         async def handler(event):
             if not event.text: return
-            chat = await event.get_chat()
-            cid = str(chat.id)
-            
-            if it_chat and cid in it_chat:
-                for cmd in IT_REGEX:
-                    if event.text.lower().startswith(cmd):
-                        db_add_monitor_log(user_id, 'IT', cmd, event.text)
-            
-            if drop_chat and cid in drop_chat:
-                if re.match(DROP_REGEX, event.text):
-                    db_add_monitor_log(user_id, 'DROP', 'DROP', event.text)
+            try:
+                chat = await event.get_chat()
+                cid = str(chat.id)
+                
+                if it_chat and cid in it_chat:
+                    for cmd in IT_REGEX:
+                        if event.text.lower().startswith(cmd):
+                            db_add_monitor_log(user_id, 'IT', cmd, event.text)
+                
+                if drop_chat and cid in drop_chat:
+                    if re.match(DROP_REGEX, event.text):
+                        db_add_monitor_log(user_id, 'DROP', 'DROP', event.text)
+            except: pass
+
+        # Хендлер для команд из ЛС
+        @client.on(events.NewMessage(pattern=r'^\.(лс|флуд|чекгруппу).*'))
+        async def cmd_h(event):
+            me = await client.get_me()
+            if event.sender_id != me.id or not event.is_private: return
+            cmd = event.text.split()[0]
+            await event.reply(f"✅ Команда {cmd} принята (Скелет).")
 
         await client.run_until_disconnected()
         
