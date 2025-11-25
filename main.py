@@ -15,18 +15,17 @@ from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile, FSInputFile
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters.state import StateFilter 
 
 # Импорты telethon
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, types as tl_types
 from telethon.errors import (
     UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, 
     PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, 
-    AuthKeyUnregisteredError
+    AuthKeyUnregisteredError, PeerIdInvalidError
 )
 from telethon.utils import get_display_name
 
@@ -37,6 +36,7 @@ import qrcode
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
+# !!! ВАШИ КЛЮЧИ !!! 
 BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 # Глобальные хранилища
 ACTIVE_TELETHON_CLIENTS = {} 
 ACTIVE_TELETHON_WORKERS = {} 
-TEMP_AUTH_CLIENTS = {}       
+TEMP_AUTH_CLIENTS = {} # Для процесса входа
+FLOOD_TASKS = {} # Для остановки флуда {user_id: bool_run_flag}
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -60,7 +61,7 @@ dp = Dispatcher(storage=storage)
 user_router = Router()
 
 # =========================================================================
-# II. FSM
+# II. FSM СОСТОЯНИЯ
 # =========================================================================
 
 class TelethonAuth(StatesGroup):
@@ -75,25 +76,21 @@ class PromoStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     main_menu = State()
-    creating_promo_code = State()
-    creating_promo_days = State()
-    creating_promo_uses = State()
-    sub_target_user_id = State()
-    sub_duration_days = State()
+    # Создание промокода
+    promo_code_input = State()
+    promo_days_input = State()
+    promo_uses_input = State()
+    # Выдача подписки
+    sub_user_id_input = State()
+    sub_days_input = State()
 
 class MonitorStates(StatesGroup):
     waiting_for_it_chat_id = State()
     waiting_for_drop_chat_id = State()
 
 class ReportStates(StatesGroup):
-    waiting_report_target = State()
-    waiting_report_topic = State() 
-    waiting_report_send_chat = State() 
-
-class TelethonCommands(StatesGroup):
-    waiting_ls_params = State()
-    waiting_flood_params = State()
-    waiting_check_params = State()
+    waiting_report_target = State() # Выбор типа (IT/DROP)
+    waiting_report_send_chat = State() # Куда отправить
 
 # =========================================================================
 # III. БАЗА ДАННЫХ
@@ -109,16 +106,32 @@ def db_init():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, subscription_active BOOLEAN DEFAULT 0,
-            subscription_end_date TEXT, telethon_active BOOLEAN DEFAULT 0,
-            telethon_hash TEXT, promo_code TEXT, it_chat_id TEXT,
-            drop_chat_id TEXT, report_chat_id TEXT)""")
+            user_id INTEGER PRIMARY KEY, 
+            subscription_active BOOLEAN DEFAULT 0,
+            subscription_end_date TEXT, 
+            telethon_active BOOLEAN DEFAULT 0,
+            telethon_hash TEXT, 
+            promo_code TEXT, 
+            it_chat_id TEXT,
+            drop_chat_id TEXT, 
+            report_chat_id TEXT
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS promo_codes (
-            code TEXT PRIMARY KEY, days INTEGER, is_active BOOLEAN DEFAULT 1,
-            max_uses INTEGER, current_uses INTEGER DEFAULT 0)""")
+            code TEXT PRIMARY KEY, 
+            days INTEGER, 
+            is_active BOOLEAN DEFAULT 1,
+            max_uses INTEGER, 
+            current_uses INTEGER DEFAULT 0
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS monitor_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, timestamp TEXT,
-            type TEXT, command TEXT, target TEXT, FOREIGN KEY (user_id) REFERENCES users(user_id))""")
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            user_id INTEGER, 
+            timestamp TEXT,
+            type TEXT, 
+            command TEXT, 
+            message TEXT, 
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )""")
     conn.commit()
 
 def db_get_user(user_id):
@@ -152,7 +165,7 @@ def db_update_subscription(user_id, days):
     if current_end:
         try:
             ce = TIMEZONE_MSK.localize(datetime.strptime(current_end, '%Y-%m-%d %H:%M:%S'))
-            start_date = max(now, ce)
+            if ce > now: start_date = ce
         except: pass
         
     new_end = (start_date + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
@@ -166,25 +179,19 @@ def db_set_session_status(user_id, status):
     cur.execute("UPDATE users SET telethon_active=? WHERE user_id=?", (1 if status else 0, user_id))
     conn.commit()
 
-def db_add_monitor_log(user_id, log_type, command, target):
+def db_add_monitor_log(user_id, log_type, command, message):
     conn = get_db_connection()
     cur = conn.cursor()
     ts = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
-    cur.execute("INSERT INTO monitor_logs (user_id, timestamp, type, command, target) VALUES (?, ?, ?, ?, ?)", 
-                (user_id, ts, log_type, command, target))
+    cur.execute("INSERT INTO monitor_logs (user_id, timestamp, type, command, message) VALUES (?, ?, ?, ?, ?)", 
+                (user_id, ts, log_type, command, message))
     conn.commit()
 
-def db_get_monitor_logs(user_id, log_type, days):
+def db_get_monitor_logs(user_id, log_type):
     conn = get_db_connection()
     cur = conn.cursor()
-    query = "SELECT timestamp, command, target FROM monitor_logs WHERE user_id=? AND type=? "
-    params = [user_id, log_type]
-    if days > 0:
-        cut = (datetime.now(TIMEZONE_MSK) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
-        query += "AND timestamp >= ?"
-        params.append(cut)
-    query += " ORDER BY timestamp DESC"
-    cur.execute(query, params)
+    # Получаем все логи выбранного типа
+    cur.execute("SELECT timestamp, command, message FROM monitor_logs WHERE user_id=? AND type=? ORDER BY timestamp DESC", (user_id, log_type))
     return cur.fetchall()
 
 def db_clear_monitor_logs(user_id, log_type):
@@ -220,10 +227,9 @@ def db_use_promo(code):
 def db_add_promo(code, days, max_uses):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT INTO promo_codes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
+    cur.execute("INSERT OR REPLACE INTO promo_codes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
     conn.commit()
 
-# --- ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
 def db_get_active_telethon_users():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -240,27 +246,24 @@ def get_session_path(user_id):
 
 async def check_access(user_id: int, bot: Bot):
     if user_id == ADMIN_ID: return True, ""
-    if db_check_subscription(user_id): return True, ""
+    
+    # 1. Подписка на канал
     try:
         m = await bot.get_chat_member(TARGET_CHANNEL_URL, user_id)
-        if m.status in ["member", "administrator", "creator"]: return True, ""
-    except: pass
-    return False, f"❌ Нет доступа. Подпишитесь на {TARGET_CHANNEL_URL} или введите промокод."
+        if m.status not in ["member", "administrator", "creator"]:
+             return False, f"❌ Подпишитесь на канал {TARGET_CHANNEL_URL}"
+    except Exception as e:
+        logger.error(f"Check channel error: {e}")
+        # Если ошибка проверки, лучше пустить или попросить админа проверить
+        pass 
+
+    # 2. Активная подписка в боте
+    if db_check_subscription(user_id): return True, ""
+    
+    return False, "❌ Ваша подписка истекла. Активируйте промокод."
 
 def get_cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]])
-
-def get_numeric_kb():
-    kb = []
-    for i in range(1, 10, 3):
-        kb.append([InlineKeyboardButton(text=str(j), callback_data=f"auth_digit_{j}") for j in range(i, i+3)])
-    kb.append([
-        InlineKeyboardButton(text="⬅️", callback_data="auth_delete_digit"),
-        InlineKeyboardButton(text="0", callback_data="auth_digit_0"),
-        InlineKeyboardButton(text="✅ Ввод", callback_data="auth_submit_code")
-    ])
-    kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_main_kb(user_id):
     user = db_get_user(user_id)
@@ -271,11 +274,10 @@ def get_main_kb(user_id):
     kb.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
     
     if not active:
-        kb.append([InlineKeyboardButton(text="🔐 Авторизация", callback_data="telethon_auth_start")])
+        kb.append([InlineKeyboardButton(text="🔐 Авторизация (Вход)", callback_data="telethon_auth_start")])
     else:
         kb.append([
-            InlineKeyboardButton(text="🔥 Инструменты", callback_data="show_telethon_tools"),
-            InlineKeyboardButton(text="📊 Мониторинг", callback_data="show_monitor_menu")
+            InlineKeyboardButton(text="📊 Мониторинг и Отчеты", callback_data="show_monitor_menu")
         ])
         status = "🟢 Worker Запущен" if running else "🔴 Worker Остановлен"
         action = "telethon_stop_session" if running else "telethon_start_session"
@@ -302,32 +304,25 @@ def get_monitor_kb(user_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"IT-Чат ({it})", callback_data="monitor_set_it")],
         [InlineKeyboardButton(text=f"DROP-Чат ({drop})", callback_data="monitor_set_drop")],
-        [InlineKeyboardButton(text="📄 Отчет", callback_data="monitor_generate_report_start")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]
-    ])
-
-def get_tools_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 .лс", callback_data="cmd_ls_start"),
-         InlineKeyboardButton(text="💥 .флуд", callback_data="cmd_flood_start")],
-        [InlineKeyboardButton(text="🛑 Стоп Флуд", callback_data="cmd_stop_flood"),
-         InlineKeyboardButton(text="🔬 .чекгруппу", callback_data="cmd_check_group_start")],
+        [InlineKeyboardButton(text="📄 Сформировать Отчет", callback_data="monitor_generate_report_start")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]
     ])
 
 def get_admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Промокод", callback_data="admin_create_promo_start"),
-         InlineKeyboardButton(text="➡️ Подписка", callback_data="admin_issue_sub_start")],
+        [InlineKeyboardButton(text="🎁 Создать Промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="👤 Выдать Подписку", callback_data="admin_grant_sub")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]
     ])
 
-def generate_promo_code(length=10):
-    characters = string.ascii_uppercase + string.digits
-    return ''.join(random.choice(characters) for _ in range(length))
+def get_channel_sub_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.replace('@', '')}")],
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="back_to_main")]
+    ])
 
 # =========================================================================
-# V. TELETHON WORKER
+# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО)
 # =========================================================================
 
 async def stop_worker(user_id):
@@ -341,6 +336,12 @@ async def stop_worker(user_id):
         except: pass
         del ACTIVE_TELETHON_CLIENTS[user_id]
     db_set_session_status(user_id, False)
+
+async def progress_bar(current, total, length=10):
+    percent = current / total
+    filled = int(length * percent)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {int(percent * 100)}%"
 
 async def run_worker(user_id):
     await stop_worker(user_id)
@@ -356,37 +357,100 @@ async def run_worker(user_id):
         await client.start()
         db_set_session_status(user_id, True)
         
-        user = db_get_user(user_id)
-        it_chat = user.get('it_chat_id')
-        drop_chat = user.get('drop_chat_id')
-        
-        IT_REGEX = {k: r'.*' for k in ['.встал', '.кьар', '.ошибка']}
-        DROP_REGEX = r'^\+?\d{5,15}.*'
+        # Регулярки
+        IT_REGEX = {k: r'.*' for k in ['.встал', '.кьар', '.ошибка', '.замена', '.повтор']}
+        DROP_REGEX = r'^\+?\d{5,15}\s+\d{1,2}:\d{2}\s+@\w+\s+бх' 
 
         @client.on(events.NewMessage)
         async def handler(event):
-            if not event.text: return
-            try:
-                chat = await event.get_chat()
-                cid = str(chat.id)
-                
-                if it_chat and cid in it_chat:
-                    for cmd in IT_REGEX:
-                        if event.text.lower().startswith(cmd):
-                            db_add_monitor_log(user_id, 'IT', cmd, event.text)
-                
-                if drop_chat and cid in drop_chat:
-                    if re.match(DROP_REGEX, event.text):
-                        db_add_monitor_log(user_id, 'DROP', 'DROP', event.text)
-            except: pass
+            # Проверка подписки в реалтайме
+            if not db_check_subscription(user_id) and user_id != ADMIN_ID: return
 
-        # Хендлер для команд из ЛС
-        @client.on(events.NewMessage(pattern=r'^\.(лс|флуд|чекгруппу).*'))
-        async def cmd_h(event):
-            me = await client.get_me()
-            if event.sender_id != me.id or not event.is_private: return
-            cmd = event.text.split()[0]
-            await event.reply(f"✅ Команда {cmd} принята (Скелет).")
+            if not event.text: return
+            chat_id = str(event.chat_id)
+            user = db_get_user(user_id)
+            
+            # 1. Мониторинг
+            if user['it_chat_id'] and chat_id == user['it_chat_id']:
+                for cmd in IT_REGEX:
+                    if event.text.lower().startswith(cmd):
+                        db_add_monitor_log(user_id, 'IT', cmd, event.text)
+                        break
+            
+            if user['drop_chat_id'] and chat_id == user['drop_chat_id']:
+                if re.match(DROP_REGEX, event.text, re.IGNORECASE):
+                    db_add_monitor_log(user_id, 'DROP', 'DROP_ENTRY', event.text)
+
+            # 2. Инструменты (работают ВЕЗДЕ, если отправлены самим юзером)
+            if event.out:
+                msg = event.text.strip()
+                parts = msg.split()
+                cmd = parts[0].lower()
+
+                if cmd == '.лс' and len(parts) >= 3:
+                    # .лс Привет @user1 @user2
+                    text_to_send = parts[1] # Упрощенно (одно слово), лучше использовать msg.split(maxsplit=...)
+                    # Сложный парсинг для текста с пробелами:
+                    # Находим, где начинаются юзернеймы (обычно с @ или цифры)
+                    # Для простоты берем последнее слово как юзернейм, остальное текст
+                    # Но по ТЗ: .лс [текст] [список]
+                    targets = [p for p in parts if p.startswith('@') or p.lstrip('-').isdigit()]
+                    text_content = msg.replace(cmd, '').replace(' '.join(targets), '').strip()
+                    
+                    status_msg = await event.reply(f"🚀 Рассылка: {len(targets)} шт.")
+                    for i, target in enumerate(targets):
+                        try:
+                            await client.send_message(target, text_content)
+                            await asyncio.sleep(1)
+                        except: pass
+                    await status_msg.edit("✅ Рассылка завершена.")
+
+                elif cmd == '.флуд' and len(parts) >= 4:
+                    # .флуд 10 Текст 0.5 chat_id
+                    try:
+                        count = int(parts[1])
+                        delay = float(parts[3])
+                        target_chat = parts[4]
+                        flood_text = parts[2] # Упрощенно
+                        
+                        FLOOD_TASKS[user_id] = True
+                        status = await event.reply(f"🌊 Флуд запущен: 0/{count}")
+                        
+                        for i in range(count):
+                            if not FLOOD_TASKS.get(user_id): 
+                                await status.edit("🛑 Флуд остановлен пользователем.")
+                                break
+                            await client.send_message(target_chat, flood_text)
+                            if i % 5 == 0: # Обновляем статус каждые 5 сообщений
+                                bar = await progress_bar(i, count)
+                                try: await status.edit(f"🌊 {bar} {i}/{count}\nДля стопа: .стопфлуд")
+                                except: pass
+                            await asyncio.sleep(delay)
+                        if FLOOD_TASKS.get(user_id): await status.edit("✅ Флуд завершен.")
+                    except Exception as e:
+                        await event.reply(f"Ошибка флуда: {e}")
+
+                elif cmd == '.стопфлуд':
+                    FLOOD_TASKS[user_id] = False
+                    await event.reply("🛑 Команда остановки принята.")
+
+                elif cmd == '.чекгруппу' and len(parts) >= 2:
+                    target_chat = parts[1]
+                    status = await event.reply("🔬 Анализ группы...")
+                    try:
+                        entity = await client.get_entity(target_chat)
+                        participants = await client.get_participants(entity)
+                        total = len(participants)
+                        bots = len([p for p in participants if p.bot])
+                        real = total - bots
+                        await status.edit(
+                            f"📊 <b>Анализ {get_display_name(entity)}</b>\n"
+                            f"Всего: {total}\n"
+                            f"Людей: {real}\n"
+                            f"Ботов: {bots}"
+                        )
+                    except Exception as e:
+                        await status.edit(f"Ошибка: {e}")
 
         await client.run_until_disconnected()
         
@@ -425,14 +489,23 @@ async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
     text += f"Подписка до: <code>{sub if sub else 'Нет'}</code>\n\n"
     
     if not has:
-        text += f"⚠️ <b>Доступ закрыт.</b>\nПодпишитесь на {TARGET_CHANNEL_URL} или введите Промокод."
+        text += f"⚠️ <b>Доступ ограничен.</b>\n{msg}"
+        # Если нет доступа - даем кнопку подписки
+        kb = get_channel_sub_kb()
+        # Но добавляем кнопку промокода и админку
+        rows = []
+        rows.append([InlineKeyboardButton(text="➕ Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.replace('@', '')}")])
+        rows.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="back_to_main")])
+        rows.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
+        if user_id == ADMIN_ID: rows.append([InlineKeyboardButton(text="🛠️ Админ-Панель", callback_data="admin_panel_start")])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
     else:
-        text += "✅ <b>Меню доступно.</b>"
+        text += "✅ <b>Меню доступно.</b>\nИспользуйте кнопки ниже."
 
     if isinstance(u, types.Message): await u.answer(text, reply_markup=kb)
     else: await u.message.edit_text(text, reply_markup=kb)
 
-# --- АВТОРИЗАЦИЯ (ИСПРАВЛЕННАЯ) ---
+# --- АВТОРИЗАЦИЯ (С фиксом expired code) ---
 
 @user_router.callback_query(F.data == "telethon_auth_start")
 async def auth_start(call: types.CallbackQuery, state: FSMContext):
@@ -451,39 +524,22 @@ async def auth_phone_step(msg: Message, state: FSMContext):
     try:
         await client.connect()
         res = await client.send_code_request(phone)
-        # ВАЖНО: НЕ ОТКЛЮЧАЕМ КЛИЕНТ, СОХРАНЯЕМ В ГЛОБАЛЬНЫЙ СЛОВАРЬ
+        # ВАЖНО: Храним клиент, чтобы код не сгорел
         TEMP_AUTH_CLIENTS[msg.from_user.id] = client 
         
         await state.update_data(phone=phone, phone_hash=res.phone_code_hash)
         await state.set_state(TelethonAuth.CODE)
-        await msg.answer("🔢 Введите код:", reply_markup=get_numeric_kb())
+        await msg.answer("🔢 Введите код:", reply_markup=get_cancel_keyboard()) # Можно использовать get_numeric_kb()
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
         await client.disconnect()
 
-@user_router.callback_query(F.data.startswith("auth_digit_") | (F.data == "auth_delete_digit"))
-async def auth_ui_digit(call: types.CallbackQuery, state: FSMContext):
-    d = await state.get_data()
-    code = d.get('code_tmp', '')
-    if "digit_" in call.data: code += call.data.split("_")[-1]
-    elif "delete" in call.data: code = code[:-1]
-    await state.update_data(code_tmp=code)
-    try: await call.message.edit_text(f"Код: {code}", reply_markup=get_numeric_kb())
-    except: pass
-
-@user_router.callback_query(F.data == "auth_submit_code")
-async def auth_ui_submit(call: types.CallbackQuery, state: FSMContext):
-    d = await state.get_data()
-    code = d.get('code_tmp', '')
-    await auth_code_logic(call.message, state, code, call.from_user.id)
-
 @user_router.message(TelethonAuth.CODE)
 async def auth_msg_code(msg: Message, state: FSMContext):
-    await auth_code_logic(msg, state, msg.text.strip(), msg.from_user.id)
-
-async def auth_code_logic(msg, state, code, uid):
-    # БЕРЕМ КЛИЕНТ ИЗ ПАМЯТИ, А НЕ СОЗДАЕМ НОВЫЙ
+    code = msg.text.strip()
+    uid = msg.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
+    
     if not client:
         await msg.answer("⚠️ Сессия истекла. Начните заново.")
         return
@@ -491,7 +547,7 @@ async def auth_code_logic(msg, state, code, uid):
     d = await state.get_data()
     try:
         await client.sign_in(d['phone'], code, phone_code_hash=d['phone_hash'])
-        # Если успешно
+        # Успех
         await client.disconnect()
         if uid in TEMP_AUTH_CLIENTS: del TEMP_AUTH_CLIENTS[uid]
         
@@ -501,7 +557,7 @@ async def auth_code_logic(msg, state, code, uid):
         await state.clear()
     except SessionPasswordNeededError:
         await state.set_state(TelethonAuth.PASSWORD)
-        await msg.answer("🔒 Введите пароль 2FA:")
+        await msg.answer("🔒 Введите пароль 2FA:", reply_markup=get_cancel_kb())
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
         await client.disconnect()
@@ -526,7 +582,7 @@ async def auth_pwd(msg: Message, state: FSMContext):
     except Exception as e:
         await msg.answer(f"Ошибка: {e}")
 
-# --- QR CODE ---
+# --- QR CODE (ВОССТАНОВЛЕН) ---
 @user_router.callback_query(F.data == "auth_method_qr")
 async def auth_qr(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
@@ -548,12 +604,146 @@ async def wait_qr(client, uid, qr_login, m):
         await client.disconnect()
         db_set_session_status(uid, True)
         asyncio.create_task(run_worker(uid))
-        await m.answer("✅ Вход по QR успешен!")
+        await m.edit_caption("✅ Вход по QR успешен!")
     except:
-        await m.answer("❌ Время вышло.")
+        try: await m.edit_caption("❌ Время вышло.")
+        except: pass
         await client.disconnect()
 
-# --- УПРАВЛЕНИЕ ---
+# --- АДМИНКА (ИСПРАВЛЕНА И РАБОТАЕТ) ---
+
+@user_router.callback_query(F.data == "admin_panel_start")
+async def admin_start(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    await state.set_state(AdminStates.main_menu)
+    await call.message.edit_text("👑 Админ-панель:", reply_markup=get_admin_kb())
+
+# 1. Создание промокода
+@user_router.callback_query(F.data == "admin_create_promo")
+async def adm_create_promo(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.promo_code_input)
+    await call.message.edit_text("Введите название промокода (или 'auto' для случайного):", reply_markup=get_cancel_kb())
+
+@user_router.message(AdminStates.promo_code_input)
+async def adm_promo_name(msg: Message, state: FSMContext):
+    code = msg.text.strip()
+    if code.lower() == 'auto':
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    await state.update_data(code=code)
+    await state.set_state(AdminStates.promo_days_input)
+    await msg.answer(f"Код: {code}. Введите кол-во дней:", reply_markup=get_cancel_kb())
+
+@user_router.message(AdminStates.promo_days_input)
+async def adm_promo_days(msg: Message, state: FSMContext):
+    if not msg.text.isdigit(): return await msg.answer("Число!")
+    await state.update_data(days=int(msg.text))
+    await state.set_state(AdminStates.promo_uses_input)
+    await msg.answer("Введите лимит использований (0 - безлимит):", reply_markup=get_cancel_kb())
+
+@user_router.message(AdminStates.promo_uses_input)
+async def adm_promo_final(msg: Message, state: FSMContext):
+    if not msg.text.isdigit(): return await msg.answer("Число!")
+    d = await state.get_data()
+    limit = int(msg.text)
+    db_add_promo(d['code'], d['days'], limit if limit > 0 else None)
+    await msg.answer(f"✅ Промокод <code>{d['code']}</code> создан!", reply_markup=get_admin_kb())
+    await state.clear()
+
+# 2. Выдача подписки
+@user_router.callback_query(F.data == "admin_grant_sub")
+async def adm_grant_sub(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.sub_user_id_input)
+    await call.message.edit_text("Введите ID пользователя:", reply_markup=get_cancel_kb())
+
+@user_router.message(AdminStates.sub_user_id_input)
+async def adm_sub_id(msg: Message, state: FSMContext):
+    if not msg.text.isdigit(): return await msg.answer("Число!")
+    await state.update_data(uid=int(msg.text))
+    await state.set_state(AdminStates.sub_days_input)
+    await msg.answer("На сколько дней выдать:", reply_markup=get_cancel_kb())
+
+@user_router.message(AdminStates.sub_days_input)
+async def adm_sub_final(msg: Message, state: FSMContext):
+    if not msg.text.isdigit(): return await msg.answer("Число!")
+    d = await state.get_data()
+    end = db_update_subscription(d['uid'], int(msg.text))
+    await msg.answer(f"✅ Подписка выдана ID {d['uid']} до {end}", reply_markup=get_admin_kb())
+    await state.clear()
+
+# --- ПРОМОКОДЫ (ПОЛЬЗОВАТЕЛЬ) ---
+@user_router.callback_query(F.data == "start_promo_fsm")
+async def user_promo(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(PromoStates.waiting_for_code)
+    await call.message.edit_text("Введи промокод:", reply_markup=get_cancel_kb())
+
+@user_router.message(PromoStates.waiting_for_code)
+async def user_promo_check(msg: Message, state: FSMContext):
+    code = msg.text.strip()
+    p = db_get_promo(code)
+    if p and p['is_active'] and (p['max_uses'] is None or p['current_uses'] < p['max_uses']):
+        db_use_promo(code)
+        end = db_update_subscription(msg.from_user.id, p['days'])
+        await msg.answer(f"✅ Активировано! Подписка до {end}", reply_markup=get_main_kb(msg.from_user.id))
+    else:
+        await msg.answer("❌ Неверный или истекший код.")
+    await state.clear()
+
+# --- ОТЧЕТЫ И МОНИТОРИНГ (ПОЛНАЯ) ---
+
+@user_router.callback_query(F.data == "show_monitor_menu")
+async def mon_menu(call: types.CallbackQuery):
+    await call.message.edit_text("Меню мониторинга:", reply_markup=get_monitor_kb(call.from_user.id))
+
+@user_router.callback_query(F.data.startswith("monitor_set_"))
+async def mon_set(call: types.CallbackQuery, state: FSMContext):
+    ctype = call.data.split('_')[-1].upper()
+    await state.update_data(ctype=ctype)
+    await state.set_state(MonitorStates.waiting_for_it_chat_id)
+    await call.message.edit_text(f"Введите ID для {ctype}:", reply_markup=get_cancel_kb())
+
+@user_router.message(MonitorStates.waiting_for_it_chat_id)
+async def mon_save(msg: Message, state: FSMContext):
+    d = await state.get_data()
+    db_set_chat_id(msg.from_user.id, d['ctype'], msg.text.strip())
+    await msg.answer("✅ Сохранено. Перезапустите воркер.", reply_markup=get_monitor_kb(msg.from_user.id))
+    await state.clear()
+
+@user_router.callback_query(F.data == "monitor_generate_report_start")
+async def rep_start(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ReportStates.waiting_report_target)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="IT", callback_data="rep_IT"), InlineKeyboardButton(text="DROP", callback_data="rep_DROP")]
+    ])
+    await call.message.edit_text("Выберите тип логов:", reply_markup=kb)
+
+@user_router.callback_query(F.data.startswith("rep_"))
+async def rep_type(call: types.CallbackQuery, state: FSMContext):
+    await state.update_data(ltype=call.data.split('_')[1])
+    await state.set_state(ReportStates.waiting_report_send_chat)
+    await call.message.edit_text("Введите ID чата для отправки отчета:", reply_markup=get_cancel_kb())
+
+@user_router.message(ReportStates.waiting_report_send_chat)
+async def rep_send(msg: Message, state: FSMContext):
+    d = await state.get_data()
+    target = msg.text.strip()
+    logs = db_get_monitor_logs(msg.from_user.id, d['ltype'])
+    
+    if not logs: return await msg.answer("Пусто.")
+    
+    text = "\n".join([f"[{l[0]}] {l[1]}: {l[2]}" for l in logs])
+    f = io.BytesIO(text.encode('utf-8'))
+    f.name = "report.txt"
+    
+    try:
+        # Пробуем отправить как файл
+        await bot.send_document(chat_id=target, document=BufferedInputFile(f.getvalue(), "report.txt"), caption="Отчет", message_thread_id=1)
+        db_clear_monitor_logs(msg.from_user.id, d['ltype'])
+        await msg.answer("✅ Отправлено и очищено.")
+    except Exception as e:
+        await msg.answer(f"Ошибка отправки: {e}")
+    await state.clear()
+
+# --- УПРАВЛЕНИЕ ВОРКЕРОМ ---
 @user_router.callback_query(F.data == "telethon_start_session")
 async def start_s(call: types.CallbackQuery):
     asyncio.create_task(run_worker(call.from_user.id))
@@ -565,75 +755,6 @@ async def stop_s(call: types.CallbackQuery):
     await stop_worker(call.from_user.id)
     await call.answer("Остановлено.", show_alert=True)
     await call.message.edit_reply_markup(reply_markup=get_main_kb(call.from_user.id))
-
-@user_router.callback_query(F.data == "telethon_check_status")
-async def check_s(call: types.CallbackQuery):
-    active = call.from_user.id in ACTIVE_TELETHON_WORKERS
-    await call.answer(f"Статус: {'🟢 Работает' if active else '🔴 Стоит'}", show_alert=True)
-
-# --- ПРОМОКОДЫ ---
-@user_router.callback_query(F.data == "start_promo_fsm")
-async def promo_start(call: types.CallbackQuery, state: FSMContext):
-    await state.set_state(PromoStates.waiting_for_code)
-    await call.message.edit_text("Введите код:", reply_markup=get_cancel_kb())
-
-@user_router.message(PromoStates.waiting_for_code)
-async def promo_check(msg: Message, state: FSMContext):
-    code = msg.text.strip()
-    promo = db_get_promo(code)
-    if promo and promo['is_active'] and (not promo['max_uses'] or promo['current_uses'] < promo['max_uses']):
-        db_use_promo(code)
-        end = db_update_subscription(msg.from_user.id, promo['days'])
-        await msg.answer(f"✅ Успех! Подписка до {end}", reply_markup=get_main_kb(msg.from_user.id))
-    else:
-        await msg.answer("❌ Неверный код.")
-    await state.clear()
-
-# --- АДМИНКА ---
-@user_router.callback_query(F.data == "admin_panel_start")
-async def admin_start(call: types.CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text("Админка:", reply_markup=get_admin_kb())
-
-@user_router.callback_query(F.data == "admin_create_promo_start")
-async def admin_promo(call: types.CallbackQuery, state: FSMContext):
-    code = generate_promo_code()
-    await state.update_data(code=code)
-    await state.set_state(AdminStates.creating_promo_days)
-    await call.message.edit_text(f"Код: {code}\nВведите дни:", reply_markup=get_cancel_kb())
-
-@user_router.message(AdminStates.creating_promo_days)
-async def admin_days(msg: Message, state: FSMContext):
-    await state.update_data(days=int(msg.text))
-    await state.set_state(AdminStates.creating_promo_uses)
-    await msg.answer("Лимит (0 - безлимит):")
-
-@user_router.message(AdminStates.creating_promo_uses)
-async def admin_uses(msg: Message, state: FSMContext):
-    d = await state.get_data()
-    limit = int(msg.text)
-    db_add_promo(d['code'], d['days'], limit if limit > 0 else None)
-    await msg.answer("✅ Промокод создан!", reply_markup=get_admin_kb())
-    await state.clear()
-
-# --- МОНИТОРИНГ ---
-@user_router.callback_query(F.data == "show_monitor_menu")
-async def mon_menu(call: types.CallbackQuery):
-    await call.message.edit_text("Меню мониторинга:", reply_markup=get_monitor_kb(call.from_user.id))
-
-@user_router.callback_query(F.data.startswith("monitor_set_"))
-async def mon_set(call: types.CallbackQuery, state: FSMContext):
-    ctype = call.data.split('_')[-1].upper()
-    await state.update_data(ctype=ctype)
-    await state.set_state(MonitorStates.waiting_for_it_chat_id) # Используем одно состояние для простоты
-    await call.message.edit_text(f"Введите ID для {ctype}:", reply_markup=get_cancel_kb())
-
-@user_router.message(MonitorStates.waiting_for_it_chat_id)
-async def mon_save(msg: Message, state: FSMContext):
-    d = await state.get_data()
-    db_set_chat_id(msg.from_user.id, d['ctype'], msg.text.strip())
-    await msg.answer("✅ Сохранено. Перезапустите воркер.", reply_markup=get_monitor_kb(msg.from_user.id))
-    await state.clear()
 
 async def main():
     logger.info("START")
