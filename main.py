@@ -33,7 +33,7 @@ from telethon.utils import get_display_name
 # =========================================================================
 
 # !!! ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ НА ВАШИ РЕАЛЬНЫЕ !!!
-BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
+BOT_TOKEN = "7868097991:AAGQUCUOH7pqC8BQWQSOUgSc7W5S0TuSJCo" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
