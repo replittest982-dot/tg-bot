@@ -19,21 +19,24 @@ from aiogram.client.default import DefaultBotProperties
 # Импорты telethon
 from telethon import TelegramClient, events
 # Импорт типов для работы с чатами и статусами
-from telethon.tl.types import Channel, Chat, UserStatusOnline, UserStatusRecently
+from telethon.tl.types import Channel, Chat, UserStatusOnline, UserStatusRecently, User
 from telethon.errors import (
     UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, 
     PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError, 
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
     UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
 )
-from telethon.utils import get_display_name
+from telethon.utils import get_display_name, is_user_id
+from telethon.tl.functions.channels import GetParticipantsRequest
+from telethon.tl.functions.messages import GetMessagesViewsRequest
+from telethon.tl.types import ChannelParticipantsRecent, InputChannel
 
 # =========================================================================
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
 # !!! ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ НА ВАШИ РЕАЛЬНЫЕ !!!
-BOT_TOKEN = "7868097991:AAGQUCUOH7pqC8BQWQSOUgSc7W5S0TuSJCo" 
+BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
@@ -288,7 +291,6 @@ async def stop_worker(user_id):
         del PROCESS_PROGRESS[user_id]
     logger.info(f"Worker {user_id} stopped.")
 
-# ✅ ИСПРАВЛЕНО: Добавление отсутствующей функции start_workers
 async def start_workers():
     """Запускает worker'ы для всех пользователей, у которых активна сессия в БД."""
     users = db_get_active_telethon_users()
@@ -319,6 +321,7 @@ async def run_worker(user_id):
                 PROCESS_PROGRESS[user_id] = {'type': 'flood', 'total': count, 'done': 0, 'peer': peer}
                 
                 for i in range(max_iterations):
+                    # Проверка на отмену (для .стопфлуд)
                     if user_id in FLOOD_TASKS and FLOOD_TASKS[user_id] is False:
                         await client.send_message(user_id, "🛑 Флуд остановлен по команде .стопфлуд.")
                         break
@@ -341,45 +344,141 @@ async def run_worker(user_id):
                 if user_id in PROCESS_PROGRESS:
                     del PROCESS_PROGRESS[user_id]
         
+        # --- Парсинг .ЧЕКГРУППУ ---
+        async def check_group_task(event, target_chat_str, min_id, max_id):
+            try:
+                chat_entity = await client.get_entity(target_chat_str)
+                
+                # Подготовка данных для отчета
+                report_data = []
+                
+                # Если это Channel/Group, используем итератор
+                if isinstance(chat_entity, (Channel, Chat)):
+                    
+                    # Отправка промежуточного сообщения в ЛС
+                    await client.send_message(user_id, f"⏳ Начинаю сканирование чата `{get_display_name(chat_entity)}` с фильтром ID {min_id}-{max_id} (отчет придет сюда).")
+                    
+                    limit = None
+                    try:
+                        # Используем iter_participants для перебора всех участников
+                        async for p in client.iter_participants(chat_entity, limit=limit):
+                            user_id_int = p.id
+                            
+                            # Применяем фильтр ID
+                            if min_id is not None and user_id_int < min_id:
+                                continue
+                            if max_id is not None and user_id_int > max_id:
+                                continue
+                            
+                            # Формируем имя: first_name + last_name
+                            full_name = ' '.join(filter(None, [p.first_name, p.last_name]))
+                            
+                            report_data.append({
+                                'name': full_name if full_name else 'Нет имени',
+                                'username': f"@{p.username}" if p.username else 'Нет',
+                                'id': user_id_int
+                            })
+                            
+                    except ChatAdminRequiredError:
+                        report_data.append({'error': "Бот не является администратором или не имеет прав на получение списка участников."})
+                    except Exception as e:
+                        report_data.append({'error': f"Критическая ошибка при сканировании: {type(e).__name__}"})
+                else:
+                    report_data.append({'error': "Объект не является чатом или каналом."})
+
+                # Формирование финального отчета
+                if report_data and 'error' in report_data[0]:
+                    response = f"❌ **Ошибка при анализе чата**:\n{report_data[0]['error']}"
+                else:
+                    total_count = len(report_data)
+                    
+                    if total_count > 0:
+                        header = "-------------------------------------------\n"
+                        details = ""
+                        for item in report_data:
+                            details += (
+                                f"👤 Имя: {item['name']}\n"
+                                f"🔗 Юзернейм: {item['username']}\n"
+                                f"🆔 ID: <code>{item['id']}</code>\n"
+                                f"{header}"
+                            )
+                        
+                        range_info = f" ({min_id}-{max_id})" if min_id is not None else ""
+                        response = (
+                            f"📊 **Отчет .ЧЕКГРУППУ** {range_info}\n"
+                            f"Чат: `{get_display_name(chat_entity)}`\n"
+                            f" • Найдено пользователей по фильтру: **{total_count}**\n"
+                            f"\n"
+                            f"**Список пользователей (Имя, Юзернейм, ID):**\n"
+                            f"{header}"
+                            f"{details}"
+                        )
+                    else:
+                        response = "✅ **Отчет .ЧЕКГРУППУ:**\nПо указанным критериям (чат/диапазон ID) пользователи не найдены."
+                
+                # Отправка отчета в ЛС пользователя
+                await client.send_message(user_id, response, parse_mode='HTML')
+
+            except Exception as e:
+                # В случае любой критической ошибки
+                await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__}")
+                
+            finally:
+                 # Сброс прогресса, если был
+                if user_id in PROCESS_PROGRESS:
+                    del PROCESS_PROGRESS[user_id]
+
+
         @client.on(events.NewMessage)
         async def handler(event):
             if not db_check_subscription(user_id) and user_id != ADMIN_ID: return
             if not event.out: return
             
             msg = event.text.strip()
+            # Используем регулярное выражение для более гибкого парсинга
             parts = msg.split()
             if not parts: return
             cmd = parts[0].lower()
 
-            # .ЛС [текст] [список @юзернеймов/ID]
-            if cmd == '.лс' and len(parts) >= 3:
-                recipient_start_index = -1
-                
-                for i in range(1, len(parts)):
-                    part = parts[i]
-                    if part.startswith('@') or (part.isdigit() and len(part) > 5): 
-                        recipient_start_index = i
-                        break
+            # .ЛС [текст сообщения] TO: [@юзернейм/ID] [@юзернейм/ID]...
+            if cmd == '.лс':
+                try:
+                    # Ищем разделитель "TO:" (case-insensitive)
+                    to_index = -1
+                    for i, part in enumerate(parts):
+                        if part.upper() == 'TO:':
+                            to_index = i
+                            break
+                    
+                    if to_index == -1 or to_index == 0:
+                        return await event.reply("❌ Неверный формат .лс. Используйте: `.лс [сообщение] TO: [@юзернейм1] [ID2]`")
 
-                if recipient_start_index != -1:
-                    text_parts = parts[1:recipient_start_index]
+                    # Сообщение - это все между командой и 'TO:'
+                    text_parts = parts[1:to_index]
                     text = ' '.join(text_parts)
-                    recipients = parts[recipient_start_index:]
-                else:
-                    return await event.reply("❌ Не удалось разобрать команду. Укажите получателей в конце (например, @username или ID).")
-
-                if not text or not recipients:
-                    return await event.reply("❌ Неверный формат .лс. Убедитесь, что указаны и текст, и хотя бы один адресат.")
-                
-                results = []
-                for target in recipients:
-                    try:
-                        await client.send_message(target, text) 
-                        results.append(f"✅ {target}: Отправлено")
-                    except Exception as e:
-                        results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
-                await event.reply("<b>Результаты .лс:</b>\n" + "\n".join(results), parse_mode='HTML')
-
+                    
+                    # Получатели - это все после 'TO:'
+                    recipients = parts[to_index + 1:]
+                    
+                    if not text or not recipients:
+                        return await event.reply("❌ Неверный формат .лс. Убедитесь, что указаны и текст, и хотя бы один адресат после `TO:`.")
+                    
+                    results = []
+                    for target in recipients:
+                        try:
+                            # Telethon сам разбирается с юзернеймами/ID
+                            await client.send_message(target, text) 
+                            results.append(f"✅ {target}: Отправлено")
+                        except ValueError as e:
+                            results.append(f"❌ {target}: Ошибка (Некорректный ID/Юзернейм)")
+                        except Exception as e:
+                            results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
+                            
+                    await event.reply("<b>Результаты .лс:</b>\n" + "\n".join(results), parse_mode='HTML')
+                    
+                except Exception as e:
+                     await event.reply(f"❌ Критическая ошибка .лс: {type(e).__name__}. Проверьте формат.")
+                     
             # .ФЛУД [кол-во] [текст] [задержка] [@чат/ID]
             elif cmd == '.флуд' and len(parts) >= 5:
                 if user_id in FLOOD_TASKS:
@@ -413,10 +512,8 @@ async def run_worker(user_id):
                     
                 except ValueError:
                     await event.reply("❌ Неверный формат чисел (кол-во/задержка).")
-                except (UsernameInvalidError, PeerIdInvalidError):
-                    await event.reply("❌ Чат не найден или неверный формат.")
-                except Exception as e:
-                    await event.reply(f"❌ Ошибка при подготовке флуда: {type(e).__name__}")
+                except (UsernameInvalidError, PeerIdInvalidError, Exception) as e:
+                    await event.reply(f"❌ Ошибка при подготовке флуда: Чат не найден или неверный формат. ({type(e).__name__})")
             
             # .СТОПФЛУД
             elif cmd == '.стопфлуд':
@@ -456,66 +553,36 @@ async def run_worker(user_id):
                 target_chat_str = None
                 id_range_str = None
 
-                # Парсинг аргументов
-                if len(parts) >= 2:
-                    last_arg = parts[-1]
-                    # Проверяем, является ли последний аргумент диапазоном ID
-                    if re.match(r'^\d+-\d+$', last_arg):
-                        id_range_str = last_arg
-                        if len(parts) > 2:
-                            target_chat_str = parts[1]
+                # Парсинг аргументов (до 3 частей)
+                if len(parts) == 2:
+                    arg = parts[1]
+                    if re.match(r'^\d+-\d+$', arg):
+                        id_range_str = arg
                     else:
-                        target_chat_str = parts[1]
-
-                # Если аргумент чата не указан, берем текущий чат (работает в группе/канале)
+                        target_chat_str = arg
+                elif len(parts) >= 3:
+                    target_chat_str = parts[1]
+                    id_range_str = parts[2]
+                
+                # Если аргумент чата не указан, берем текущий чат
                 if not target_chat_str:
                     target_chat_str = event.chat_id
                     if not target_chat_str:
-                        return await event.reply("❌ Не удалось определить чат. Используйте: .чекгруппу [@чат/ID] [мин_ID-макс_ID] в ЛС.")
+                        return await event.reply("❌ Не удалось определить чат. Используйте: `.чекгруппу [@чат/ID] [мин_ID-макс_ID]` в ЛС.")
 
                 min_id, max_id = None, None
                 if id_range_str:
                     try:
+                        # Убеждаемся, что парсится корректно
                         min_id, max_id = map(int, id_range_str.split('-'))
                         if min_id >= max_id:
                              return await event.reply("❌ Неверный диапазон ID: минимальный ID должен быть меньше максимального.")
                     except ValueError:
-                         return await event.reply("❌ Неверный формат диапазона ID. Используйте: MIN_ID-MAX_ID.")
-
-                try:
-                    chat_entity = await client.get_entity(target_chat_str)
-                    
-                    participants = []
-                    
-                    # Используем iter_participants для эффективного перебора
-                    async for p in client.iter_participants(chat_entity, limit=None):
-                        user_id_int = p.id
-                        
-                        # Применяем фильтр ID
-                        if id_range_str:
-                            if min_id is not None and user_id_int < min_id:
-                                continue
-                            if max_id is not None and user_id_int > max_id:
-                                continue
-                        
-                        participants.append(p)
-
-                    total_users = len(participants)
-                    online_users = sum(1 for p in participants if isinstance(p.status, (UserStatusOnline, UserStatusRecently)))
-                    
-                    range_info = f" ({id_range_str})" if id_range_str else ""
-                    
-                    response = (
-                        f"📊 **Анализ чата {get_display_name(chat_entity)}**{range_info}:\n"
-                        f" • Всего участников (по фильтру): **{total_users}**\n"
-                        f" • Онлайн / Недавно: **{online_users}**\n"
-                    )
-                    await event.reply(response, parse_mode='HTML')
-
-                except ChatAdminRequiredError:
-                    await event.reply("❌ Бот не является администратором в этом чате или не имеет прав на получение списка участников.")
-                except Exception as e:
-                    await event.reply(f"❌ Критическая ошибка при чеке: {type(e).__name__} - Убедитесь, что чат доступен. {e}")
+                         return await event.reply("❌ Неверный формат диапазона ID. Используйте: `MIN_ID-MAX_ID`.")
+                
+                # Запуск асинхронной задачи, чтобы не блокировать обработчик
+                asyncio.create_task(check_group_task(event, target_chat_str, min_id, max_id))
+                await event.reply("⏳ **Начинаю анализ группы...** Отчет будет отправлен вам в ЛС.", parse_mode='HTML')
 
 
         worker_task = asyncio.create_task(client.run_until_disconnected())
@@ -876,11 +943,11 @@ async def cmd_help(u: types.Message | types.CallbackQuery):
         "📚 <b>Справка и Команды (Worker):</b>\n\n"
         "Для работы инструментов сначала авторизуйтесь через **🔐 Авторизация** и запустите **Worker**.\n\n"
         "**Инструменты (вводятся в любом чате от вашего имени):**\n"
-        " • <code>.лс [текст] [список @юзернеймов/ID]</code> — Отправка **личных сообщений** по списку.\n"
+        " • <code>.лс [сообщение] TO: [@юзернейм1] [ID2]</code> — Отправка **личных сообщений** по списку.\n"
         " • <code>.флуд [кол-во] [текст] [задержка] [@чат/ID]</code> — **Флуд** (0 или -1 для безлимита. Мин. задержка: 0.5 сек).\n"
         " • <code>.стопфлуд</code> — **Остановить** запущенный флуд.\n"
         " • <code>.статус</code> — Показать **прогресс** активной задачи.\n"
-        " • <code>.чекгруппу [опц: @чат/ID] [опц: мин_ID-макс_ID]</code> — **Анализ** участников (по ID или текущего чата)."
+        " • <code>.чекгруппу [опц: @чат/ID] [опц: мин_ID-макс_ID]</code> — **Анализ** участников (отчет в ЛС)."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main")]])
     if isinstance(u, types.Message):
@@ -894,7 +961,6 @@ async def main():
     logger.info("START BOT")
     db_init()
     dp.include_router(user_router)
-    # ✅ ИСПРАВЛЕНО: Вызов функции start_workers теперь корректен
     await start_workers()
     await dp.start_polling(bot)
 
