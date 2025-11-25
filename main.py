@@ -26,7 +26,7 @@ from telethon.errors import (
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
     UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
 )
-# ✅ ИСПРАВЛЕНО: Удалено is_user_id из импорта
+# ✅ Исправлено: Удалено is_user_id из импорта
 from telethon.utils import get_display_name 
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import GetMessagesViewsRequest
@@ -36,8 +36,8 @@ from telethon.tl.types import ChannelParticipantsRecent, InputChannel
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# !!! ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ НА ВАШИ РЕАЛЬНЫЕ !!!
-BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
+# !!! ЗАМЕНЕННЫЙ ВАШ НОВЫЙ BOT_TOKEN !!!
+BOT_TOKEN = "7868097991:AAFWAAw1357IWkGXr9cOpqY11xBtnB0xJSg" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
