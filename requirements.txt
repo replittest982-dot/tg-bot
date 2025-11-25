@@ -1,4 +1,5 @@
 aiogram
 telethon
-pytz
 qrcode
+pillow
+pytz
