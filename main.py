@@ -6,8 +6,8 @@ import pytz
 import re
 import tempfile 
 import io 
-import random # <--- НОВЫЙ ИМПОРТ
-import string # <--- НОВЫЙ ИМПОРТ
+import random 
+import string 
 from datetime import datetime, timedelta
 
 # Импорты aiogram
@@ -34,18 +34,18 @@ from telethon.utils import get_display_name
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import GetMessagesViewsRequest
 from telethon.tl.types import ChannelParticipantsRecent, InputChannel
-from telethon.tl.custom import Button # <--- НОВЫЙ ИМПОРТ ДЛЯ ИНЛАЙН-КНОПОК В WORKER
+from telethon.tl.custom import Button 
 
 # =========================================================================
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# !!! ВАШ НОВЫЙ BOT_TOKEN !!!
+# !!! ВАШ BOT_TOKEN !!!
 BOT_TOKEN = "7868097991:AAFWAAw1357IWkGXr9cOpqY11xBtnB0xJSg" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
-TARGET_CHANNEL_URL = "@STAT_PRO1" # Обязательный канал для подписки
+TARGET_CHANNEL_URL = "@STAT_PRO1" 
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 DB_TIMEOUT = 10 
@@ -58,9 +58,8 @@ logger = logging.getLogger(__name__)
 ACTIVE_TELETHON_CLIENTS = {} 
 ACTIVE_TELETHON_WORKERS = {} 
 TEMP_AUTH_CLIENTS = {} 
-FLOOD_TASKS = {} # {user_id: {chat_id: task}}
-# PROCESS_PROGRESS теперь хранит report_data и peer_name для .чекгруппу
-PROCESS_PROGRESS = {} # {user_id: {'type': 'flood', 'total': 100, 'done': 10, 'peer': entity, 'chat_id': 12345, 'report_data': '...', 'peer_name': '...'}}
+FLOOD_TASKS = {} 
+PROCESS_PROGRESS = {} 
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -82,7 +81,6 @@ class PromoStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     main_menu = State()
-    # promo_code_input удален, код генерируется автоматически
     promo_days_input = State()
     promo_uses_input = State()
     sub_user_id_input = State()
@@ -244,7 +242,7 @@ def get_main_kb(user_id):
     user = db_get_user(user_id)
     active = user.get('telethon_active')
     running = user_id in ACTIVE_TELETHON_WORKERS
-    has_progress = user_id in PROCESS_PROGRESS # Проверяем наличие активных процессов
+    has_progress = user_id in PROCESS_PROGRESS 
     
     kb = []
     kb.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
@@ -278,8 +276,15 @@ def get_no_access_kb(is_channel_reason):
          
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Создать Промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="👤 Выдать Подписку", callback_data="admin_grant_sub")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]
+    ])
+    
 # =========================================================================
-# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО С ИСПРАВЛЕНИЯМИ КОМАНД)
+# V. TELETHON WORKER (ОСНОВНОЕ ЯДРО)
 # =========================================================================
 
 async def send_long_message(client, user_id, text, parse_mode='HTML', max_len=4000):
@@ -314,7 +319,8 @@ async def send_long_message(client, user_id, text, parse_mode='HTML', max_len=40
         await asyncio.sleep(0.5) 
 
 async def stop_worker(user_id):
-    # ... (логика остановки worker'а без изменений) ...
+    """Останавливает Worker и очищает задачи."""
+    
     if user_id in FLOOD_TASKS:
         for chat_id, task in FLOOD_TASKS[user_id].items():
             if task and not task.done():
@@ -337,7 +343,7 @@ async def stop_worker(user_id):
     logger.info(f"Worker {user_id} stopped.")
 
 async def start_workers():
-    # ... (логика запуска worker'а без изменений) ...
+    """Запускает worker'ы для всех пользователей, у которых активна сессия в БД."""
     users = db_get_active_telethon_users()
     for uid in users:
         asyncio.create_task(run_worker(uid))
@@ -362,7 +368,6 @@ async def run_worker(user_id):
 
         # --- ЛОГИКА ФЛУДА И КОМАНД ---
         async def flood_task(peer, message, count, delay, chat_id):
-            # ... (логика flood_task без изменений) ...
             try:
                 is_unlimited = count <= 0
                 max_iterations = count if not is_unlimited else 999999999 
@@ -404,7 +409,7 @@ async def run_worker(user_id):
             
             chat_id = event.chat_id
             if chat_id is None:
-                 return await client.send_long_message(user_id, "❌ `.чекгруппу` должен быть вызван из группы/канала или с указанием его юзернейма/ID.")
+                 return await client.send_message(user_id, "❌ `.чекгруппу` должен быть вызван из группы/канала или с указанием его юзернейма/ID.")
                  
             try:
                 try:
@@ -420,6 +425,10 @@ async def run_worker(user_id):
                 PROCESS_PROGRESS[user_id] = {'type': 'checkgroup', 'peer': chat_entity, 'done_msg': 0}
                 
                 async for message in client.iter_messages(chat_entity, limit=limit):
+                    if user_id in PROCESS_PROGRESS and PROCESS_PROGRESS[user_id].get('type') != 'checkgroup':
+                        # Процесс был отменен или заменен
+                        return
+                        
                     PROCESS_PROGRESS[user_id]['done_msg'] += 1
                     
                     if message.sender and isinstance(message.sender, User) and message.sender_id not in unique_users:
@@ -430,6 +439,7 @@ async def run_worker(user_id):
                             
                             unique_users[user_id_int] = message.sender
                         
+                        # Небольшое ограничение для скорости
                         if len(unique_users) >= 1000 and min_id is None and max_id is None:
                             pass
 
@@ -453,12 +463,11 @@ async def run_worker(user_id):
                         f"Чат: {get_display_name(chat_entity)}\n"
                         f" • Просканировано сообщений: {PROCESS_PROGRESS[user_id]['done_msg']}\n"
                         f" • Найдено уникальных пользователей: {total_found}\n"
-                        f"\nСписок пользователей (Имя, Юзернейм, ID):\n"
-                        f"-------------------------------------------\n"
+                        f"\nСписок пользователей (Имя, Юзернейм, ID):"
                     )
                     
-                    # Полный отчет для сохранения
-                    full_report_text = header_text + ("\n-------------------------------------------\n".join(report_data_raw)).replace("<code>", "").replace("</code>", "")
+                    # Полный отчет для сохранения. Используем <pre> для форматирования в файле/частях
+                    full_report_text = header_text + "\n" + "\n".join(report_data_raw)
                     
                     # Сохраняем отчет во временное хранилище
                     PROCESS_PROGRESS[user_id]['report_data'] = full_report_text
@@ -480,9 +489,9 @@ async def run_worker(user_id):
                     await send_long_message(client, user_id, response, parse_mode='HTML')
                 
             except RpcCallFailError as e:
-                 await send_long_message(client, user_id, f"❌ Ошибка RPC при .чекгруппу (чат недоступен): {type(e).__name__}")
+                 await client.send_message(user_id, f"❌ Ошибка RPC при .чекгруппу (чат недоступен): {type(e).__name__}")
             except Exception as e:
-                await send_long_message(client, user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__} - {e}")
+                await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__} - {e}")
                 
             finally:
                 # Очистка прогресса, если отчет не сохранен или отправлен сразу
@@ -507,7 +516,6 @@ async def run_worker(user_id):
             # .ЛС
             if cmd == '.лс':
                 try:
-                    # ... (логика .лс) ...
                     full_text = event.text
                     lines = full_text.split('\n')
                     
@@ -569,6 +577,7 @@ async def run_worker(user_id):
                             file_content = f.read()
                         
                         formatted_content = f"📖 **Содержимое файла** (`{filename}`):\n"
+                        # Оборачиваем в <pre> для сохранения форматирования (столбцов)
                         formatted_content += "<pre>" + file_content + "</pre>"
                         
                         await send_long_message(client, user_id, formatted_content, parse_mode='HTML')
@@ -676,7 +685,7 @@ async def run_worker(user_id):
                             f" • Прогресс: **{'{:.2f}'.format(done/total*100) + '%' if total > 0 else '—'}**"
                         )
                     elif p_type == 'checkgroup':
-                        peer_name = progress.get('peer_name') or get_display_name(progress['peer'])
+                        peer_name = progress.get('peer_name', 'Неизвестно')
                         done_msg = progress['done_msg']
                         status_text = (
                             f"🔎 **СТАТУС АНАЛИЗА ЧАТА:**\n"
@@ -751,8 +760,17 @@ async def run_worker(user_id):
                     elif data == 'send_checkgroup_messages_worker':
                         await event.answer("⏳ Отправляю сообщения...")
                         
-                        # Костыль для форматирования в HTML-блоки при отправке по частям
-                        report_html = report_data.replace('\n-------------------------------------------\n', '\n-------------------------------------------\n<pre>').replace('\nСписок пользователей (Имя, Юзернейм, ID):\n', '\nСписок пользователей (Имя, Юзернейм, ID):\n<pre>') + '</pre>'
+                        # Оборачиваем список пользователей в <pre> для сохранения форматирования
+                        start_index = report_data.find("Список пользователей (Имя, Юзернейм, ID):")
+                        if start_index != -1:
+                            start_of_list = start_index + len("Список пользователей (Имя, Юзернейм, ID):")
+                            
+                            report_html = (
+                                report_data[:start_of_list] + "\n" +
+                                "<pre>" + report_data[start_of_list:].strip() + "</pre>"
+                            )
+                        else:
+                            report_html = report_data 
                         
                         await send_long_message(client, user_id, report_html, parse_mode='HTML')
                         await event.edit(f"✅ Отчет по чату `{peer_name}` отправлен по частям.")
@@ -813,7 +831,6 @@ async def cancel_handler(call: types.CallbackQuery, state: FSMContext):
 @user_router.callback_query(F.data == "back_to_main")
 @user_router.message(Command("start"))
 async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
-    # ... (логика cmd_start без изменений) ...
     user_id = u.from_user.id
     db_get_user(user_id)
     await state.clear()
@@ -841,7 +858,6 @@ async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
 
 @user_router.callback_query(F.data == "telethon_auth_qr_start")
 async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика QR-кода без изменений, используем ссылку) ...
     has_access, _ = await check_access(call.from_user.id, bot)
     if not has_access:
         return await call.answer("Доступ к авторизации ограничен. Активируйте подписку.", show_alert=True)
@@ -882,7 +898,6 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await state.clear()
 
 async def wait_for_qr_login(uid, client, state, chat_id, message_id):
-    # ... (логика ожидания QR-кода без изменений) ...
     try:
         data = await state.get_data()
         qr_login = data.get('qr_login')
@@ -936,7 +951,6 @@ async def wait_for_qr_login(uid, client, state, chat_id, message_id):
 
 @user_router.callback_query(F.data == "telethon_auth_phone_start")
 async def auth_phone_start(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика входа по номеру без изменений) ...
     has_access, _ = await check_access(call.from_user.id, bot)
     if not has_access:
         return await call.answer("Доступ к авторизации ограничен. Активируйте подписку.", show_alert=True)
@@ -957,7 +971,6 @@ async def auth_phone_start(call: types.CallbackQuery, state: FSMContext):
 
 @user_router.message(TelethonAuth.PHONE)
 async def auth_msg_phone(msg: Message, state: FSMContext):
-    # ... (логика ввода телефона без изменений) ...
     phone = msg.text.strip()
     uid = msg.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
@@ -985,13 +998,11 @@ async def auth_msg_phone(msg: Message, state: FSMContext):
 
 @user_router.message(TelethonAuth.CODE)
 async def auth_msg_code(msg: Message, state: FSMContext):
-    # ... (логика ввода кода без изменений) ...
     code = re.sub(r'\D', '', msg.text.strip())
     await process_code_submit(msg, state, code)
 
 @user_router.callback_query(F.data.startswith("code_input_"), StateFilter(TelethonAuth.CODE))
 async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика клавиатуры ввода кода без изменений) ...
     data = await state.get_data()
     current_code = data.get('current_code', '')
     action = call.data.split('_')[-1]
@@ -1019,7 +1030,6 @@ async def code_kb_handler(call: types.CallbackQuery, state: FSMContext):
             await call.answer("Код слишком короткий.", show_alert=True)
 
 async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSMContext, code: str):
-    # ... (логика отправки кода без изменений) ...
     uid = u.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     
@@ -1071,7 +1081,6 @@ async def process_code_submit(u: types.Message | types.CallbackQuery, state: FSM
 
 @user_router.message(TelethonAuth.PASSWORD)
 async def auth_pwd(msg: Message, state: FSMContext):
-    # ... (логика ввода пароля без изменений) ...
     uid = msg.from_user.id
     client = TEMP_AUTH_CLIENTS.get(uid)
     if not client:
@@ -1111,7 +1120,6 @@ async def manage_worker(call: types.CallbackQuery):
     uid = call.from_user.id
     
     if call.data == 'telethon_start_session':
-        # Перед запуском проверяем, есть ли сессия
         if not os.path.exists(get_session_path(uid) + '.session'):
             return await call.answer("⚠️ Файл сессии не найден. Требуется авторизация.", show_alert=True)
             
@@ -1168,13 +1176,11 @@ async def show_progress_handler(call: types.CallbackQuery):
 # --- АКТИВАЦИЯ ПРОМОКОДА ---
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def user_promo(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика активации промокода без изменений) ...
     await state.set_state(PromoStates.waiting_for_code)
     await call.message.edit_text("Введи промокод:", reply_markup=get_cancel_kb())
 
 @user_router.message(PromoStates.waiting_for_code)
 async def user_promo_check(msg: Message, state: FSMContext):
-    # ... (логика проверки промокода без изменений) ...
     code = msg.text.strip()
     p = db_get_promo(code)
     
@@ -1201,7 +1207,6 @@ async def user_promo_check(msg: Message, state: FSMContext):
 
 @user_router.callback_query(F.data == "admin_panel_start")
 async def admin_panel_start(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика админ-панели без изменений) ...
     if call.from_user.id != ADMIN_ID: return await call.answer("Недостаточно прав.")
     await state.set_state(AdminStates.main_menu)
     await call.message.edit_text("🛠️ **Админ-Панель**\nВыберите действие:", reply_markup=get_admin_kb())
@@ -1230,7 +1235,6 @@ async def admin_promo_uses_input(msg: Message, state: FSMContext):
         max_uses = int(msg.text.strip())
         data = await state.get_data()
         
-        # Используем сгенерированный код
         db_add_promo(data['code'], data['days'], max_uses if max_uses > 0 else None)
         
         await msg.answer(
@@ -1247,13 +1251,11 @@ async def admin_promo_uses_input(msg: Message, state: FSMContext):
 
 @user_router.callback_query(F.data == "admin_grant_sub", StateFilter(AdminStates.main_menu))
 async def admin_grant_sub_start(call: types.CallbackQuery, state: FSMContext):
-    # ... (логика выдачи подписки без изменений) ...
     await state.set_state(AdminStates.sub_user_id_input)
     await call.message.edit_text("👤 Введите ID пользователя, которому выдать подписку:", reply_markup=get_cancel_kb())
 
 @user_router.message(AdminStates.sub_user_id_input)
 async def admin_sub_user_id_input(msg: Message, state: FSMContext):
-    # ... (логика ввода ID без изменений) ...
     try:
         target_id = int(msg.text.strip())
         await state.update_data(target_id=target_id)
@@ -1264,7 +1266,6 @@ async def admin_sub_user_id_input(msg: Message, state: FSMContext):
 
 @user_router.message(AdminStates.sub_days_input)
 async def admin_sub_days_input(msg: Message, state: FSMContext):
-    # ... (логика выдачи дней без изменений) ...
     try:
         days = int(msg.text.strip())
         data = await state.get_data()
@@ -1272,13 +1273,19 @@ async def admin_sub_days_input(msg: Message, state: FSMContext):
         
         end = db_update_subscription(target_id, days)
         
+        # ИСПРАВЛЕНО: Убран обратный слеш, используется безопасный перенос строки через скобки.
         await msg.answer(
             f"✅ Подписка выдана пользователю <code>{target_id}</code> на {days} дней.\n"
             f"Новая дата окончания: <b>{end}</b>", 
             reply_markup=get_admin_kb()
         )
         
-        await bot.send_message(target_id, f"🎉 Вам выдана подписка на {days} дней до {end}!", reply_markup=get_main_kb(target_id))
+        # ИСПРАВЛЕНО: Убран обратный слеш.
+        await bot.send_message(
+            target_id, 
+            f"🎉 Вам выдана подписка на {days} дней до {end}!", 
+            reply_markup=get_main_kb(target_id)
+        )
 
     except ValueError:
         await msg.answer("❌ Введите корректное число дней.", reply_markup=get_cancel_kb())
