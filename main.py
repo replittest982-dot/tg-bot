@@ -30,9 +30,9 @@ import qrcode
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# !!! ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ ВАШИ КЛЮЧИ !!!
-BOT_TOKEN = "7868097991:AAFQtLSv6nlS5PmGH4TMsgV03dxs_X7iZf8"
-ADMIN_ID = 6256576302 # Ваш ID для доступа к Админ-Панели
+# !!! ВАШИ КЛЮЧИ !!!
+BOT_TOKEN = "7868097991:AAH-IVyUWi9ghtRgeUe8zO6r20xCeAK1P0"  # ОБНОВЛЕННЫЙ ТОКЕН
+ADMIN_ID = 6256576302  # Ваш ID для доступа к Админ-Панели
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1" # Канал для обязательной подписки
@@ -155,10 +155,12 @@ def db_check_subscription(user_id: int) -> bool:
         end_date_str = user.get('subscription_end_date')
         if not end_date_str:
              return False
-        end_date = datetime.strptime(end_date_str, '%Y-%m-%d %H:%M:%S')
+        # Используем pytz для корректного сравнения времени
+        end_date = TIMEZONE_MSK.localize(datetime.strptime(end_date_str, '%Y-%m-%d %H:%M:%S'))
+        now_msk = datetime.now(TIMEZONE_MSK)
     except Exception:
         return False
-    return end_date > datetime.now()
+    return end_date > now_msk
 
 def db_set_session_status(user_id: int, is_active: bool, hash_code: str = None):
     """Устанавливает статус Telethon-сессии и ГАРАНТИРУЕТ СУЩЕСТВОВАНИЕ записи о пользователе."""
@@ -183,7 +185,8 @@ def db_get_monitor_logs(user_id, log_type, since_days: int = None):
     params = [user_id, log_type]
     
     if since_days is not None and since_days > 0:
-        cutoff_date = (datetime.now() - timedelta(days=since_days)).strftime('%Y-%m-%d %H:%M:%S')
+        # Учитываем часовой пояс при расчете даты
+        cutoff_date = (datetime.now(TIMEZONE_MSK) - timedelta(days=since_days)).strftime('%Y-%m-%d %H:%M:%S')
         query += "AND timestamp >= ? "
         params.append(cutoff_date)
 
@@ -194,7 +197,8 @@ def db_get_monitor_logs(user_id, log_type, since_days: int = None):
 def db_add_monitor_log(user_id, log_type, command, target):
     conn = get_db_connection()
     cur = conn.cursor()
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Логируем время по Москве
+    timestamp = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
     cur.execute("INSERT INTO monitor_logs (user_id, timestamp, type, command, target) VALUES (?, ?, ?, ?, ?)",
                 (user_id, timestamp, log_type, command, target))
     conn.commit()
@@ -220,6 +224,7 @@ async def check_access(user_id: int, bot: Bot) -> tuple[bool, str]:
     
     user = db_get_user(user_id)
     if not user:
+        # Если пользователь не найден, создаем его с неактивной сессией
         db_set_session_status(user_id, False) 
         user = db_get_user(user_id)
 
@@ -234,6 +239,7 @@ async def check_access(user_id: int, bot: Bot) -> tuple[bool, str]:
         if member.status in ["member", "administrator", "creator"]:
              return True, ""
     except Exception as e:
+        # Игнорируем ошибку, если канал не найден или бот не админ, но доступ все равно закрыт
         logger.error(f"Ошибка проверки подписки на канал для {user_id}: {e}")
         
     return False, f"❌ Для использования бота необходима активная подписка или подписка на канал **{TARGET_CHANNEL_URL}**."
@@ -248,6 +254,7 @@ def get_cancel_keyboard():
 
 def get_numeric_code_keyboard(current_code=""):
     """Возвращает Inline-клавиатуру для удобного ввода 4/5-значного кода."""
+    # ... (Клавиатура для кода осталась без изменений) ...
     kb = [
         [
             InlineKeyboardButton(text="1️⃣", callback_data="auth_digit_1"),
@@ -288,6 +295,9 @@ def get_main_inline_kb(user_id: int) -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton(text="🔐 Авторизация", callback_data="telethon_auth_start")])
     # 2. Если авторизован (есть сессия) -> Мониторинг и Worker
     else:
+        # Кнопка Активировать Промокод доступна всегда, но переместим ее, если есть активная сессия
+        keyboard.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
+        
         # Кнопка Мониторинга доступна только при наличии сессии
         keyboard.append([InlineKeyboardButton(text="📊 Отчеты и Мониторинг", callback_data="show_monitor_menu")])
         
@@ -363,6 +373,7 @@ async def run_telethon_worker_for_user(user_id: int):
     ACTIVE_TELETHON_CLIENTS[user_id] = client
 
     try:
+        # Проверяем наличие файла сессии
         if not os.path.exists(session_path + '.session'):
             logger.warning(f"Файл сессии не найден для {user_id}. Требуется повторная авторизация.")
             db_set_session_status(user_id, False)
@@ -388,7 +399,8 @@ async def run_telethon_worker_for_user(user_id: int):
             ".повтор": r'^\.повтор.*',
         }
         # Паттерн для DROP-лога (Телефон Пробел Время Пробел @ник Пробел бх [Пробел Время])
-        DROP_PATTERN_REGEX = r'^\+?\d{10,15}\s+\d{1,2}:\d{2}\s+@\w+\s+бх(?:\s+\d{1,2}:\d{2})?.*'
+        # Улучшенный паттерн для захвата более широкого спектра дропов
+        DROP_PATTERN_REGEX = r'^\+?\d{5,15}\s+\d{1,2}:\d{2}\s+@\w+\s+бх(?:\s+.*)?' 
 
         @client.on(events.NewMessage)
         async def monitor_listener(event):
@@ -398,9 +410,11 @@ async def run_telethon_worker_for_user(user_id: int):
                 # Если доступа нет, пропускаем обработку команд и мониторинг
                 return
             
+            # Обрабатываем только группы/каналы, имеющие текст
             if not event.is_group and not event.is_channel or not event.message.text: return
             
             try:
+                # Telethon Chat ID может быть отрицательным числом
                 chat_id_str = str(event.chat_id) 
                 message_text = event.message.text.strip()
                 
@@ -425,6 +439,7 @@ async def run_telethon_worker_for_user(user_id: int):
         async def telethon_command_handler(event):
             
             me = await client.get_me()
+            # Проверяем, что сообщение пришло в ЛС самому себе
             if event.sender_id != me.id: return
             if not event.is_private: return
             
@@ -495,6 +510,7 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
 async def cmd_start_or_back(union: types.Message | types.CallbackQuery, state: FSMContext):
     user_id = union.from_user.id
     
+    # Гарантируем, что запись о пользователе существует
     db_set_session_status(user_id, False) 
     has_access, error_msg = await check_access(user_id, bot)
     
@@ -550,6 +566,7 @@ async def telethon_auth_step_phone(message: Message, state: FSMContext):
     user_id = message.from_user.id
     phone_number = message.text.strip()
     session_path = get_session_file_path(user_id)
+    # Используем временный клиент для отправки кода
     client = TelegramClient(session_path, API_ID, API_HASH)
     
     try:
@@ -576,6 +593,7 @@ async def telethon_auth_step_phone(message: Message, state: FSMContext):
         await message.answer(error_text, reply_markup=get_main_inline_kb(user_id))
         await state.clear()
     finally:
+        # Важно отключить клиента после отправки кода
         if client.is_connected():
             await client.disconnect()
 
@@ -589,6 +607,7 @@ async def telethon_auth_start_qr(callback: types.CallbackQuery, state: FSMContex
     
     try:
         await client.connect()
+        # Генерируем токен и URL
         login_token = await client.qr_login()
         
         # Генерируем QR-код
@@ -604,7 +623,10 @@ async def telethon_auth_start_qr(callback: types.CallbackQuery, state: FSMContex
         
         await state.set_state(TelethonAuth.QR_CODE_WAIT)
         
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass # Игнорируем ошибку удаления
         
         message_qr = await bot.send_photo(
             chat_id=user_id,
@@ -615,10 +637,9 @@ async def telethon_auth_start_qr(callback: types.CallbackQuery, state: FSMContex
             reply_markup=get_cancel_keyboard()
         )
         
-        await client.disconnect()
-        
         # Запускаем ожидание входа
-        asyncio.create_task(wait_for_qr_login(user_id, login_token, state, message_qr))
+        # Передаем client, чтобы не потерять соединение во время ожидания
+        asyncio.create_task(wait_for_qr_login(user_id, login_token, state, message_qr, client))
         
     except Exception as e:
         logger.error(f"Ошибка при генерации QR-кода: {e}")
@@ -626,16 +647,13 @@ async def telethon_auth_start_qr(callback: types.CallbackQuery, state: FSMContex
                                      reply_markup=get_main_inline_kb(user_id))
         await state.clear()
     finally:
-        if client.is_connected():
-             await client.disconnect()
+        # НЕ ОТКЛЮЧАЕМ client здесь, т.к. он нужен в `wait_for_qr_login`
+        pass
 
-async def wait_for_qr_login(user_id: int, login_token, state: FSMContext, message_qr: Message):
+async def wait_for_qr_login(user_id: int, login_token, state: FSMContext, message_qr: Message, client: TelegramClient):
     """Функция, которая ждет, пока пользователь авторизуется по QR-коду."""
-    session_path = get_session_file_path(user_id)
-    client = TelegramClient(session_path, API_ID, API_HASH)
     
     try:
-        await client.connect()
         # Максимальное время ожидания 120 секунд
         await client.loop.run_in_executor(None, lambda: login_token.wait(timeout=120)) 
         
@@ -643,20 +661,27 @@ async def wait_for_qr_login(user_id: int, login_token, state: FSMContext, messag
         if login_token.signed_in:
             await client.disconnect()
             
+            # Запускаем Worker
             task = asyncio.create_task(run_telethon_worker_for_user(user_id))
             ACTIVE_TELETHON_WORKERS[user_id] = task
             
             await message_qr.edit_caption("✅ **Авторизация по QR-коду успешна!** Telethon-сессия активна.", reply_markup=None)
-            await message_qr.answer("Возврат в главное меню.", reply_markup=get_main_inline_kb(user_id))
+            await bot.send_message(user_id, "Возврат в главное меню.", reply_markup=get_main_inline_kb(user_id))
         else:
             await message_qr.edit_caption("❌ **Время авторизации по QR-коду истекло** или сессия была отменена.", reply_markup=None)
-            await message_qr.answer("Пожалуйста, попробуйте еще раз.", reply_markup=get_main_inline_kb(user_id))
+            await bot.send_message(user_id, "Пожалуйста, попробуйте еще раз.", reply_markup=get_main_inline_kb(user_id))
 
     except asyncio.CancelledError:
-        await message_qr.edit_caption("❌ **Авторизация по QR-коду отменена** пользователем.", reply_markup=None)
+        try:
+             await message_qr.edit_caption("❌ **Авторизация по QR-коду отменена** пользователем.", reply_markup=None)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Ошибка в процессе ожидания QR-кода: {e}")
-        await message_qr.edit_caption(f"❌ Критическая ошибка при авторизации по QR-коду: `{type(e).__name__}`", reply_markup=None)
+        try:
+             await message_qr.edit_caption(f"❌ Критическая ошибка при авторизации по QR-коду: `{type(e).__name__}`", reply_markup=None)
+        except Exception:
+            pass
     finally:
         await state.clear()
         if client.is_connected():
@@ -676,8 +701,10 @@ async def telethon_auth_step_code_logic(source_message: Message, state: FSMConte
 
     try:
         await client.connect()
+        # Выполняем попытку входа
         await client.sign_in(phone=phone_number, code=code, phone_code_hash=phone_code_hash)
         
+        # Если успешно, отключаемся и запускаем Worker
         await client.disconnect()
 
         task = asyncio.create_task(run_telethon_worker_for_user(user_id))
@@ -687,6 +714,7 @@ async def telethon_auth_step_code_logic(source_message: Message, state: FSMConte
         await state.clear()
         
     except SessionPasswordNeededError:
+        # Если нужен 2FA, переходим к следующему шагу
         if client.is_connected():
             await client.disconnect()
         await state.set_state(TelethonAuth.PASSWORD)
@@ -697,6 +725,10 @@ async def telethon_auth_step_code_logic(source_message: Message, state: FSMConte
         await source_message.answer(error_text, reply_markup=get_main_inline_kb(user_id))
         await state.clear()
         
+    finally:
+         if client.is_connected():
+            await client.disconnect()
+         
 
 # 1. Обработка цифровых кнопок (UI)
 @user_router.callback_query(F.data.startswith("auth_digit_") | F.data == "auth_submit_code" | F.data == "auth_delete_digit", TelethonAuth.CODE)
@@ -722,6 +754,7 @@ async def process_code_input_ui(callback: types.CallbackQuery, state: FSMContext
 
         # Используем исходное сообщение колбэка для ответа и для получения chat_id/user_id
         await callback.message.edit_text(f"⏳ Проверка кода: `{temp_code}`...", reply_markup=None)
+        # Отправляем в основную логику
         await telethon_auth_step_code_logic(callback.message, state, temp_code)
         await callback.answer("Код отправлен.")
         return
@@ -795,6 +828,14 @@ async def telethon_stop_session_handler(callback: types.CallbackQuery, state: FS
 async def telethon_start_session_handler(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
+    # Проверка, что сессия существует (если нет, то кнопка не должна отображаться, 
+    # но это дополнительная защита)
+    user_data = db_get_user(user_id)
+    if not user_data.get('telethon_active', 0):
+        await callback.answer("❌ Сначала выполните полную авторизацию.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=get_main_inline_kb(user_id))
+        return
+
     task = asyncio.create_task(run_telethon_worker_for_user(user_id))
     ACTIVE_TELETHON_WORKERS[user_id] = task
     
