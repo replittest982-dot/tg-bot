@@ -6,6 +6,8 @@ import pytz
 import time
 import re
 import io
+import random
+import string
 from datetime import datetime, timedelta
 
 # Импорты aiogram
@@ -21,7 +23,7 @@ from aiogram.filters.state import StateFilter # Явный импорт для �
 
 # Импорты telethon
 from telethon import TelegramClient, events
-from telethon.errors import UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.errors import UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
 from telethon.utils import get_display_name
 
 # Импорт для QR-кода
@@ -32,7 +34,6 @@ import qrcode
 # =========================================================================
 
 # !!! ВАШИ КЛЮЧИ !!! 
-# ЖЕСТКО ПРОПИСАННЫЙ ТОКЕН. 
 BOT_TOKEN = "7868097991:AAEuHy_DYjEkBTK-H-U1P4-wZSdSw7evzEQ" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
@@ -267,11 +268,50 @@ def db_set_chat_id(user_id: int, chat_type: str, chat_id: str):
     
     cur.execute(f"UPDATE users SET {col}=? WHERE user_id=?", (chat_id, user_id))
     conn.commit()
+    
+def db_add_promo_code(code: str, days: int, max_uses: int | None = None):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO promo_codes (code, days, max_uses) VALUES (?, ?, ?)
+    """, (code, days, max_uses))
+    conn.commit()
 
+def db_get_promo_code(code: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM promo_codes WHERE code=?", (code,))
+    row = cur.fetchone()
+    if row:
+        cols = [desc[0] for desc in cur.description]
+        return dict(zip(cols, row))
+    return None
+
+def db_use_promo_code(code: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # 1. Увеличиваем счетчик использования
+    cur.execute("""
+        UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code=?
+    """, (code,))
+    
+    # 2. Проверяем, нужно ли деактивировать (если current_uses >= max_uses)
+    cur.execute("""
+        UPDATE promo_codes SET is_active = 0 
+        WHERE code=? AND max_uses IS NOT NULL AND current_uses >= max_uses
+    """, (code,))
+    
+    conn.commit()
 
 # =========================================================================
 # IV. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И КЛАВИАТУРА
 # =========================================================================
+
+def generate_promo_code(length=10):
+    """Генерирует случайный промокод."""
+    characters = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(characters) for _ in range(length))
 
 def get_cancel_task_kb(task_name: str) -> InlineKeyboardMarkup:
     """Клавиатура для остановки активной Telethon-задачи."""
@@ -282,6 +322,18 @@ def get_cancel_task_kb(task_name: str) -> InlineKeyboardMarkup:
 def get_session_file_path(user_id: int):
     os.makedirs('data', exist_ok=True)
     return os.path.join('data', f'session_{user_id}')
+
+async def check_channel_subscription(user_id: int, bot: Bot) -> bool:
+    """Проверяет подписку на обязательный канал."""
+    try:
+        member = await bot.get_chat_member(TARGET_CHANNEL_URL, user_id) 
+        if member.status in ["member", "administrator", "creator"]:
+             return True
+    except Exception as e:
+        # Ошибка, возможно, потому что канал не существует или бот не админ
+        logger.error(f"Ошибка проверки подписки на канал для {user_id}: {e}")
+        
+    return False
 
 async def check_access(user_id: int, bot: Bot) -> tuple[bool, str]:
     """Проверяет доступ пользователя (админ, подписка, канал)."""
@@ -296,12 +348,8 @@ async def check_access(user_id: int, bot: Bot) -> tuple[bool, str]:
         return True, ""
     
     # 2. Проверка подписки на канал (TARGET_CHANNEL_URL)
-    try:
-        member = await bot.get_chat_member(TARGET_CHANNEL_URL, user_id) 
-        if member.status in ["member", "administrator", "creator"]:
-             return True, ""
-    except Exception as e:
-        logger.error(f"Ошибка проверки подписки на канал для {user_id}: {e}")
+    if await check_channel_subscription(user_id, bot):
+        return True, ""
         
     return False, f"❌ Для использования бота необходима активная подписка или подписка на канал **{TARGET_CHANNEL_URL}**."
 
@@ -312,6 +360,13 @@ def get_cancel_keyboard():
             [types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
         ]
     )
+
+def get_channel_check_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➡️ Канал для подписки", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}")] ,
+        [InlineKeyboardButton(text="✅ Я подписался!", callback_data="back_to_main")] 
+    ])
+
 
 def get_numeric_code_keyboard(current_code=""):
     kb = [
@@ -340,7 +395,7 @@ def get_numeric_code_keyboard(current_code=""):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_main_inline_kb(user_id: int) -> InlineKeyboardMarkup:
+def get_main_inline_kb(user_id: int, check_sub: bool) -> InlineKeyboardMarkup:
     """Генерирует ГЛАВНУЮ клавиатуру."""
     user_data = db_get_user(user_id)
     is_telethon_active = user_data.get('telethon_active', 0) if user_data else 0
@@ -348,10 +403,12 @@ def get_main_inline_kb(user_id: int) -> InlineKeyboardMarkup:
     
     keyboard = []
 
-    if not db_check_subscription(user_id) and user_id != ADMIN_ID:
+    if not check_sub and user_id != ADMIN_ID:
+        # Если нет подписки и не админ, показываем только проверку и промокод
         keyboard.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
         keyboard.append([InlineKeyboardButton(text="🌐 Проверить подписку", callback_data="back_to_main")])
     else:
+        # Если подписка есть (по времени или по каналу)
         if not is_telethon_active:
             keyboard.append([InlineKeyboardButton(text="🔐 Авторизация", callback_data="telethon_auth_start")])
         else:
@@ -380,7 +437,7 @@ def get_main_inline_kb(user_id: int) -> InlineKeyboardMarkup:
 def get_auth_method_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Вход по Номеру", callback_data="auth_method_phone")],
-        [InlineKeyboardButton(text="🖼️ Вход по QR-коду", callback_data="auth_method_qr")],
+        # [InlineKeyboardButton(text="🖼️ Вход по QR-коду", callback_data="auth_method_qr")], # Отключаем QR-код для простоты
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
     ])
 
@@ -429,46 +486,6 @@ async def stop_telethon_worker_for_user(user_id: int):
         
     db_set_session_status(user_id, False)
 
-# --- FSM для запуска/остановки Worker'а ---
-@user_router.callback_query(F.data == "telethon_start_session")
-async def telethon_start_session_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id in ACTIVE_TELETHON_WORKERS:
-        await callback.answer("Worker уже запущен.", show_alert=True)
-        return
-    
-    # Запускаем Worker в фоновой задаче
-    task = asyncio.create_task(run_telethon_worker_for_user(user_id))
-    ACTIVE_TELETHON_WORKERS[user_id] = task
-    await callback.message.edit_text("⏳ **Запускаю Telethon Worker...**", reply_markup=None)
-    await callback.answer()
-
-@user_router.callback_query(F.data == "telethon_stop_session")
-async def telethon_stop_session_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id not in ACTIVE_TELETHON_WORKERS:
-        await callback.answer("Worker уже остановлен.", show_alert=True)
-        return
-        
-    await stop_telethon_worker_for_user(user_id)
-    await callback.message.edit_text("🛑 **Telethon Worker остановлен.**", reply_markup=get_main_inline_kb(user_id))
-    await callback.answer("Worker остановлен.")
-
-@user_router.callback_query(F.data == "telethon_check_status")
-async def telethon_check_status_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = db_get_user(user_id)
-    is_session_active = user_data.get('telethon_active', 0)
-    
-    if is_session_active and user_id in ACTIVE_TELETHON_WORKERS:
-        status = "🟢 Сессия и Worker активны."
-    elif is_session_active:
-        status = "🟡 Сессия активна в БД, но Worker не запущен."
-    else:
-        status = "🔴 Сессия неактивна. Требуется авторизация."
-    
-    await callback.answer(status, show_alert=True)
-
 
 async def run_telethon_worker_for_user(user_id: int):
     """Запускает Telethon worker для конкретного пользователя."""
@@ -486,7 +503,7 @@ async def run_telethon_worker_for_user(user_id: int):
         if not os.path.exists(session_path + '.session'):
             logger.warning(f"Файл сессии не найден для {user_id}. Требуется повторная авторизация.")
             db_set_session_status(user_id, False)
-            await bot.send_message(user_id, "❌ Файл сессии не найден. Требуется повторная авторизация.", reply_markup=get_main_inline_kb(user_id))
+            await bot.send_message(user_id, "❌ Файл сессии не найден. Требуется повторная авторизация.", reply_markup=get_main_inline_kb(user_id, True))
             return
 
         await client.start()
@@ -495,7 +512,7 @@ async def run_telethon_worker_for_user(user_id: int):
         
         db_set_session_status(user_id, True)
         
-        await bot.send_message(user_id, "⚙️ **Telethon Worker запущен и готов к работе!**", reply_markup=get_main_inline_kb(user_id))
+        await bot.send_message(user_id, "⚙️ **Telethon Worker запущен и готов к работе!**", reply_markup=get_main_inline_kb(user_id, True))
 
         user_db = db_get_user(user_id)
         it_chat_id_str = user_db.get('it_chat_id')
@@ -515,23 +532,28 @@ async def run_telethon_worker_for_user(user_id: int):
             # Проверка доступа на уровне Worker
             has_access, _ = await check_access(user_id, bot)
             if not has_access and user_id != ADMIN_ID:
+                # Если подписка кончилась, не обрабатываем
                 return
             
             if not event.is_group and not event.is_channel or not event.message.text: return
             
             try:
-                chat_id_str = str(event.chat_id) 
+                # Получаем chat_id в формате строки (Telethon использует ID, а не username)
+                chat_entity = await event.get_chat()
+                chat_id_str = str(chat_entity.id) if chat_entity else None
+                if not chat_id_str: return
+
                 message_text = event.message.text.strip()
                 
                 # IT Логирование
-                if it_chat_id_str and chat_id_str == it_chat_id_str:
+                if it_chat_id_str and chat_id_str == it_chat_id_str.lstrip('@'): # Учитываем, что в БД может быть username
                     for command, regex in IT_PATTERNS.items():
                         if re.match(regex, message_text, re.IGNORECASE | re.DOTALL):
                             db_add_monitor_log(user_id, 'IT', command, message_text)
                             break
                 
                 # DROP Логирование
-                if drop_chat_id_str and chat_id_str == drop_chat_id_str:
+                if drop_chat_id_str and chat_id_str == drop_chat_id_str.lstrip('@'):
                     if re.match(DROP_PATTERN_REGEX, message_text, re.IGNORECASE | re.DOTALL):
                          db_add_monitor_log(user_id, 'DROP', 'DROP_ENTRY', message_text)
 
@@ -565,17 +587,17 @@ async def run_telethon_worker_for_user(user_id: int):
         logger.info(f"Telethon Worker [{user_id}] отменен по запросу.")
     except UserDeactivatedError:
         logger.warning(f"Аккаунт Telethon {user_id} деактивирован.")
-        await bot.send_message(user_id, "⚠️ Аккаунт деактивирован. Требуется переавторизация.", reply_markup=get_main_inline_kb(user_id))
+        await bot.send_message(user_id, "⚠️ Аккаунт деактивирован. Требуется переавторизация.", reply_markup=get_main_inline_kb(user_id, True))
     except FloodWaitError as e:
          error_text = f"❌ Ошибка лимитов Telegram: Необходимо подождать {e.seconds} секунд."
-         await bot.send_message(user_id, error_text, reply_markup=get_main_inline_kb(user_id))
+         await bot.send_message(user_id, error_text, reply_markup=get_main_inline_kb(user_id, True))
     except Exception as e:
         logger.error(f"Критическая ошибка Telethon Worker [{user_id}]: {e}")
         error_text = f"❌ Критическая ошибка Telethon Worker: `{type(e).__name__}`. Требуется переавторизация."
         if "AuthorizationKeyUnregistered" in str(e):
              error_text = "❌ Ключ авторизации недействителен. Сессия завершена. Требуется переавторизация."
              
-        await bot.send_message(user_id, error_text, reply_markup=get_main_inline_kb(user_id))
+        await bot.send_message(user_id, error_text, reply_markup=get_main_inline_kb(user_id, True))
     finally:
         if user_id in ACTIVE_TELETHON_CLIENTS:
             del ACTIVE_TELETHON_CLIENTS[user_id]
@@ -617,31 +639,42 @@ async def cmd_start_or_back(union: types.Message | types.CallbackQuery, state: F
     user_id = union.from_user.id
     
     db_get_user(user_id) # Гарантируем, что пользователь создан в БД
-    has_access, error_msg = await check_access(user_id, bot)
     
-    keyboard = get_main_inline_kb(user_id)
+    # 1. Проверяем подписку по времени
+    is_subscribed_by_time = db_check_subscription(user_id)
     
-    if has_access or user_id == ADMIN_ID:
-        # Проверяем дату окончания подписки для отображения
-        user_data = db_get_user(user_id)
-        end_date_str = user_data.get('subscription_end_date')
-        
-        sub_info = "Подписка: `Нет`"
-        if db_check_subscription(user_id):
-             sub_info = f"Подписка до: `{end_date_str}`"
-        
-        text = (
-            "👋 **Привет, юный!**\n\n"
-            f"Ваш ID: `{user_id}`\n"
-            f"{sub_info}\n\n"
-            "Это бот для мониторинга команд в Telegram-чатах с помощью вашей личной Telethon-сессии.\n\n"
-            "Выберите опцию ниже."
-        ).format(user_id=user_id)
-    else:
-        text = error_msg + f"\n\nВаш ID: `{user_id}`. Пожалуйста, выполните условия доступа, чтобы разблокировать функционал."
-
+    # 2. Проверяем подписку на канал
+    is_subscribed_to_channel = await check_channel_subscription(user_id, bot)
+    
+    has_access = is_subscribed_by_time or is_subscribed_to_channel or user_id == ADMIN_ID
+    
     await state.clear()
     
+    user_data = db_get_user(user_id)
+    end_date_str = user_data.get('subscription_end_date')
+    sub_info = f"Подписка до: `{end_date_str}`" if is_subscribed_by_time else "Подписка: `Нет`"
+        
+    text = (
+        "👋 **Привет!**\n\n"
+        f"Ваш ID: `{user_id}`\n"
+        f"{sub_info}\n\n"
+    )
+    
+    if not has_access and user_id != ADMIN_ID:
+        text += (
+            "⚠️ **Доступ ограничен.**\n"
+            f"Для использования функционала необходимо подписаться на наш канал: **{TARGET_CHANNEL_URL}** или активировать Промокод.\n"
+        )
+        keyboard = get_channel_check_kb()
+    else:
+        text += (
+            "✅ **Доступ открыт!**\n"
+            "Это бот для мониторинга команд в Telegram-чатах с помощью вашей личной Telethon-сессии.\n\n"
+            "Выберите опцию ниже."
+        )
+        keyboard = get_main_inline_kb(user_id, has_access)
+        
+
     if isinstance(union, types.Message):
         await union.answer(text, reply_markup=keyboard)
     else:
@@ -655,6 +688,12 @@ async def cmd_start_or_back(union: types.Message | types.CallbackQuery, state: F
 
 @user_router.callback_query(F.data == "telethon_auth_start")
 async def telethon_auth_choose_method_handler(callback: types.CallbackQuery, state: FSMContext):
+    # Дополнительная проверка доступа перед началом авторизации
+    has_access, _ = await check_access(callback.from_user.id, bot)
+    if not has_access:
+        await callback.answer("❌ Доступ ограничен. Сначала получите подписку или подпишитесь на канал.", show_alert=True)
+        return
+        
     await state.set_state(TelethonAuth.CHOOSE_AUTH_METHOD)
     await callback.message.edit_text(
         "🔐 **Авторизация Telethon**\n\nВыберите удобный способ входа:",
@@ -700,7 +739,7 @@ async def telethon_auth_step_phone(message: Message, state: FSMContext):
         await message.answer("❌ **Ошибка:** Неверный формат номера телефона. Используйте `+79001234567`.", reply_markup=get_cancel_keyboard())
     except Exception as e:
         error_text = f"❌ **Критическая ошибка авторизации:** Не удалось отправить код. `{type(e).__name__}`"
-        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id))
+        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
     finally:
         if client.is_connected():
@@ -780,16 +819,28 @@ async def telethon_auth_step_code_logic(message: Message, state: FSMContext, cod
         task = asyncio.create_task(run_telethon_worker_for_user(user_id))
         ACTIVE_TELETHON_WORKERS[user_id] = task
         
-        await message.answer("✅ **Авторизация успешна!** Telethon-сессия активна.", reply_markup=get_main_inline_kb(user_id))
+        await message.answer("✅ **Авторизация успешна!** Telethon-сессия активна.", reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
         
     except SessionPasswordNeededError:
         # Требуется 2FA
         await state.set_state(TelethonAuth.PASSWORD)
         await message.answer("🔒 **Включена двухфакторная аутентификация.**\nВведите пароль 2FA.", reply_markup=get_cancel_keyboard())
+    except PhoneCodeExpiredError:
+        # Ошибка, которую вы спрашивали
+        await message.answer(
+            "❌ **Ошибка:** Срок действия кода истек. Попробуйте снова.", 
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📱 Ввести номер заново", callback_data="auth_method_phone")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
+            ])
+        )
+        await state.set_state(TelethonAuth.CHOOSE_AUTH_METHOD) # Возвращаем на выбор
+    except PhoneCodeInvalidError:
+        await message.answer("❌ **Ошибка:** Введен неверный код.", reply_markup=get_numeric_code_keyboard(data.get('auth_code_temp', "")))
     except Exception as e:
-        error_text = f"❌ **Критическая ошибка:** Неверный код или ошибка сервера. `{type(e).__name__}`"
-        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id))
+        error_text = f"❌ **Критическая ошибка:** Ошибка сервера. `{type(e).__name__}`"
+        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
     finally:
         if client.is_connected():
@@ -812,12 +863,12 @@ async def telethon_auth_step_password(message: Message, state: FSMContext):
         task = asyncio.create_task(run_telethon_worker_for_user(user_id))
         ACTIVE_TELETHON_WORKERS[user_id] = task
         
-        await message.answer("✅ **Авторизация успешна!** Telethon-сессия активна.", reply_markup=get_main_inline_kb(user_id))
+        await message.answer("✅ **Авторизация успешна!** Telethon-сессия активна.", reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
         
     except Exception as e:
         error_text = f"❌ **Критическая ошибка:** Неверный пароль или ошибка сервера. `{type(e).__name__}`"
-        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id))
+        await message.answer(error_text, reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
     finally:
         if client.is_connected():
@@ -828,8 +879,10 @@ async def telethon_auth_step_password(message: Message, state: FSMContext):
 @user_router.callback_query(F.data == "show_telethon_tools")
 async def show_telethon_tools_handler(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    if not db_check_subscription(user_id) and user_id != ADMIN_ID:
-        await callback.answer("❌ Инструменты доступны только при активной подписке.", show_alert=True)
+    # Проверка доступа 
+    has_access, _ = await check_access(user_id, bot)
+    if not has_access:
+        await callback.answer("❌ Доступ ограничен. Сначала получите подписку или подпишитесь на канал.", show_alert=True)
         return
     
     if user_id not in ACTIVE_TELETHON_CLIENTS or not db_get_user(user_id).get('telethon_active'):
@@ -872,7 +925,7 @@ async def cmd_stop_flood_handler(callback: types.CallbackQuery):
              ACTIVE_TELETHON_TASKS[user_id].cancel()
              del ACTIVE_TELETHON_TASKS[user_id]
              await callback.answer("🛑 Задача успешно отменена.", show_alert=True)
-             await callback.message.edit_reply_markup(reply_markup=get_main_inline_kb(user_id))
+             await callback.message.edit_reply_markup(reply_markup=get_main_inline_kb(user_id, True))
         else:
             await callback.answer("⚠️ Нет активной задачи для остановки.", show_alert=True)
     else:
@@ -916,9 +969,9 @@ async def process_telethon_command(message: Message, state: FSMContext):
                                  reply_markup=get_cancel_task_kb(cmd_name))
         except Exception as e:
             await message.answer(f"❌ Не удалось отправить команду Worker'у. Ошибка: `{type(e).__name__}`", 
-                                 reply_markup=get_main_inline_kb(user_id))
+                                 reply_markup=get_main_inline_kb(user_id, True))
     else:
-        await message.answer("❌ Telethon Worker не запущен.", reply_markup=get_main_inline_kb(user_id))
+        await message.answer("❌ Telethon Worker не запущен.", reply_markup=get_main_inline_kb(user_id, True))
 
     await state.clear()
     
@@ -929,8 +982,9 @@ async def process_telethon_command(message: Message, state: FSMContext):
 @user_router.callback_query(F.data == "show_monitor_menu")
 async def show_monitor_menu_handler(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    if not db_check_subscription(user_id) and user_id != ADMIN_ID:
-        await callback.answer("❌ Мониторинг доступен только при активной подписке.", show_alert=True)
+    has_access, _ = await check_access(user_id, bot)
+    if not has_access:
+        await callback.answer("❌ Доступ ограничен. Сначала получите подписку или подпишитесь на канал.", show_alert=True)
         return
 
     user_data = db_get_user(user_id)
@@ -958,7 +1012,7 @@ async def monitor_set_it_start(callback: types.CallbackQuery, state: FSMContext)
 async def monitor_set_it_end(message: Message, state: FSMContext):
     chat_id = message.text.strip()
     db_set_chat_id(message.from_user.id, 'IT', chat_id)
-    await message.answer(f"✅ IT-чат установлен: `{chat_id}`.", reply_markup=get_main_inline_kb(message.from_user.id))
+    await message.answer(f"✅ IT-чат установлен: `{chat_id}`.", reply_markup=get_main_inline_kb(message.from_user.id, True))
     await state.clear()
 
 @user_router.callback_query(F.data == "monitor_set_drop")
@@ -972,7 +1026,7 @@ async def monitor_set_drop_start(callback: types.CallbackQuery, state: FSMContex
 async def monitor_set_drop_end(message: Message, state: FSMContext):
     chat_id = message.text.strip()
     db_set_chat_id(message.from_user.id, 'DROP', chat_id)
-    await message.answer(f"✅ DROP-чат установлен: `{chat_id}`.", reply_markup=get_main_inline_kb(message.from_user.id))
+    await message.answer(f"✅ DROP-чат установлен: `{chat_id}`.", reply_markup=get_main_inline_kb(message.from_user.id, True))
     await state.clear()
 
 
@@ -1033,7 +1087,7 @@ async def report_process_send_chat_and_send(message: Message, state: FSMContext)
     logs = db_get_monitor_logs(user_id, log_type, days)
     
     if not logs:
-        await status_msg.edit_text(f"⚠️ Логи типа **{log_type}** за последние {days} дней не найдены.", reply_markup=get_main_inline_kb(user_id))
+        await status_msg.edit_text(f"⚠️ Логи типа **{log_type}** за последние {days} дней не найдены.", reply_markup=get_main_inline_kb(user_id, True))
         await state.clear()
         return
 
@@ -1064,13 +1118,13 @@ async def report_process_send_chat_and_send(message: Message, state: FSMContext)
         await status_msg.edit_text(
             f"✅ Отчет типа **{log_type}** ({len(logs)} записей) отправлен в чат `{target_chat_input}`.\n"
             f"База данных очищена: **{cleared_count}** записей удалено.", 
-            reply_markup=get_main_inline_kb(user_id)
+            reply_markup=get_main_inline_kb(user_id, True)
         )
     except Exception as e:
         logger.error(f"Ошибка отправки отчета в {target_chat_input}: {e}")
         await status_msg.edit_text(
             f"❌ Не удалось отправить отчет в чат `{target_chat_input}` (Ошибка: `{type(e).__name__}`). Отчет отправлен вам в ЛС (без очистки БД).", 
-            reply_markup=get_main_inline_kb(user_id)
+            reply_markup=get_main_inline_kb(user_id, True)
         )
         for chunk in chunks:
             await message.answer(chunk, parse_mode='Markdown')
@@ -1091,11 +1145,27 @@ async def process_promo_code(message: Message, state: FSMContext):
     user_id = message.from_user.id
     code = message.text.strip().upper()
     
-    # --- Скелет логики активации промокода ---
-    # Здесь должна быть полноценная логика проверки промокода в БД, его использования и обновления подписки.
+    promo_data = db_get_promo_code(code)
     
-    # Placeholder: имитация неудачи
-    await message.answer(f"❌ Промокод `{code}` не найден или недействителен (Скелет).", reply_markup=get_main_inline_kb(user_id))
+    if not promo_data or not promo_data['is_active']:
+        await message.answer(f"❌ Промокод `{code}` не найден или недействителен.", reply_markup=get_main_inline_kb(user_id, False))
+    elif promo_data['max_uses'] is not None and promo_data['current_uses'] >= promo_data['max_uses']:
+        await message.answer(f"❌ Промокод `{code}` исчерпал лимит использований.", reply_markup=get_main_inline_kb(user_id, False))
+    else:
+        # Активация
+        db_update_subscription(user_id, promo_data['days'])
+        db_use_promo_code(code)
+        
+        days = promo_data['days']
+        end_date = db_get_user(user_id)['subscription_end_date']
+        
+        await message.answer(
+            f"🎉 **Промокод `{code}` активирован!**\n"
+            f"Получено **{days}** дней подписки.\n"
+            f"Новый срок действия: `{end_date}`.", 
+            reply_markup=get_main_inline_kb(user_id, True)
+        )
+
     await state.clear()
 
 
@@ -1111,6 +1181,71 @@ async def admin_panel_start_handler(callback: types.CallbackQuery, state: FSMCon
     await callback.message.edit_text("👑 **Админ-Панель**\n\nВыберите действие:", reply_markup=get_admin_main_kb())
     await callback.answer()
     
+# --- Создание Промокода (FSM) ---
+
+@user_router.callback_query(F.data == "admin_create_promo_start", AdminStates.main_menu)
+async def admin_create_promo_start(callback: types.CallbackQuery, state: FSMContext):
+    code = generate_promo_code()
+    await state.update_data(promo_code=code)
+    await state.set_state(AdminStates.creating_promo_days)
+    
+    await callback.message.edit_text(
+        f"🗝️ Генерируем промокод: `{code}`\n\n"
+        "1/3: Введите **количество дней** подписки, которое даст этот промокод (целое число > 0):", 
+        reply_markup=get_cancel_keyboard()
+    )
+
+@user_router.message(AdminStates.creating_promo_days)
+async def admin_create_promo_get_days(message: Message, state: FSMContext):
+    try:
+        days = int(message.text.strip())
+        if days <= 0: raise ValueError
+        
+        await state.update_data(promo_days=days)
+        await state.set_state(AdminStates.creating_promo_uses)
+        await message.answer(
+            "2/3: Введите **лимит использований** (целое число > 0) или `0` для неограниченного использования:", 
+            reply_markup=get_cancel_keyboard()
+        )
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите положительное целое число дней.", reply_markup=get_cancel_keyboard())
+
+@user_router.message(AdminStates.creating_promo_uses)
+async def admin_create_promo_complete(message: Message, state: FSMContext):
+    try:
+        max_uses_input = message.text.strip()
+        max_uses = int(max_uses_input) if max_uses_input != '0' else None
+        
+        if max_uses is not None and max_uses <= 0: raise ValueError
+        
+        data = await state.get_data()
+        code = data['promo_code']
+        days = data['promo_days']
+        
+        db_add_promo_code(code, days, max_uses)
+        
+        uses_text = f"Лимит: **{max_uses}** раз" if max_uses is not None else "**Неограниченно**"
+        
+        final_message = (
+            "🎉 **Промокод УСПЕШНО создан!**\n\n"
+            f"Код: `{code}`\n"
+            f"Дает: **{days}** дней подписки\n"
+            f"{uses_text}"
+        )
+        
+        await message.answer(final_message, reply_markup=get_admin_main_kb())
+        await state.set_state(AdminStates.main_menu)
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите положительное целое число для лимита или `0`.", reply_markup=get_cancel_keyboard())
+    except sqlite3.IntegrityError:
+        await message.answer("❌ Ошибка: Промокод с таким именем уже существует (редко). Повторите попытку.", reply_markup=get_cancel_keyboard())
+    except Exception as e:
+        await message.answer(f"❌ Критическая ошибка при сохранении: `{type(e).__name__}`", reply_markup=get_cancel_keyboard())
+
+
+# --- Выдача Подписки ---
+
 @user_router.callback_query(F.data == "admin_issue_sub_start", AdminStates.main_menu)
 async def admin_issue_sub_start(callback: types.CallbackQuery, state: FSMContext):
      await state.set_state(AdminStates.sub_target_user_id)
@@ -1138,7 +1273,7 @@ async def admin_issue_sub_complete(message: Message, state: FSMContext):
         new_end_date = db_update_subscription(target_id, days)
         
         await message.answer(f"✅ Подписка на {days} дней для ID `{target_id}` успешно выдана.\nСрок действия: `{new_end_date}`", 
-                             reply_markup=get_main_inline_kb(message.from_user.id))
+                             reply_markup=get_admin_main_kb())
         
         # Уведомление пользователя
         try:
@@ -1146,7 +1281,7 @@ async def admin_issue_sub_complete(message: Message, state: FSMContext):
         except:
              pass 
 
-        await state.clear()
+        await state.set_state(AdminStates.main_menu)
         
     except ValueError:
         await message.answer("❌ Неверное количество дней. Введите положительное число.", reply_markup=get_cancel_keyboard())
