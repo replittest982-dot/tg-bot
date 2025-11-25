@@ -32,9 +32,9 @@ import qrcode
 # =========================================================================
 
 # !!! ВАШИ КЛЮЧИ !!! 
-# ОБЯЗАТЕЛЬНО ВСТАВЬТЕ СЮДА НОВЫЙ РАБОЧИЙ ТОКЕН!
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7868097991:AAEb8Ckg8AGRorqtV_tE0-f1B-mCQfJTWaM") 
-# Bothost использует переменные окружения. Используем os.getenv.
+# ЖЕСТКО ПРОПИСАННЫЙ ТОКЕН. ВСТАВЬТЕ СЮДА ВАШ АКТУАЛЬНЫЙ ТОКЕН!
+# ИЗ-ЗА ПРОБЛЕМЫ 'Unauthorized' МЫ УБРАЛИ os.getenv.
+BOT_TOKEN = "ТОКЕН_ДЛЯ_ЗАМЕНЫ_ОТ_БОТФАЗЕРА" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
@@ -52,7 +52,6 @@ ACTIVE_TELETHON_WORKERS = {}
 ACTIVE_TELETHON_TASKS = {} 
 
 storage = MemoryStorage()
-# Исправление 1: TokenValidationError - Убедитесь, что BOT_TOKEN заменен
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='Markdown'))
 dp = Dispatcher(storage=storage)
 user_router = Router()
@@ -474,6 +473,7 @@ async def telethon_check_status_handler(callback: types.CallbackQuery):
 async def run_telethon_worker_for_user(user_id: int):
     """Запускает Telethon worker для конкретного пользователя."""
     
+    # Сначала всегда останавливаем старые
     await stop_telethon_worker_for_user(user_id) 
     
     session_path = get_session_file_path(user_id)
@@ -606,6 +606,7 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.edit_text("❌ Действие отменено.", reply_markup=None)
     except TelegramBadRequest:
         await callback.message.answer("❌ Действие отменено.", reply_markup=None)
+    # Используем union, чтобы обработать как Message, так и CallbackQuery
     await cmd_start_or_back(callback, state)
     await callback.answer("Отменено.")
 
@@ -650,7 +651,7 @@ async def cmd_start_or_back(union: types.Message | types.CallbackQuery, state: F
             pass 
         await union.answer()
 
-# --- Telethon Авторизация (Исправление TypeError для F.data) ---
+# --- Telethon Авторизация ---
 
 @user_router.callback_query(F.data == "telethon_auth_start")
 async def telethon_auth_choose_method_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -705,7 +706,7 @@ async def telethon_auth_step_phone(message: Message, state: FSMContext):
         if client.is_connected():
             await client.disconnect()
 
-# Исправление 2: TypeError: unsupported operand type(s) for |: 'str' and 'str'
+# --- Исправленный UI для ввода кода (Обработка CallbackQuery и сообщений) ---
 @user_router.callback_query(
     (F.data.startswith("auth_digit_")) | (F.data == "auth_submit_code") | (F.data == "auth_delete_digit"), 
     TelethonAuth.CODE
@@ -731,6 +732,7 @@ async def process_code_input_ui(callback: types.CallbackQuery, state: FSMContext
             return
 
         await callback.message.edit_text(f"⏳ Проверка кода: `{temp_code}`...", reply_markup=None)
+        # Передаем управление основной логике проверки кода
         await telethon_auth_step_code_logic(callback.message, state, temp_code)
         await callback.answer("Код отправлен.")
         return
@@ -740,7 +742,7 @@ async def process_code_input_ui(callback: types.CallbackQuery, state: FSMContext
         await callback.message.edit_text(
             f"🔢 Введите **код** с помощью кнопок ниже или сообщением.\n"
             f"Текущий ввод: {current_display}",
-            reply_markup=get_numeric_code_keyboard()
+            reply_markup=get_numeric_code_keyboard(temp_code)
         )
     except TelegramBadRequest:
         pass 
@@ -774,6 +776,7 @@ async def telethon_auth_step_code_logic(message: Message, state: FSMContext, cod
         await client.disconnect()
         db_set_session_status(user_id, True)
         
+        # Запускаем Worker в фоновом режиме
         task = asyncio.create_task(run_telethon_worker_for_user(user_id))
         ACTIVE_TELETHON_WORKERS[user_id] = task
         
@@ -837,7 +840,7 @@ async def show_telethon_tools_handler(callback: types.CallbackQuery):
                                      reply_markup=get_telethon_tools_kb())
     await callback.answer()
 
-# --- FSM для Telethon команд (Исправление 3: TypeError: State and State) ---
+# --- FSM для Telethon команд (ИСПРАВЛЕНИЕ: StateFilter для объединения состояний) ---
 
 @user_router.callback_query(F.data == "cmd_ls_start")
 async def cmd_ls_start_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -906,13 +909,10 @@ async def process_telethon_command(message: Message, state: FSMContext):
         # Отправка команды самому себе в ЛС (имитация ввода в Telethon-аккаунте)
         try:
             me = await client.get_me()
+            # Отправляем команду самому себе в ЛС
             await client.send_message(me, f"{cmd_name} {params}")
             
-            # Запускаем асинхронную задачу для мониторинга (Скелет)
-            # task = asyncio.create_task(run_telethon_command_with_progress(user_id, client, cmd_name, params))
-            # ACTIVE_TELETHON_TASKS[user_id] = task
-            
-            await message.answer(f"✅ Команда **{cmd_name}** с параметрами `{params}` отправлена Worker'у. Ожидайте прогресс-бар (Скелет).", 
+            await message.answer(f"✅ Команда **{cmd_name}** с параметрами `{params}` отправлена Worker'у. Ожидайте выполнения.", 
                                  reply_markup=get_cancel_task_kb(cmd_name))
         except Exception as e:
             await message.answer(f"❌ Не удалось отправить команду Worker'у. Ошибка: `{type(e).__name__}`", 
@@ -924,7 +924,7 @@ async def process_telethon_command(message: Message, state: FSMContext):
     
     
 
-### 8. Функционал Мониторинга и Отчетов (Пункт 4)
+### 8. Функционал Мониторинга и Отчетов 
 
 @user_router.callback_query(F.data == "show_monitor_menu")
 async def show_monitor_menu_handler(callback: types.CallbackQuery):
@@ -1039,22 +1039,23 @@ async def report_process_send_chat_and_send(message: Message, state: FSMContext)
 
     # --- Формирование Отчета ---
     report_text = f"**📊 Отчет [{log_type}]**\n"
+    report_text += f"**Пользователь:** `{user_id}`\n"
     report_text += f"**Период:** {'Последние ' + str(days) + ' дней' if days > 0 else 'Все доступные логи'}\n"
     report_text += f"**Всего записей:** {len(logs)}\n\n"
     
     for timestamp, command, target in logs:
-        report_text += f"`[{timestamp}]` **{command}** (Target: {target or 'N/A'})\n"
+        # Улучшенное форматирование для читаемости
+        report_text += f"`[{timestamp}]` **{command}** ({target or 'N/A'})\n"
         
     chunks = [report_text[i:i + 4096] for i in range(0, len(report_text), 4096)]
     
     try:
-        # Пытаемся отправить с учетом топиков (message_thread_id=1 для General)
+        # Пытаемся отправить с учетом топиков (ID 1 - General)
         for chunk in chunks:
             try:
-                # Пытаемся отправить как в топик (ID 1 - General)
                 await bot.send_message(target_chat_input, chunk, message_thread_id=1, parse_mode='Markdown')
             except TelegramBadRequest:
-                # Если это не топик, или топик не General, или бот не админ
+                # Если не сработало с топиком, отправляем как обычное сообщение
                 await bot.send_message(target_chat_input, chunk, parse_mode='Markdown')
 
         # Очистка логов после успешной отправки
@@ -1062,7 +1063,7 @@ async def report_process_send_chat_and_send(message: Message, state: FSMContext)
         
         await status_msg.edit_text(
             f"✅ Отчет типа **{log_type}** ({len(logs)} записей) отправлен в чат `{target_chat_input}`.\n"
-            f"База данных очищена: {cleared_count} записей удалено.", 
+            f"База данных очищена: **{cleared_count}** записей удалено.", 
             reply_markup=get_main_inline_kb(user_id)
         )
     except Exception as e:
@@ -1077,7 +1078,7 @@ async def report_process_send_chat_and_send(message: Message, state: FSMContext)
     await state.clear()
 
 
-### 9. Функционал Промокодов и Админки (Пункт 1 - Скелеты)
+### 9. Функционал Промокодов и Админки 
 
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def start_promo_fsm_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -1091,12 +1092,9 @@ async def process_promo_code(message: Message, state: FSMContext):
     code = message.text.strip().upper()
     
     # --- Скелет логики активации промокода ---
-    # Здесь должна быть проверка в БД и обновление подписки db_update_subscription
+    # Здесь должна быть полноценная логика проверки промокода в БД, его использования и обновления подписки.
     
-    # Предполагаем, что промокод найден и дает 30 дней
-    # db_update_subscription(user_id, 30) 
-    # await message.answer(f"✅ Подписка активирована на 30 дней!", reply_markup=get_main_inline_kb(user_id))
-    
+    # Placeholder: имитация неудачи
     await message.answer(f"❌ Промокод `{code}` не найден или недействителен (Скелет).", reply_markup=get_main_inline_kb(user_id))
     await state.clear()
 
@@ -1170,14 +1168,19 @@ async def main():
     await start_all_active_telethon_workers()
 
     # Запуск polling Aiogram
-    # Здесь может возникнуть ошибка, если BOT_TOKEN неверный, но мы ее уже поймали
-    await dp.start_polling(bot)
-
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+         # Ловим ошибку, если она произошла в start_polling (чаще всего это Unauthorized)
+         logger.critical(f"Критическая ошибка в start_polling: {e}")
+         if "Unauthorized" in str(e):
+             logger.critical("Проблема: Unauthorized. Проверьте токен в main.py!")
+             
 if __name__ == "__main__":
     try:
-        # Bothost использует Python 3.11+, поэтому asyncio.run() работает корректно
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен вручную.")
     except Exception as e:
+        # Ловим ошибку, если она произошла до start_polling
         logger.critical(f"Критическая ошибка в main: {e}")
