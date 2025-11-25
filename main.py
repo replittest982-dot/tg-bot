@@ -26,7 +26,8 @@ from telethon.errors import (
     AuthKeyUnregisteredError, PasswordHashInvalidError, ChannelPrivateError, 
     UsernameInvalidError, PeerIdInvalidError, ChatAdminRequiredError
 )
-from telethon.utils import get_display_name, is_user_id
+# ✅ ИСПРАВЛЕНО: Удалено is_user_id из импорта
+from telethon.utils import get_display_name 
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.functions.messages import GetMessagesViewsRequest
 from telethon.tl.types import ChannelParticipantsRecent, InputChannel
@@ -356,13 +357,16 @@ async def run_worker(user_id):
                 if isinstance(chat_entity, (Channel, Chat)):
                     
                     # Отправка промежуточного сообщения в ЛС
-                    await client.send_message(user_id, f"⏳ Начинаю сканирование чата `{get_display_name(chat_entity)}` с фильтром ID {min_id}-{max_id} (отчет придет сюда).")
+                    await client.send_message(user_id, f"⏳ Начинаю сканирование чата `{get_display_name(chat_entity)}` с фильтром ID {min_id or 'Нет'}-{max_id or 'Нет'} (отчет придет сюда).")
                     
                     limit = None
+                    total_scanned = 0
+                    
                     try:
                         # Используем iter_participants для перебора всех участников
                         async for p in client.iter_participants(chat_entity, limit=limit):
                             user_id_int = p.id
+                            total_scanned += 1
                             
                             # Применяем фильтр ID
                             if min_id is not None and user_id_int < min_id:
@@ -380,7 +384,7 @@ async def run_worker(user_id):
                             })
                             
                     except ChatAdminRequiredError:
-                        report_data.append({'error': "Бот не является администратором или не имеет прав на получение списка участников."})
+                        report_data.append({'error': "Бот не является администратором в этом чате или не имеет прав на получение списка участников."})
                     except Exception as e:
                         report_data.append({'error': f"Критическая ошибка при сканировании: {type(e).__name__}"})
                 else:
@@ -390,9 +394,9 @@ async def run_worker(user_id):
                 if report_data and 'error' in report_data[0]:
                     response = f"❌ **Ошибка при анализе чата**:\n{report_data[0]['error']}"
                 else:
-                    total_count = len(report_data)
+                    total_found = len(report_data)
                     
-                    if total_count > 0:
+                    if total_found > 0:
                         header = "-------------------------------------------\n"
                         details = ""
                         for item in report_data:
@@ -403,11 +407,11 @@ async def run_worker(user_id):
                                 f"{header}"
                             )
                         
-                        range_info = f" ({min_id}-{max_id})" if min_id is not None else ""
+                        range_info = f" (Фильтр ID: {min_id or 'Все'}-{max_id or 'Все'})" if min_id is not None or max_id is not None else ""
                         response = (
                             f"📊 **Отчет .ЧЕКГРУППУ** {range_info}\n"
                             f"Чат: `{get_display_name(chat_entity)}`\n"
-                            f" • Найдено пользователей по фильтру: **{total_count}**\n"
+                            f" • Найдено пользователей по фильтру: **{total_found}**\n"
                             f"\n"
                             f"**Список пользователей (Имя, Юзернейм, ID):**\n"
                             f"{header}"
@@ -421,7 +425,7 @@ async def run_worker(user_id):
 
             except Exception as e:
                 # В случае любой критической ошибки
-                await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__}")
+                await client.send_message(user_id, f"❌ Критическая ошибка при .чекгруппу: {type(e).__name__} - {e}")
                 
             finally:
                  # Сброс прогресса, если был
@@ -435,7 +439,6 @@ async def run_worker(user_id):
             if not event.out: return
             
             msg = event.text.strip()
-            # Используем регулярное выражение для более гибкого парсинга
             parts = msg.split()
             if not parts: return
             cmd = parts[0].lower()
@@ -469,7 +472,7 @@ async def run_worker(user_id):
                             # Telethon сам разбирается с юзернеймами/ID
                             await client.send_message(target, text) 
                             results.append(f"✅ {target}: Отправлено")
-                        except ValueError as e:
+                        except ValueError: # Ловим ошибки, связанные с некорректным ID/Юзернеймом
                             results.append(f"❌ {target}: Ошибка (Некорректный ID/Юзернейм)")
                         except Exception as e:
                             results.append(f"❌ {target}: Ошибка ({type(e).__name__})")
