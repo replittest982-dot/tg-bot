@@ -47,17 +47,17 @@ DB_TIMEOUT = 10
 
 # --- КОНФИГУРАЦИЯ ПРОКСИ (ДЛЯ ОБХОДА CONNECTION ERROR) ---
 # Если ваш хостинг блокирует Telegram, заполните этот блок. 
-# Если прокси не нужен, установите: PROXY_CONFIG = None
-PROXY_CONFIG = (
-    'socks5',   # Тип прокси (socks4, socks5, http)
-    'IP_АДРЕС_ПРОКСИ', # Например, '12.34.56.78'
-    1080,       # Порт прокси
-    True,       # Аутентификация: True (с логином/паролем) или False
-    'ЛОГИН_ПРОКСИ', 
-    'ПАРОЛЬ_ПРОКСИ'
-)
-# Если прокси не нужен:
-# PROXY_CONFIG = None 
+# !!! Если прокси не нужен, установите: PROXY_CONFIG = None !!!
+PROXY_CONFIG = None 
+# Пример для SOCKS5 прокси:
+# PROXY_CONFIG = (
+#     'socks5',   # Тип прокси (socks4, socks5, http)
+#     '12.34.56.78', # IP-адрес прокси
+#     1080,       # Порт прокси
+#     True,       # Аутентификация: True (с логином/паролем) или False
+#     'ЛОГИН_ПРОКСИ', 
+#     'ПАРОЛЬ_ПРОКСИ'
+# )
 # --------------------------------------------------------
 
 # Настройка логирования
@@ -77,7 +77,7 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher(storage=storage)
 
 # =========================================================================
-# II. FSM СОСТОЯНИЯ (БЕЗ ИЗМЕНЕНИЙ)
+# II. FSM СОСТОЯНИЯ
 # =========================================================================
 
 class TelethonAuth(StatesGroup):
@@ -97,7 +97,7 @@ class AdminStates(StatesGroup):
     sub_days_input = State()
 
 # =========================================================================
-# III. БАЗА ДАННЫХ (БЕЗ ИЗМЕНЕНИЙ)
+# III. БАЗА ДАННЫХ
 # =========================================================================
 
 DB_PATH = os.path.join('data', DB_NAME)
@@ -193,7 +193,7 @@ def db_get_active_telethon_users():
 
 
 # =========================================================================
-# IV. УТИЛИТЫ И КЛАВИАТУРЫ (БЕЗ ЗНАЧИТЕЛЬНЫХ ИЗМЕНЕНИЙ)
+# IV. УТИЛИТЫ И КЛАВИАТУРЫ
 # =========================================================================
 
 def get_session_path(user_id):
@@ -260,7 +260,7 @@ def get_no_access_kb(is_channel_reason):
     if is_channel_reason:
         kb.append([InlineKeyboardButton(text="✅ Подписаться на канал", url="https://t.me/{}".format(TARGET_CHANNEL_URL.lstrip('@')))])
     
-    # Кнопка промокода всегда тут, чтобы пользователь мог получить доступ
+    # Кнопка промокода всегда тут
     kb.append([InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")])
     
     if not is_channel_reason:
@@ -488,7 +488,7 @@ async def run_worker(user_id):
         db_set_session_status(user_id, True)
         logger.info(f"Worker {user_id} started successfully.")
 
-        # --- ЛОГИКА ФЛУДА И КОМАНД (Без изменений) ---
+        # --- ЛОГИКА ФЛУДА И КОМАНД ---
         async def flood_task(peer, message, count, delay, chat_id):
             try:
                 is_unlimited = count <= 0
@@ -817,9 +817,12 @@ async def cancel_handler(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     
     try:
+        # Пытаемся отредактировать сообщение с отменой
         await call.message.edit_text("ℹ️ Действие отменено.", reply_markup=None)
-    except:
-        pass
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+             # Если сообщение нельзя отредактировать (например, оно слишком старое), отправляем новое
+            await call.message.answer("ℹ️ Действие отменено.", reply_markup=None)
         
     # Возврат в главное меню
     await cmd_start(call, state)
@@ -830,6 +833,8 @@ async def cancel_handler(call: types.CallbackQuery, state: FSMContext):
 async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
     user_id = u.from_user.id
     db_get_user(user_id)
+    
+    # Сброс состояния, чтобы избежать зависаний (особенно перед отображением меню)
     await state.clear()
     
     has_access, msg = await check_access(user_id, bot)
@@ -852,22 +857,30 @@ async def cmd_start(u: types.Message | types.CallbackQuery, state: FSMContext):
              await u.message.edit_text(text, reply_markup=kb)
         except TelegramBadRequest as e:
              if "message is not modified" not in str(e):
+                 # Если сообщение слишком старое для редактирования
                  await u.answer("ℹ️ Возврат в меню.", show_alert=True)
                  await u.message.reply(text, reply_markup=kb)
              else:
                  await u.answer("ℹ️ Вы уже в главном меню.", show_alert=True)
 
 
-# --- ХЕНДЛЕР АКТИВАЦИИ ПРОМОКОДА (ПРИНУДИТЕЛЬНЫЙ ВХОД В FSM) ---
+# --- ХЕНДЛЕР АКТИВАЦИИ ПРОМОКОДА ---
 @dp.callback_query(F.data == "start_promo_fsm")
 async def start_promo_fsm(call: types.CallbackQuery, state: FSMContext):
+    # Убеждаемся, что мы входим в состояние
     await state.set_state(PromoStates.waiting_for_code)
-    await call.message.edit_text("🔑 Введите промокод:", reply_markup=get_cancel_kb())
+    try:
+         await call.message.edit_text("🔑 Введите промокод:", reply_markup=get_cancel_kb())
+    except TelegramBadRequest:
+        # Если не удалось отредактировать, отправляем новое сообщение
+        await call.message.answer("🔑 Введите промокод:", reply_markup=get_cancel_kb())
 
 @dp.message(PromoStates.waiting_for_code)
 async def process_promo_code(message: types.Message, state: FSMContext):
     code = message.text.strip().upper()
     user_id = message.from_user.id
+    
+    # Сброс состояния сразу после получения данных
     await state.clear() 
 
     promo = db_get_promo(code)
@@ -888,6 +901,7 @@ async def process_promo_code(message: types.Message, state: FSMContext):
         )
         await message.answer(status_text)
     
+    # Возврат в главное меню
     await cmd_start(message, state)
 
 
@@ -902,7 +916,13 @@ async def telethon_auth_phone_start(call: types.CallbackQuery, state: FSMContext
 async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
-    await call.message.edit_text("⏳ Генерирую QR-код и пытаюсь подключиться к серверам Telegram...", reply_markup=get_cancel_kb())
+    
+    # Отправляем новое сообщение, если не можем редактировать
+    try:
+         msg = await call.message.edit_text("⏳ Генерирую QR-код и пытаюсь подключиться к серверам Telegram...", reply_markup=get_cancel_kb())
+    except TelegramBadRequest:
+         msg = await call.message.answer("⏳ Генерирую QR-код и пытаюсь подключиться к серверам Telegram...", reply_markup=get_cancel_kb())
+
     
     try:
         path = get_session_path(user_id)
@@ -922,7 +942,7 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
             "2. Перейдите в **Настройки > Устройства > Подключить устройство**.\n"
             "3. Отсканируйте код ниже."
         )
-        await call.message.edit_text(text, parse_mode='Markdown')
+        await msg.edit_text(text, parse_mode='Markdown')
         # Отправляем фото с QR-кодом
         await bot.send_photo(user_id, qr_url, caption="Отсканируйте код в течение 3 минут.", reply_markup=get_cancel_kb()) 
 
@@ -933,16 +953,16 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         
         asyncio.create_task(run_worker(user_id))
         
-        await call.message.reply("✅ **Авторизация прошла успешно!** Worker запущен.", reply_markup=get_main_kb(user_id))
+        await bot.send_message(user_id, "✅ **Авторизация прошла успешно!** Worker запущен.", reply_markup=get_main_kb(user_id))
         
     except asyncio.TimeoutError:
-        await call.message.reply("❌ Время ожидания QR-кода истекло (3 минуты).")
+        await bot.send_message(user_id, "❌ Время ожидания QR-кода истекло (3 минуты).")
     except Exception as e:
         logger.error(f"QR Login Error for {user_id}: {e}")
         error_msg = f"❌ Ошибка авторизации: {type(e).__name__}."
         if "ConnectionError" in str(e) or "while disconnected" in str(e):
              error_msg = "❌ Ошибка авторизации: **Проблема сетевого соединения (ConnectionError)**. Проверьте фаервол или смените хостинг/прокси."
-        await call.message.reply(error_msg)
+        await bot.send_message(user_id, error_msg)
     finally:
         if user_id in TEMP_AUTH_CLIENTS:
             try: await TEMP_AUTH_CLIENTS[user_id].disconnect()
@@ -950,8 +970,9 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
             del TEMP_AUTH_CLIENTS[user_id]
         await state.clear()
         
-        try: await call.message.edit_text("ℹ️ Возврат в меню.", reply_markup=get_main_kb(user_id))
-        except: pass
+        try: await msg.edit_text("ℹ️ Возврат в меню.", reply_markup=get_main_kb(user_id))
+        except: 
+            await bot.send_message(user_id, "ℹ️ Возврат в меню.", reply_markup=get_main_kb(user_id))
 
 
 @dp.message(TelethonAuth.PHONE)
@@ -1051,7 +1072,7 @@ async def auth_msg_password(message: types.Message, state: FSMContext):
             del TEMP_AUTH_CLIENTS[user_id]
 
 
-# --- УПРАВЛЕНИЕ WORKER'ОМ (Без изменений) ---
+# --- УПРАВЛЕНИЕ WORKER'ОМ ---
 @dp.callback_query(F.data == "telethon_start_session")
 async def telethon_start_session(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
@@ -1065,7 +1086,11 @@ async def telethon_start_session(call: types.CallbackQuery, state: FSMContext):
 
     await call.answer("🚀 Запускаю Worker...")
     asyncio.create_task(run_worker(user_id))
-    await call.message.edit_reply_markup(reply_markup=get_main_kb(user_id))
+    try:
+         await call.message.edit_reply_markup(reply_markup=get_main_kb(user_id))
+    except:
+         pass
+
 
 @dp.callback_query(F.data == "telethon_stop_session")
 async def telethon_stop_session(call: types.CallbackQuery, state: FSMContext):
@@ -1076,7 +1101,10 @@ async def telethon_stop_session(call: types.CallbackQuery, state: FSMContext):
     
     await call.answer("🛑 Останавливаю Worker...")
     await stop_worker(user_id)
-    await call.message.edit_reply_markup(reply_markup=get_main_kb(user_id))
+    try:
+         await call.message.edit_reply_markup(reply_markup=get_main_kb(user_id))
+    except:
+         pass
 
 @dp.callback_query(F.data == "telethon_check_status")
 async def telethon_check_status(call: types.CallbackQuery):
@@ -1155,7 +1183,7 @@ async def show_progress(call: types.CallbackQuery):
     await call.answer(status_text, show_alert=True)
 
 @dp.callback_query(F.data.startswith('send_report_') | F.data == 'delete_report')
-async def handle_report_choice(call: types.CallbackQuery):
+async def handle_report_choice(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     data = call.data
     
@@ -1163,7 +1191,7 @@ async def handle_report_choice(call: types.CallbackQuery):
         await call.answer("⚠️ Отчет устарел или был удален.", show_alert=True)
         try: await call.message.edit_text("ℹ️ Отчет по этой задаче более недоступен.", reply_markup=None)
         except: pass
-        await cmd_start(call, FSMContext(storage, user_id, user_id))
+        await cmd_start(call, state)
         return
 
     report_data = PROCESS_PROGRESS[user_id]['report_data']
@@ -1209,7 +1237,7 @@ async def handle_report_choice(call: types.CallbackQuery):
         if user_id in PROCESS_PROGRESS and 'report_data' in PROCESS_PROGRESS[user_id]:
             del PROCESS_PROGRESS[user_id]
             
-        await cmd_start(call, FSMContext(storage, user_id, user_id))
+        await cmd_start(call, state)
 
 @dp.callback_query(F.data == "show_help")
 async def cmd_help(call: types.CallbackQuery):
@@ -1234,7 +1262,7 @@ async def cmd_help(call: types.CallbackQuery):
     )
     await call.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main")]]))
     
-# --- АДМИН-ПАНЕЛЬ (Без изменений) ---
+# --- АДМИН-ПАНЕЛЬ ---
 
 @dp.callback_query(F.data == "admin_panel_start")
 async def admin_panel_start(call: types.CallbackQuery, state: FSMContext):
@@ -1347,7 +1375,16 @@ async def main():
              except: pass
              del TEMP_AUTH_CLIENTS[uid]
 
+    # !!! ВАЖНО !!! Очистка вебхуков для предотвращения TelegramConflictError
+    logger.info("Checking for and dropping pending updates/webhooks...")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True) 
+        logger.info("Webhooks and pending updates dropped successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to drop webhook/updates: {e}")
+        
     await start_workers()
+    logger.info("Start polling")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
