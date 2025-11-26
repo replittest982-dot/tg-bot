@@ -35,26 +35,26 @@ from telethon.utils import get_display_name
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# !!! ВАШ BOT_TOKEN !!!
-BOT_TOKEN = "7868097991:AAFWAAw1357IWkGXr9cOpqY11xBtnB0xJSg" 
+# !!! ВАШ НОВЫЙ BOT_TOKEN !!!
+BOT_TOKEN = "7868097991:AAGdvAOa1-jxMaBnJHfbj6j1BC63AD1aE9I" 
 ADMIN_ID = 6256576302  
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1" 
+BOT_USERNAME = "@STATPBot" # Укажите юзернейм вашего бота для сообщений об отчетах
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 DB_TIMEOUT = 10 
 
-# --- КОНФИГУРАЦИЯ ПРОКСИ (ДЛЯ ОБХОДА CONNECTION ERROR) ---
-# Если ваш хостинг блокирует Telegram, заполните этот блок. 
-# !!! Если прокси не нужен, установите: PROXY_CONFIG = None !!!
+# --- КОНФИГУРАЦИЯ ПРОКСИ ---
+# Если вы на европейском сервере, оставьте None. Если ошибки (EOFError) повторятся, заполните.
 PROXY_CONFIG = None 
-# Пример для SOCKS5 прокси:
+# Пример для SOCKS5 прокси (раскомментировать, если понадобится):
 # PROXY_CONFIG = (
-#     'socks5',   # Тип прокси (socks4, socks5, http)
-#     '12.34.56.78', # IP-адрес прокси
-#     1080,       # Порт прокси
-#     True,       # Аутентификация: True (с логином/паролем) или False
+#     'socks5',   
+#     '12.34.56.78', 
+#     1080,       
+#     True,       
 #     'ЛОГИН_ПРОКСИ', 
 #     'ПАРОЛЬ_ПРОКСИ'
 # )
@@ -382,7 +382,7 @@ async def check_group_task(client, event, target_chat_str, min_id, max_id, aiogr
         limit = 1000000 
         
         # Уведомление через Aiogram-бот
-        await bot.send_message(aiogram_chat_id, "⏳ Worker начинает сканирование **всех** сообщений в чате `{}` для сбора пользователей. Это может занять время.".format(chat_name), parse_mode='Markdown')
+        await bot.send_message(aiogram_chat_id, "⏳ Worker начинает сканирование **всех** сообщений в чате `{}` для сбора пользователей. Это может занять время. Отчет придет сюда, в чат с ботом {}.".format(chat_name, BOT_USERNAME), parse_mode='Markdown')
         
         PROCESS_PROGRESS[user_id] = {'type': 'checkgroup', 'peer_name': chat_name, 'done_msg': 0, 'aiogram_chat_id': aiogram_chat_id}
         
@@ -776,7 +776,7 @@ async def run_worker(user_id):
                 asyncio.create_task(check_group_task(client, event, target_chat_str, min_id, max_id, aiogram_chat_id))
                 
                 # Подтверждение от Worker'а в чат, где была вызвана команда
-                await event.reply("⏳ **Начинаю анализ группы...** Ожидайте уведомления в чате с ботом `@STATPBot`.", parse_mode='HTML')
+                await event.reply("⏳ **Начинаю анализ группы...** Ожидайте уведомления в чате с ботом `{}`.".format(BOT_USERNAME), parse_mode='HTML')
                 
         # --- Запуск Worker'а ---
         worker_task = asyncio.create_task(client.run_until_disconnected())
@@ -1254,11 +1254,11 @@ async def cmd_help(call: types.CallbackQuery):
         "3. **`.стопфлуд`**\n"
         "   *Останавливает активный флуд в чате, где была вызвана команда.*\n\n"
         "4. **`.чекгруппу [@чат/ID] [мин_ID-макс_ID]`**\n"
-        "   *Сканирует историю сообщений чата/канала для сбора уникальных пользователей. Отчет будет отправлен сюда, в чат с ботом.*\n\n"
+        "   *Сканирует историю сообщений чата/канала для сбора уникальных пользователей. Отчет будет отправлен сюда, в чат с ботом `{}`.*\n\n"
         "5. **`.тхт` или `.таблица`**\n"
         "   *Используйте **ответом на прикрепленный файл** (.txt, .csv) в чате Worker'а. Отображает содержимое файла в форматированном виде.*\n\n"
         "6. **`.статус`**\n"
-        "   *Показывает текущий прогресс активных задач Worker'а (флуд, анализ чата).*"
+        "   *Показывает текущий прогресс активных задач Worker'а (флуд, анализ чата).*".format(BOT_USERNAME)
     )
     await call.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_main")]]))
     
@@ -1378,7 +1378,10 @@ async def main():
     # !!! ВАЖНО !!! Очистка вебхуков для предотвращения TelegramConflictError
     logger.info("Checking for and dropping pending updates/webhooks...")
     try:
-        await bot.delete_webhook(drop_pending_updates=True) 
+        # Убедимся, что бот использует новый токен для этой операции
+        current_bot = Bot(token=BOT_TOKEN) 
+        await current_bot.delete_webhook(drop_pending_updates=True) 
+        await current_bot.session.close() # Закрыть временную сессию
         logger.info("Webhooks and pending updates dropped successfully.")
     except Exception as e:
         logger.warning(f"Failed to drop webhook/updates: {e}")
@@ -1388,4 +1391,11 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Если запуск из скрипта, который не использует asyncio.run(), возможно, потребуется обернуть в try/except 
+    # для корректной обработки KeyboardInterrupt или других сигналов остановки.
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by KeyboardInterrupt")
+    except Exception as e:
+         logger.error(f"Critical error during bot runtime: {e}")
