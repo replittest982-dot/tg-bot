@@ -960,8 +960,8 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error(f"QR Login Error for {user_id}: {e}")
         error_msg = f"❌ Ошибка авторизации: {type(e).__name__}."
-        if "ConnectionError" in str(e) or "while disconnected" in str(e):
-             error_msg = "❌ Ошибка авторизации: **Проблема сетевого соединения (ConnectionError)**. Проверьте фаервол или смените хостинг/прокси."
+        if "ConnectionError" in str(e) or "while disconnected" in str(e) or "EOF" in str(e):
+             error_msg = "❌ Ошибка авторизации: **Проблема сетевого соединения (ConnectionError/EOF)**. Проверьте фаервол или смените хостинг/прокси."
         await bot.send_message(user_id, error_msg)
     finally:
         if user_id in TEMP_AUTH_CLIENTS:
@@ -998,8 +998,8 @@ async def auth_msg_phone(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Send Code Error for {user_id}: {e}")
         error_msg = f"❌ Произошла ошибка при запросе кода: {type(e).__name__}."
-        if "ConnectionError" in str(e) or "while disconnected" in str(e):
-             error_msg = "❌ Ошибка при запросе кода: **Проблема сетевого соединения (ConnectionError)**. Проверьте фаервол или смените хостинг/прокси."
+        if "ConnectionError" in str(e) or "while disconnected" in str(e) or "EOF" in str(e):
+             error_msg = "❌ Ошибка при запросе кода: **Проблема сетевого соединения (ConnectionError/EOF)**. Проверьте фаервол или смените хостинг/прокси."
         await message.answer(error_msg, reply_markup=get_cancel_kb())
 
 @dp.message(TelethonAuth.CODE)
