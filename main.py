@@ -47,7 +47,7 @@ TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 DB_TIMEOUT = 10 
 
 # --- КОНФИГУРАЦИЯ ПРОКСИ ---
-# Если вы на европейском сервере, оставьте None. Если ошибки (EOFError) повторятся, заполните.
+# Оставляем None, так как вы не хотите использовать платный прокси
 PROXY_CONFIG = None 
 # Пример для SOCKS5 прокси (раскомментировать, если понадобится):
 # PROXY_CONFIG = (
@@ -473,8 +473,9 @@ async def run_worker(user_id):
     await stop_worker(user_id) 
     path = get_session_path(user_id)
     
-    # --- Инициализация с Прокси ---
-    client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG)
+    # --- Инициализация с Прокси и Device Model ---
+    # Имитация Android-клиента для обхода потенциальных ограничений
+    client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, device_model='Android Client') 
     ACTIVE_TELETHON_CLIENTS[user_id] = client
     
     try:
@@ -926,8 +927,8 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     
     try:
         path = get_session_path(user_id)
-        # --- Инициализация с Прокси ---
-        client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG)
+        # --- Инициализация с Прокси, Таймаутом и Device Model (V6) ---
+        client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, timeout=30, device_model='Android Client')
         TEMP_AUTH_CLIENTS[user_id] = client
         
         # ПРИНУДИТЕЛЬНЫЙ СТАРТ
@@ -944,9 +945,10 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         )
         await msg.edit_text(text, parse_mode='Markdown')
         # Отправляем фото с QR-кодом
-        await bot.send_photo(user_id, qr_url, caption="Отсканируйте код в течение 3 минут.", reply_markup=get_cancel_kb()) 
+        await bot.send_photo(user_id, qr_url, caption="Отсканируйте код в течение 5 минут.", reply_markup=get_cancel_kb()) 
 
-        await login_token.wait(timeout=180) 
+        # Увеличенный таймаут до 300 секунд (5 минут) (V6)
+        await login_token.wait(timeout=300) 
         
         db_set_session_status(user_id, True)
         await state.clear()
@@ -956,7 +958,7 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await bot.send_message(user_id, "✅ **Авторизация прошла успешно!** Worker запущен.", reply_markup=get_main_kb(user_id))
         
     except asyncio.TimeoutError:
-        await bot.send_message(user_id, "❌ Время ожидания QR-кода истекло (3 минуты).")
+        await bot.send_message(user_id, "❌ Время ожидания QR-кода истекло (5 минут).")
     except Exception as e:
         logger.error(f"QR Login Error for {user_id}: {e}")
         error_msg = f"❌ Ошибка авторизации: {type(e).__name__}."
@@ -981,8 +983,8 @@ async def auth_msg_phone(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     path = get_session_path(user_id)
-    # --- Инициализация с Прокси ---
-    client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG)
+    # --- Инициализация с Прокси и Device Model (V6) ---
+    client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, device_model='Android Client')
     TEMP_AUTH_CLIENTS[user_id] = client
     
     try:
