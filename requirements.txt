@@ -1,5 +1,5 @@
-aiogram
-telethon
-qrcode
-pillow
-pytz
+aiogram>=3.7.1,<4.0
+telethon>=1.34.4
+Pillow>=10.1.0
+qrcode>=7.4.2
+pytz>=2024.1
