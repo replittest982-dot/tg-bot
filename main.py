@@ -22,6 +22,7 @@ from aiogram.client.default import DefaultBotProperties
 
 # Импорты telethon
 from telethon import TelegramClient, events
+# УДАЛЕН ИМПОРТ MtProtoPlainSender
 from telethon.tl.types import User
 from telethon.errors import (
     UserDeactivatedError, FloodWaitError, SessionPasswordNeededError, 
@@ -47,17 +48,7 @@ TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 DB_TIMEOUT = 10 
 
 # --- КОНФИГУРАЦИЯ ПРОКСИ ---
-# Оставляем None, так как вы не хотите использовать платный прокси
 PROXY_CONFIG = None 
-# Пример для SOCKS5 прокси (раскомментировать, если понадобится):
-# PROXY_CONFIG = (
-#     'socks5',   
-#     '12.34.56.78', 
-#     1080,       
-#     True,       
-#     'ЛОГИН_ПРОКСИ', 
-#     'ПАРОЛЬ_ПРОКСИ'
-# )
 # --------------------------------------------------------
 
 # Настройка логирования
@@ -473,8 +464,7 @@ async def run_worker(user_id):
     await stop_worker(user_id) 
     path = get_session_path(user_id)
     
-    # --- Инициализация с Прокси и Device Model ---
-    # Имитация Android-клиента для обхода потенциальных ограничений
+    # --- Инициализация с Device Model (УДАЛЕНА ПРАВКА ПРОТОКОЛА) ---
     client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, device_model='Android Client') 
     ACTIVE_TELETHON_CLIENTS[user_id] = client
     
@@ -927,7 +917,7 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     
     try:
         path = get_session_path(user_id)
-        # --- Инициализация с Прокси, Таймаутом и Device Model (V6) ---
+        # --- Инициализация с Прокси, Таймаутом и Device Model (Стабильный протокол) ---
         client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, timeout=30, device_model='Android Client')
         TEMP_AUTH_CLIENTS[user_id] = client
         
@@ -947,7 +937,7 @@ async def telethon_auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         # Отправляем фото с QR-кодом
         await bot.send_photo(user_id, qr_url, caption="Отсканируйте код в течение 5 минут.", reply_markup=get_cancel_kb()) 
 
-        # Увеличенный таймаут до 300 секунд (5 минут) (V6)
+        # Увеличенный таймаут до 300 секунд (5 минут) 
         await login_token.wait(timeout=300) 
         
         db_set_session_status(user_id, True)
@@ -983,7 +973,7 @@ async def auth_msg_phone(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     path = get_session_path(user_id)
-    # --- Инициализация с Прокси и Device Model (V6) ---
+    # --- Инициализация с Прокси и Device Model (Стабильный протокол) ---
     client = TelegramClient(path, API_ID, API_HASH, proxy=PROXY_CONFIG, device_model='Android Client')
     TEMP_AUTH_CLIENTS[user_id] = client
     
