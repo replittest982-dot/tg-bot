@@ -35,7 +35,7 @@ from telethon.utils import get_display_name
 # I. КОНФИГУРАЦИЯ И НАСТРОЙКА
 # =========================================================================
 
-# --- ВАШИ КЛЮЧИ ---
+# --- ВАШИ КЛЮЧИ (ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ НА СВОИ) ---
 BOT_TOKEN = "7868097991:AAFJb7pNRfr_FPDxigk7GqlCr1AryXTrcYY"
 ADMIN_ID = 6256576302 # Ваш ID администратора
 API_ID = 35775411
@@ -464,7 +464,7 @@ class TelethonManager:
                     if user_id in PROCESS_PROGRESS:
                         p = PROCESS_PROGRESS[user_id]
                         if p['type'] == 'flood':
-                            status = f"⚙️ Флуд: {p.get('done', 0)} / {p.get('total', 'inf')}"
+                            status = f"⚙️ **Флуд:**\nОтправлено: {p.get('done', 0)} / {p.get('total', '∞')}"
                         else:
                             status = f"⚙️ {p['type']}: Обработано {p.get('done_msg', 0)} сообщений."
                         await event.reply(status)
@@ -605,7 +605,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         if member.status not in ('member', 'administrator', 'creator'):
              return await message.answer(
                  f"👋 **Приветствуем!**\n\n"
-                 f"Чтобы начать пользоваться ботом, пожалуйста, подпишитесь на наш канал: {TARGET_CHANNEL_URL}.", 
+                 f"Для получения доступа к боту, пожалуйста, подпишитесь на наш канал: {TARGET_CHANNEL_URL}.", 
                  reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                      [InlineKeyboardButton(text="➡️ Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL[1:]}")],
                      [InlineKeyboardButton(text="✅ Я подписался", callback_data="back_to_main")]
@@ -636,7 +636,7 @@ async def back_home(call: types.CallbackQuery, state: FSMContext):
     except TelegramBadRequest: await call.message.answer("🤖 **Главное меню**\nВыберите действие ниже.", reply_markup=get_main_kb(user_id))
     await call.answer()
 
-# --- АВТОРИЗАЦИЯ FSM ---
+# --- АВТОРИЗАЦИЯ FSM (ИСПРАВЛЕНА) ---
 
 @user_router.callback_query(F.data == "telethon_auth_phone_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
@@ -665,6 +665,7 @@ async def auth_phone_input(message: types.Message, state: FSMContext):
         if not re.match(r'^\+?[0-9\s-]{7,15}$', phone): raise ValueError("Неверный формат номера.")
         
         await client.connect()
+        # ИСПРАВЛЕНИЕ: Сохраняем sent_code для получения phone_code_hash
         sent_code = await client.send_code_request(phone) 
         
         await state.update_data(phone=phone, hash=sent_code.phone_code_hash)
@@ -895,7 +896,6 @@ async def sub_info_msg(call: types.CallbackQuery):
 
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def promo_start(call: types.CallbackQuery, state: FSMContext):
-    # Разрешаем ввод промокода, даже если подписка активна (для продления)
     await state.set_state(PromoStates.waiting_for_code)
     await call.message.edit_text("🔑 **Ввод промокода:**\nВведите ваш промокод:", reply_markup=get_cancel_kb())
     await call.answer()
@@ -959,9 +959,9 @@ async def admin_grant(call: types.CallbackQuery, state: FSMContext):
 @user_router.message(AdminStates.sub_user_id_input)
 async def admin_grant_id(message: types.Message, state: FSMContext):
     if not message.text.isdigit(): return await message.answer("ID должен быть числом!")
-    if not db.get_user(int(message.text)):
-        # Создаем пользователя, если его нет (для админа)
-        db.get_user(int(message.text))
+    
+    # Создаем пользователя, если его нет (для админа, чтобы гарантировать запись)
+    db.get_user(int(message.text))
         
     await state.update_data(uid=int(message.text))
     await state.set_state(AdminStates.sub_days_input)
