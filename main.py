@@ -547,7 +547,7 @@ def get_main_kb(user_id):
     
     kb = []
     
-    # 1. Справка, Подписка и ССЫЛКА НА ПОДДЕРЖКУ (НОВАЯ КНОПКА)
+    # 1. Справка, Подписка и ССЫЛКА НА ПОДДЕРЖКУ
     kb.append([
         InlineKeyboardButton(text=f"Подписка: {sub_info}", callback_data="show_sub_info"),
         InlineKeyboardButton(text="❓ Справка", callback_data="show_help"),
@@ -723,7 +723,7 @@ async def auth_code_input(message: types.Message, state: FSMContext):
         await client.sign_in(data['phone'], message.text.strip(), phone_code_hash=data['hash'])
         await finalize_login(user_id, client, message, state)
     except SessionPasswordNeededError:
-        # !!! ИСПРАВЛЕНИЕ: ПЕРЕВОДИМ СРАЗУ В СОСТОЯНИЕ ОЖИДАНИЯ ПАРОЛЯ !!!
+        # ПЕРЕВОДИМ СРАЗУ В СОСТОЯНИЕ ОЖИДАНИЯ ПАРОЛЯ
         await state.set_state(TelethonAuth.PASSWORD)
         await message.answer("🔒 **Ввод 2FA:**\nВведите ваш облачный пароль (2FA):", reply_markup=get_cancel_kb())
     except PhoneCodeExpiredError: await message.answer("❌ **Ошибка:** Код истек. Начните заново.", reply_markup=get_cancel_kb())
@@ -739,7 +739,7 @@ async def auth_password_input(message: types.Message, state: FSMContext):
     if not client: return await message.answer("❌ **Ошибка:** Сессия Telethon потеряна. Начните заново.", reply_markup=get_main_kb(user_id))
 
     try:
-        # ПЕРЕПОДКЛЮЧАЕМСЯ, ЕСЛИ БЫЛО ОТКЛЮЧЕНИЕ (для большей надежности)
+        # ПЕРЕПОДКЛЮЧАЕМСЯ, ЕСЛИ БЫЛО ОТКЛЮЧЕНИЕ 
         if not client.is_connected(): await client.connect() 
         
         await client.sign_in(password=message.text.strip())
@@ -749,7 +749,7 @@ async def auth_password_input(message: types.Message, state: FSMContext):
         logger.error(f"Password input error for {user_id}: {e}")
         await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
 
-# --- ЛОГИКА ДЛЯ QR-ВХОДА С 2FA ---
+# --- ЛОГИКА ДЛЯ QR-ВХОДА С 2FA (Усиленное переподключение) ---
 
 @user_router.callback_query(F.data == "telethon_auth_qr_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
@@ -768,8 +768,11 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     client = TelegramClient(get_session_path(user_id, True), manager.API_ID, manager.API_HASH, device_model="Android Client")
     TEMP_AUTH_CLIENTS[user_id] = client
     
-    await call.message.edit_text("⏳ Идет подготовка QR-кода...", reply_markup=get_cancel_kb())
-    
+    try:
+        await call.message.edit_text("⏳ Идет подготовка QR-кода...", reply_markup=get_cancel_kb())
+    except TelegramBadRequest:
+        pass # Если сообщение уже удалено
+
     try:
         await client.connect()
         qr_login = await client.qr_login()
@@ -812,11 +815,11 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     except SessionPasswordNeededError:
         # ПЕРЕХВАТ SessionPasswordNeededError! Переходим к вводу пароля
         await state.set_state(TelethonAuth.QR_PASSWORD)
-        await call.message.edit_text("🔒 **Ввод 2FA (через QR):**\nВы успешно отсканировали код, но на вашем аккаунте включен облачный пароль (2FA).\n\nВведите ваш пароль:", reply_markup=get_cancel_kb())
+        await call.message.answer("🔒 **Ввод 2FA (через QR):**\nВы успешно отсканировали код, но на вашем аккаунте включен облачный пароль (2FA).\n\nВведите ваш пароль:", reply_markup=get_cancel_kb())
         
     except Exception as e: 
         logger.error(f"QR login error for {user_id}: {e}")
-        await call.message.edit_text(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_main_kb(user_id))
+        await call.message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_main_kb(user_id))
     finally:
         # Если НЕ перешли в QR_PASSWORD, чистим сессию
         current_state = await state.get_state()
@@ -829,15 +832,18 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
 
 @user_router.message(TelethonAuth.QR_PASSWORD)
 async def auth_qr_password_input(message: types.Message, state: FSMContext):
-    """Обработка ввода 2FA после сканирования QR-кода."""
+    """Обработка ввода 2FA после сканирования QR-кода с усиленным переподключением."""
     user_id = message.from_user.id
     client = TEMP_AUTH_CLIENTS.get(user_id)
     
     if not client: return await message.answer("❌ **Ошибка:** Сессия Telethon потеряна. Начните заново.", reply_markup=get_main_kb(user_id))
 
     try:
-        # Подключение клиента, который уже должен быть авторизован токеном (но требует пароль)
-        if not client.is_connected(): await client.connect() 
+        # !!! УСИЛЕННАЯ ПРОВЕРКА И ПЕРЕПОДКЛЮЧЕНИЕ !!!
+        if not client.is_connected(): 
+            await message.answer("🛠️ Восстанавливаю соединение для ввода пароля...", reply_markup=get_cancel_kb())
+            await client.connect()
+        
         # Ввод пароля для завершения авторизации
         await client.sign_in(password=message.text.strip()) 
         
@@ -846,7 +852,12 @@ async def auth_qr_password_input(message: types.Message, state: FSMContext):
         await message.answer("❌ **Ошибка:** Неверный пароль. Попробуйте снова.", reply_markup=get_cancel_kb())
     except Exception as e: 
         logger.error(f"QR Password input error for {user_id}: {e}")
-        await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
+        # Если соединение все равно потеряно, предлагаем начать сначала.
+        if "disconnected" in str(e):
+             await message.answer(f"❌ **Ошибка соединения:** Клиент отключился. Пожалуйста, попробуйте авторизоваться снова с самого начала.", reply_markup=get_main_kb(user_id))
+        else:
+             await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
+
 
 async def finalize_login(user_id, client, message, state):
     """Завершение процесса авторизации, сохранение сессии и запуск worker'а."""
