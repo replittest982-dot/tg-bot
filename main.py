@@ -84,7 +84,7 @@ class TelethonAuth(StatesGroup):
     CODE = State()
     PASSWORD = State()
     WAITING_FOR_QR_LOGIN = State()
-    QR_PASSWORD = State() # <--- НОВОЕ СОСТОЯНИЕ ДЛЯ 2FA ПРИ QR-ВХОДЕ
+    QR_PASSWORD = State() 
 
 class PromoStates(StatesGroup):
     waiting_for_code = State()
@@ -176,6 +176,8 @@ class Database:
 
     def check_subscription(self, user_id):
         user = self.get_user(user_id)
+        # Админ всегда имеет доступ
+        if user_id == ADMIN_ID: return True 
         if not user or not user.get('subscription_active'): return False
 
         end_date_str = user.get('subscription_end_date')
@@ -321,6 +323,12 @@ class TelethonManager:
 
     async def run_worker(self, user_id):
         """Основная логика Telethon Worker."""
+        
+        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПЕРЕД ЗАПУСКОМ (на случай, если запустили в обход UI)
+        if not db.check_subscription(user_id) and user_id != ADMIN_ID:
+             await self._send_to_bot_user(user_id, "❌ **Запуск Worker'а невозможен.** Нет активной подписки.", reply_markup=get_main_kb(user_id))
+             return
+        
         await self.stop_worker(user_id, force_disconnect=True)
         path = get_session_path(user_id)
         client = TelegramClient(path, self.API_ID, self.API_HASH, device_model="Android Client")
@@ -410,7 +418,9 @@ class TelethonManager:
             async def worker_handler(event):
                 if not event.text or not event.text.startswith('.'): return
 
-                if not db.check_subscription(user_id) and user_id != ADMIN_ID: return await event.reply("❌ Подписка истекла.")
+                # ГЛАВНАЯ ПРОВЕРКА ПОДПИСКИ
+                if not db.check_subscription(user_id) and user_id != ADMIN_ID: 
+                    return await event.reply("❌ **Доступ запрещен!** Срок подписки истек. Пожалуйста, продлите подписку.")
                 
                 msg = event.text.strip()
                 parts = msg.split()
@@ -429,13 +439,16 @@ class TelethonManager:
                     await event.reply("\n".join(res))
 
                 elif cmd == '.флуд':
-                    if len(parts) < 5: return await event.reply("❌ Формат: `.флуд [кол-во] [цель] [текст] [задержка]`")
-                    if user_id in self.FLOOD_TASKS: return await event.reply("⚠️ Уже идет задача флуда.")
+                    if len(parts) < 5: return await event.reply("❌ Формат: `.флуд [кол-во] [текст] [цель] [задержка]`")
+                    if user_id in self.FLOOD_TASKS: return await event.reply("⚠️ Уже идет задача флуда. Используйте `.стопфлуд`")
                     try:
                         cnt = int(parts[1])
                         dly = float(parts[-1])
-                        trg = parts[2]
-                        msg_txt = " ".join(parts[3:-1])
+                        trg = parts[-2]
+                        msg_parts = parts[2:-2]
+                        msg_txt = " ".join(msg_parts)
+                        
+                        if not msg_txt: return await event.reply("❌ Не указан текст сообщения.")
                         
                         ent = await client.get_input_entity(trg)
                         cid = (await client.get_entity(trg)).id
@@ -527,6 +540,7 @@ def get_main_kb(user_id):
     active = user.get('telethon_active')
     running = user_id in manager.ACTIVE_WORKERS
     sub_info = format_sub_info(user)
+    is_sub_active = db.check_subscription(user_id) or user_id == ADMIN_ID # Админ всегда имеет доступ
     
     kb = []
     
@@ -538,10 +552,19 @@ def get_main_kb(user_id):
     
     if not active:
         # Авторизация (Пока нет сессии)
-        kb.append([
-            InlineKeyboardButton(text="📲 Вход по QR-коду", callback_data="telethon_auth_qr_start"),
-            InlineKeyboardButton(text="🔐 Вход по Номеру", callback_data="telethon_auth_phone_start")
-        ])
+        
+        # Блокируем кнопки входа, если подписка неактивна
+        if is_sub_active:
+            kb.append([
+                InlineKeyboardButton(text="📲 Вход по QR-коду", callback_data="telethon_auth_qr_start"),
+                InlineKeyboardButton(text="🔐 Вход по Номеру", callback_data="telethon_auth_phone_start")
+            ])
+        else:
+            # Если подписки нет, отображаем заглушку
+            kb.append([
+                InlineKeyboardButton(text="🔴 Доступ к Worker'у закрыт", callback_data="show_sub_info")
+            ])
+            
         kb.append([
              InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")
         ])
@@ -644,6 +667,9 @@ async def back_home(call: types.CallbackQuery, state: FSMContext):
 @user_router.callback_query(F.data == "telethon_auth_phone_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
 async def auth_phone_start(call: types.CallbackQuery, state: FSMContext):
+    if not db.check_subscription(call.from_user.id) and call.from_user.id != ADMIN_ID:
+        return await call.answer("❌ Авторизация доступна только при активной подписке.", show_alert=True)
+        
     if db.get_user(call.from_user.id).get('telethon_active'): 
         return await call.answer("Сессия уже активна. Сначала выполните выход.", show_alert=True)
         
@@ -715,13 +741,16 @@ async def auth_password_input(message: types.Message, state: FSMContext):
         logger.error(f"Password input error for {user_id}: {e}")
         await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
 
-# --- НОВАЯ ЛОГИКА ДЛЯ QR-ВХОДА С 2FA ---
+# --- ЛОГИКА ДЛЯ QR-ВХОДА С 2FA ---
 
 @user_router.callback_query(F.data == "telethon_auth_qr_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
 async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     """Начало авторизации по QR-коду с резервной генерацией QR."""
     user_id = call.from_user.id
+    if not db.check_subscription(user_id) and user_id != ADMIN_ID:
+        return await call.answer("❌ Авторизация доступна только при активной подписке.", show_alert=True)
+        
     if db.get_user(user_id).get('telethon_active'): 
         return await call.answer("Сессия уже активна. Сначала выполните выход.", show_alert=True)
 
@@ -828,7 +857,11 @@ async def finalize_login(user_id, client, message, state):
     
     db.set_telethon_status(user_id, True)
     await state.clear()
-    await message.answer("✅ **Авторизация успешна!** Запускаю Worker...", reply_markup=get_main_kb(user_id))
+    
+    user_info = await client.get_me()
+    account_name = get_display_name(user_info)
+    
+    await message.answer(f"✅ **Авторизация успешна!**\nАккаунт: **{account_name}**.\nЗапускаю Worker...", reply_markup=get_main_kb(user_id))
     asyncio.create_task(manager.run_worker(user_id))
 
 # --- УПРАВЛЕНИЕ WORKER'ОМ ---
@@ -836,6 +869,9 @@ async def finalize_login(user_id, client, message, state):
 @user_router.callback_query(F.data == "telethon_start_session")
 @rate_limit(RATE_LIMIT_TIME)
 async def worker_start(call: types.CallbackQuery):
+    if not db.check_subscription(call.from_user.id) and call.from_user.id != ADMIN_ID:
+        return await call.answer("❌ Запуск Worker'а доступен только при активной подписке.", show_alert=True)
+
     asyncio.create_task(manager.run_worker(call.from_user.id))
     await call.answer("Запуск Worker'а...")
     try: await call.message.edit_reply_markup(reply_markup=get_main_kb(call.from_user.id))
@@ -919,13 +955,35 @@ async def report_handler(call: types.CallbackQuery):
 @user_router.callback_query(F.data == "show_help")
 async def help_msg(call: types.CallbackQuery):
     help_text = (
-        "📚 **Справка по командам Worker'а (в чате вашего аккаунта):**\n\n"
-        "1. **`.лс [текст]`**\n   Отправка ЛС по списку юзернеймов/ID.\n   Пример:\n   `."
-        "лс Привет!\n@user1\n12345678`\n\n"
-        "2. **`.флуд [кол-во] [цель] [текст] [задержка]`**\n   Массовая отправка сообщений.\n   `[кол-во]`: число (0 - без лимита)\n   `[цель]`: юзернейм или ID\n   `[задержка]`: число (секунды)\n   Пример: `.флуд 100 @target_chat Привет, тест 0.5`\n\n"
-        "3. **`.стопфлуд`**\n   Останавливает запущенный флуд.\n\n"
-        "4. **`.чекгруппу [цель] [минID] [максID]`**\n   Сканирует сообщения в чате для сбора списка участников.\n   Пример: `.чекгруппу @target_chat 1000000 9000000000`\n\n"
-        "5. **`.статус`**\n   Проверить прогресс запущенной задачи."
+        "📚 **Справочник команд Worker'а**\n"
+        "*Команды отправляются в любом чате/ЛС **привязанного аккаунта***\n"
+        "---"
+        "\n\n**1. 💬 Массовая рассылка ЛС**\n"
+        "Команда: **`.лс [текст]`**\n"
+        "Отправляет личные сообщения по списку юзернеймов/ID, указанных с новой строки.\n"
+        "**Пример:**\n"
+        "```\n.лс Привет! Это тестовое сообщение.\n@user1\n123456789\n```"
+        "\n\n**2. 🔥 Флуд (Массовая отправка)**\n"
+        "Команда: **`.флуд [кол-во] [текст] [цель] [задержка]`**\n"
+        "* `[кол-во]`: число сообщений (0 - без лимита)\n"
+        "* `[текст]`: текст сообщения\n"
+        "* `[цель]`: юзернейм или ID чата/пользователя\n"
+        "* `[задержка]`: число в секундах (например, `0.5`)\n"
+        "**Пример:**\n"
+        "```\n.флуд 100 Привет, это тест! @target_chat 0.5\n```"
+        "\n\n**3. 🛑 Остановка флуда**\n"
+        "Команда: **`.стопфлуд`**\n"
+        "Мгновенно останавливает активную задачу флуда."
+        "\n\n**4. 📊 Сканирование группы**\n"
+        "Команда: **`.чекгруппу [цель] [минID] [максID]`**\n"
+        "Собирает список пользователей, которые писали в чате.\n"
+        "* `[цель]`: юзернейм или ID чата (можно опустить, если запускать в самой группе)\n"
+        "* `[минID]`, `[максID]`: необязательные фильтры по диапазону ID.\n"
+        "**Пример:**\n"
+        "```\n.чекгруппу @target_chat 1000000 9000000000\n```"
+        "\n\n**5. ✨ Проверка статуса**\n"
+        "Команда: **`.статус`**\n"
+        "Показывает, активен ли Worker и прогресс текущей задачи."
     )
     await call.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")]]))
 
