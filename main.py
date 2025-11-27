@@ -27,7 +27,7 @@ from telethon.errors import (
     UserIsBlockedError
 )
 
-BOT_TOKEN = "7868097991:AAEWx2koF8jM-gsNuLlvDpax-tfJUj6lhqw"
+BOT_TOKEN = "7868097991:AAGCmuiwcYerBHvxA9dpWqDuaRnBAAdEmUY"
 ADMIN_ID = 6256576302
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
