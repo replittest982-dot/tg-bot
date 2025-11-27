@@ -7,8 +7,8 @@ import re
 import io
 import random
 import string
-import qrcode # <--- ДОБАВЛЕНО
-from io import BytesIO # <--- ДОБАВЛЕНО
+import qrcode
+from io import BytesIO
 from datetime import datetime, timedelta
 from typing import Dict, Union, Optional
 from functools import wraps
@@ -84,6 +84,7 @@ class TelethonAuth(StatesGroup):
     CODE = State()
     PASSWORD = State()
     WAITING_FOR_QR_LOGIN = State()
+    QR_PASSWORD = State() # <--- НОВОЕ СОСТОЯНИЕ ДЛЯ 2FA ПРИ QR-ВХОДЕ
 
 class PromoStates(StatesGroup):
     waiting_for_code = State()
@@ -667,7 +668,6 @@ async def auth_phone_input(message: types.Message, state: FSMContext):
         if not re.match(r'^\+?[0-9\s-]{7,15}$', phone): raise ValueError("Неверный формат номера.")
         
         await client.connect()
-        # ИСПРАВЛЕНИЕ: Сохраняем sent_code для получения phone_code_hash
         sent_code = await client.send_code_request(phone) 
         
         await state.update_data(phone=phone, hash=sent_code.phone_code_hash)
@@ -715,6 +715,8 @@ async def auth_password_input(message: types.Message, state: FSMContext):
         logger.error(f"Password input error for {user_id}: {e}")
         await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
 
+# --- НОВАЯ ЛОГИКА ДЛЯ QR-ВХОДА С 2FA ---
+
 @user_router.callback_query(F.data == "telethon_auth_qr_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
 async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
@@ -725,6 +727,7 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
 
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
     
+    # Создаем новый клиент для временной сессии
     client = TelegramClient(get_session_path(user_id, True), manager.API_ID, manager.API_HASH, device_model="Android Client")
     TEMP_AUTH_CLIENTS[user_id] = client
     
@@ -734,16 +737,12 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await client.connect()
         qr_login = await client.qr_login()
         
-        # --- ИСПРАВЛЕНИЕ: ПРОВЕРКА НАЛИЧИЯ АТРИБУТА .image И РЕЗЕРВНАЯ ГЕНЕРАЦИЯ ---
+        # Резервная генерация QR
         img_bytes = None
         if hasattr(qr_login, 'image'):
-            # Попытка использовать .image (для совместимых версий)
             img_bytes = qr_login.image
-            logger.info(f"QR login for {user_id}: Used .image attribute.")
         else:
-            # Резервный вариант: Получаем URL и генерируем QR вручную (если .image отсутствует)
             qr_url = qr_login.url 
-            
             qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
             qr.add_data(qr_url)
             qr.make(fit=True)
@@ -754,7 +753,6 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
             img.save(byte_arr, format='PNG')
             img_bytes = byte_arr.getvalue()
             logger.info(f"QR login for {user_id}: Used fallback QR generation from URL.")
-        # --------------------------------------------------------------------------------------
         
         if not img_bytes:
             raise Exception("Не удалось сгенерировать QR-код: нет ни .image, ни .url.")
@@ -766,33 +764,68 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         )
         await call.answer()
         
+        # Ожидание сканирования
         await qr_login.wait(180)
         
+        # Если успешно - завершаем
         await finalize_login(user_id, client, call.message, state)
     
     except asyncio.exceptions.TimeoutError: 
         await call.message.edit_text("❌ **Таймаут:** Время для сканирования QR-кода истекло.", reply_markup=get_main_kb(user_id))
+    except SessionPasswordNeededError:
+        # ПЕРЕХВАТ SessionPasswordNeededError! Переходим к вводу пароля
+        await state.set_state(TelethonAuth.QR_PASSWORD)
+        await call.message.edit_text("🔒 **Ввод 2FA (через QR):**\nВы успешно отсканировали код, но на вашем аккаунте включен облачный пароль (2FA).\n\nВведите ваш пароль:", reply_markup=get_cancel_kb())
     except Exception as e: 
         logger.error(f"QR login error for {user_id}: {e}")
         await call.message.edit_text(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_main_kb(user_id))
     finally:
-        if user_id in TEMP_AUTH_CLIENTS: 
-            client_to_close = TEMP_AUTH_CLIENTS.pop(user_id, None)
-            if client_to_close:
-                try: await client_to_close.disconnect() 
-                except: pass
+        # Если не перешли в QR_PASSWORD, чистим сессию
+        current_state = await state.get_state()
+        if current_state != TelethonAuth.QR_PASSWORD:
+            if user_id in TEMP_AUTH_CLIENTS: 
+                client_to_close = TEMP_AUTH_CLIENTS.pop(user_id, None)
+                if client_to_close:
+                    try: await client_to_close.disconnect() 
+                    except: pass
+
+@user_router.message(TelethonAuth.QR_PASSWORD)
+async def auth_qr_password_input(message: types.Message, state: FSMContext):
+    """Обработка ввода 2FA после сканирования QR-кода."""
+    user_id = message.from_user.id
+    client = TEMP_AUTH_CLIENTS.get(user_id)
+    
+    if not client: return await message.answer("❌ **Ошибка:** Сессия Telethon потеряна. Начните заново.", reply_markup=get_main_kb(user_id))
+
+    try:
+        # Подключение клиента, который уже должен быть авторизован токеном (но требует пароль)
+        await client.connect()
+        # Ввод пароля для завершения авторизации
+        await client.sign_in(password=message.text.strip()) 
+        
+        await finalize_login(user_id, client, message, state)
+    except PasswordHashInvalidError:
+        await message.answer("❌ **Ошибка:** Неверный пароль. Попробуйте снова.", reply_markup=get_cancel_kb())
+    except Exception as e: 
+        logger.error(f"QR Password input error for {user_id}: {e}")
+        await message.answer(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_cancel_kb())
 
 async def finalize_login(user_id, client, message, state):
     """Завершение процесса авторизации, сохранение сессии и запуск worker'а."""
+    # Отключаем временный клиент
     await client.disconnect()
     
     src = get_session_path(user_id, True) + '.session'
     dst = get_session_path(user_id) + '.session'
     
+    # Переименовываем временный файл в постоянный
     if os.path.exists(src):
         if os.path.exists(dst): os.remove(dst)
         os.rename(src, dst)
         
+    # Удаляем клиента из временного хранилища
+    TEMP_AUTH_CLIENTS.pop(user_id, None)
+    
     db.set_telethon_status(user_id, True)
     await state.clear()
     await message.answer("✅ **Авторизация успешна!** Запускаю Worker...", reply_markup=get_main_kb(user_id))
