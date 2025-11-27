@@ -527,21 +527,23 @@ def get_main_kb(user_id):
     
     kb = []
     
-    # 1. Справка и Подписка
+    # 1. Справка и Подписка/Промокод (Промокод всегда доступен)
     kb.append([
         InlineKeyboardButton(text=f"Подписка: {sub_info}", callback_data="show_sub_info"),
         InlineKeyboardButton(text="❓ Справка", callback_data="show_help")
     ])
     
-    # 2. Управление Worker'ом (главное действие)
     if not active:
-        # Авторизация: Две кнопки в одну строку
+        # Авторизация (Пока нет сессии)
         kb.append([
             InlineKeyboardButton(text="📲 Вход по QR-коду", callback_data="telethon_auth_qr_start"),
             InlineKeyboardButton(text="🔐 Вход по Номеру", callback_data="telethon_auth_phone_start")
         ])
+        kb.append([
+             InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm")
+        ])
     else:
-        # Worker активен/остановлен
+        # Worker активен/остановлен (Сессия есть)
         status_text = "🟢 Worker Активен" if running else "🔴 Worker Остановлен"
         
         if running:
@@ -555,9 +557,12 @@ def get_main_kb(user_id):
                  kb.append([InlineKeyboardButton(text="⚡️ Прогресс задачи", callback_data="show_progress")])
         else:
             # Отдельная кнопка для Запуска
-            kb.append([InlineKeyboardButton(text="🟢 Запустить Worker", callback_data="telethon_start_session")])
+            kb.append([
+                InlineKeyboardButton(text="🟢 Запустить Worker", callback_data="telethon_start_session"),
+                InlineKeyboardButton(text=status_text, callback_data="telethon_check_status")
+            ])
         
-        # Выход и Промокод в одной строке
+        # Выход и Промокод
         kb.append([
             InlineKeyboardButton(text="🔑 Активировать Промокод", callback_data="start_promo_fsm"),
             InlineKeyboardButton(text="❌ Выход (Удалить сессию)", callback_data="confirm_logout")
@@ -607,7 +612,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
                  ])
              )
     except Exception:
-        # Если канал не найден или API ошибка - продолжаем
         pass
             
     await message.answer("🤖 **Главное меню**\nВыберите действие ниже.", reply_markup=get_main_kb(user_id))
@@ -632,7 +636,7 @@ async def back_home(call: types.CallbackQuery, state: FSMContext):
     except TelegramBadRequest: await call.message.answer("🤖 **Главное меню**\nВыберите действие ниже.", reply_markup=get_main_kb(user_id))
     await call.answer()
 
-# --- АВТОРИЗАЦИЯ FSM (ИСПРАВЛЕНА) ---
+# --- АВТОРИЗАЦИЯ FSM ---
 
 @user_router.callback_query(F.data == "telethon_auth_phone_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
@@ -643,7 +647,6 @@ async def auth_phone_start(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     await state.set_state(TelethonAuth.PHONE)
     
-    # Создаем и сохраняем временный клиент
     client = TelegramClient(get_session_path(user_id, True), manager.API_ID, manager.API_HASH, device_model="Android Client")
     TEMP_AUTH_CLIENTS[user_id] = client
     
@@ -662,10 +665,9 @@ async def auth_phone_input(message: types.Message, state: FSMContext):
         if not re.match(r'^\+?[0-9\s-]{7,15}$', phone): raise ValueError("Неверный формат номера.")
         
         await client.connect()
-        # ИСПРАВЛЕНО: Сохраняем результат send_code_request, чтобы получить phone_code_hash
         sent_code = await client.send_code_request(phone) 
         
-        await state.update_data(phone=phone, hash=sent_code.phone_code_hash) # Сохраняем именно хэш
+        await state.update_data(phone=phone, hash=sent_code.phone_code_hash)
         await state.set_state(TelethonAuth.CODE)
         
         await message.answer("🔑 **Ввод кода:**\nВведите код, который пришел в ваш аккаунт Telegram:", reply_markup=get_cancel_kb())
@@ -685,7 +687,6 @@ async def auth_code_input(message: types.Message, state: FSMContext):
     if not client or 'phone' not in data or 'hash' not in data: return await message.answer("❌ **Ошибка:** Сессия Telethon потеряна. Начните заново.", reply_markup=get_main_kb(user_id))
 
     try:
-        # Используем сохраненный hash
         await client.sign_in(data['phone'], message.text.strip(), phone_code_hash=data['hash'])
         await finalize_login(user_id, client, message, state)
     except SessionPasswordNeededError:
@@ -714,11 +715,11 @@ async def auth_password_input(message: types.Message, state: FSMContext):
 @user_router.callback_query(F.data == "telethon_auth_qr_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
 async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
-    """Начало авторизации по QR-коду (Исправлено)."""
-    if db.get_user(call.from_user.id).get('telethon_active'): 
+    """Начало авторизации по QR-коду (ИСПРАВЛЕНО: .image вместо .qr_code)."""
+    user_id = call.from_user.id
+    if db.get_user(user_id).get('telethon_active'): 
         return await call.answer("Сессия уже активна. Сначала выполните выход.", show_alert=True)
 
-    user_id = call.from_user.id
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
     
     client = TelegramClient(get_session_path(user_id, True), manager.API_ID, manager.API_HASH, device_model="Android Client")
@@ -730,7 +731,8 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await client.connect()
         qr_login = await client.qr_login()
         
-        img_bytes = qr_login.qr_code # Telethon QrLogin object attribute
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем .image для совместимости с новыми Telethon
+        img_bytes = qr_login.image 
         
         await call.message.answer_photo(
             BufferedInputFile(img_bytes, 'qr.png'), 
@@ -745,17 +747,15 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
     
     except asyncio.exceptions.TimeoutError: 
         await call.message.edit_text("❌ **Таймаут:** Время для сканирования QR-кода истекло.", reply_markup=get_main_kb(user_id))
-    except AttributeError as e: 
-        logger.error(f"QR login AttributeError for {user_id}: {e}")
-        await call.message.edit_text(f"❌ **Ошибка AttributeError:** Не удалось получить QR-код. Возможно, проблема с API ключами или версией Telethon. {e}", reply_markup=get_main_kb(user_id))
     except Exception as e: 
         logger.error(f"QR login error for {user_id}: {e}")
         await call.message.edit_text(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_main_kb(user_id))
     finally:
         if user_id in TEMP_AUTH_CLIENTS: 
-            TEMP_AUTH_CLIENTS.pop(user_id, None)
-            try: await client.disconnect() 
-            except: pass
+            client_to_close = TEMP_AUTH_CLIENTS.pop(user_id, None)
+            if client_to_close:
+                try: await client_to_close.disconnect() 
+                except: pass
 
 async def finalize_login(user_id, client, message, state):
     """Завершение процесса авторизации, сохранение сессии и запуск worker'а."""
@@ -895,8 +895,7 @@ async def sub_info_msg(call: types.CallbackQuery):
 
 @user_router.callback_query(F.data == "start_promo_fsm")
 async def promo_start(call: types.CallbackQuery, state: FSMContext):
-    if db.check_subscription(call.from_user.id):
-         return await call.answer("У вас уже есть активная подписка.", show_alert=True)
+    # Разрешаем ввод промокода, даже если подписка активна (для продления)
     await state.set_state(PromoStates.waiting_for_code)
     await call.message.edit_text("🔑 **Ввод промокода:**\nВведите ваш промокод:", reply_markup=get_cancel_kb())
     await call.answer()
@@ -961,7 +960,8 @@ async def admin_grant(call: types.CallbackQuery, state: FSMContext):
 async def admin_grant_id(message: types.Message, state: FSMContext):
     if not message.text.isdigit(): return await message.answer("ID должен быть числом!")
     if not db.get_user(int(message.text)):
-        return await message.answer(f"❌ Пользователь с ID {message.text} не найден в базе.", reply_markup=get_cancel_kb())
+        # Создаем пользователя, если его нет (для админа)
+        db.get_user(int(message.text))
         
     await state.update_data(uid=int(message.text))
     await state.set_state(AdminStates.sub_days_input)
