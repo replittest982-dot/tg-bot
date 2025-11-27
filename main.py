@@ -30,7 +30,8 @@ from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError,
     PhoneNumberInvalidError, AuthKeyUnregisteredError,
     # ИСПРАВЛЕНИЕ: ChatSendForbiddenError заменено на ChatForwardsRestrictedError
-    ChatForwardsRestrictedError, LoginTokenExpiredError 
+    ChatForwardsRestrictedError 
+    # ИСПРАВЛЕНИЕ: LoginTokenExpiredError удалено, т.к. вызывает ошибку импорта
 )
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
