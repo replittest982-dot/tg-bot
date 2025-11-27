@@ -43,7 +43,8 @@ ADMIN_ID = 6256576302 # Ваш ID администратора
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1"
-SUPPORT_BOT_USERNAME = "SUPPORT_STATPRO_bot" # <--- !!! ВАЖНО: ПРОВЕРЬТЕ USERNAME БОТА ПОДДЕРЖКИ !!!
+# !!! ОБНОВЛЕННЫЙ USERNAME БОТА ПОДДЕРЖКИ !!!
+SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot" 
 
 # --- НАСТРОЙКИ ---
 DB_NAME = 'bot_database.db'
@@ -722,6 +723,7 @@ async def auth_code_input(message: types.Message, state: FSMContext):
         await client.sign_in(data['phone'], message.text.strip(), phone_code_hash=data['hash'])
         await finalize_login(user_id, client, message, state)
     except SessionPasswordNeededError:
+        # !!! ИСПРАВЛЕНИЕ: ПЕРЕВОДИМ СРАЗУ В СОСТОЯНИЕ ОЖИДАНИЯ ПАРОЛЯ !!!
         await state.set_state(TelethonAuth.PASSWORD)
         await message.answer("🔒 **Ввод 2FA:**\nВведите ваш облачный пароль (2FA):", reply_markup=get_cancel_kb())
     except PhoneCodeExpiredError: await message.answer("❌ **Ошибка:** Код истек. Начните заново.", reply_markup=get_cancel_kb())
@@ -737,6 +739,9 @@ async def auth_password_input(message: types.Message, state: FSMContext):
     if not client: return await message.answer("❌ **Ошибка:** Сессия Telethon потеряна. Начните заново.", reply_markup=get_main_kb(user_id))
 
     try:
+        # ПЕРЕПОДКЛЮЧАЕМСЯ, ЕСЛИ БЫЛО ОТКЛЮЧЕНИЕ (для большей надежности)
+        if not client.is_connected(): await client.connect() 
+        
         await client.sign_in(password=message.text.strip())
         await finalize_login(user_id, client, message, state)
     except PasswordHashInvalidError: await message.answer("❌ **Ошибка:** Неверный пароль. Попробуйте снова.", reply_markup=get_cancel_kb())
@@ -808,13 +813,14 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         # ПЕРЕХВАТ SessionPasswordNeededError! Переходим к вводу пароля
         await state.set_state(TelethonAuth.QR_PASSWORD)
         await call.message.edit_text("🔒 **Ввод 2FA (через QR):**\nВы успешно отсканировали код, но на вашем аккаунте включен облачный пароль (2FA).\n\nВведите ваш пароль:", reply_markup=get_cancel_kb())
+        
     except Exception as e: 
         logger.error(f"QR login error for {user_id}: {e}")
         await call.message.edit_text(f"❌ **Ошибка:** {e.__class__.__name__}. Попробуйте снова.", reply_markup=get_main_kb(user_id))
     finally:
-        # Если не перешли в QR_PASSWORD, чистим сессию
+        # Если НЕ перешли в QR_PASSWORD, чистим сессию
         current_state = await state.get_state()
-        if current_state != TelethonAuth.QR_PASSWORD:
+        if current_state != TelethonAuth.QR_PASSWORD: 
             if user_id in TEMP_AUTH_CLIENTS: 
                 client_to_close = TEMP_AUTH_CLIENTS.pop(user_id, None)
                 if client_to_close:
@@ -831,7 +837,7 @@ async def auth_qr_password_input(message: types.Message, state: FSMContext):
 
     try:
         # Подключение клиента, который уже должен быть авторизован токеном (но требует пароль)
-        await client.connect()
+        if not client.is_connected(): await client.connect() 
         # Ввод пароля для завершения авторизации
         await client.sign_in(password=message.text.strip()) 
         
