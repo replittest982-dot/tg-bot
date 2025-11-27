@@ -16,7 +16,7 @@ from typing import Dict, Union, Optional
 # =========================================================================
 
 # --- ВАШИ КЛЮЧИ ---
-BOT_TOKEN = "7868097991:AAFWAAw1357IWkGXr9cOpqY11xBtnB0xJSg"
+BOT_TOKEN = "7868097991:AAF4JHYx7pro-cOtxnLJd-QgfUiuO-ciqRk"
 ADMIN_ID = 6256576302
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
