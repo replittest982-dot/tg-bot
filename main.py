@@ -43,6 +43,7 @@ ADMIN_ID = 6256576302 # Ваш ID администратора
 API_ID = 35775411
 API_HASH = "4f8220840326cb5f74e1771c0c4248f2"
 TARGET_CHANNEL_URL = "@STAT_PRO1"
+SUPPORT_BOT_USERNAME = "SUPPORT_STATPRO_bot" # <--- !!! ВАЖНО: ПРОВЕРЬТЕ USERNAME БОТА ПОДДЕРЖКИ !!!
 
 # --- НАСТРОЙКИ ---
 DB_NAME = 'bot_database.db'
@@ -535,7 +536,8 @@ def get_admin_kb():
     ])
 
 def get_main_kb(user_id):
-    """Формирование главного меню с компактным размещением кнопок."""
+    """Формирование главного меню с компактным размещением кнопок.
+       Включает кнопку перехода в бота поддержки."""
     user = db.get_user(user_id)
     active = user.get('telethon_active')
     running = user_id in manager.ACTIVE_WORKERS
@@ -544,10 +546,11 @@ def get_main_kb(user_id):
     
     kb = []
     
-    # 1. Справка и Подписка/Промокод (Промокод всегда доступен)
+    # 1. Справка, Подписка и ССЫЛКА НА ПОДДЕРЖКУ (НОВАЯ КНОПКА)
     kb.append([
         InlineKeyboardButton(text=f"Подписка: {sub_info}", callback_data="show_sub_info"),
-        InlineKeyboardButton(text="❓ Справка", callback_data="show_help")
+        InlineKeyboardButton(text="❓ Справка", callback_data="show_help"),
+        InlineKeyboardButton(text="💬 Задать вопрос", url=f"https://t.me/{SUPPORT_BOT_USERNAME}") 
     ])
     
     if not active:
