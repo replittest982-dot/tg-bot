@@ -7,6 +7,8 @@ import re
 import io
 import random
 import string
+import qrcode # <--- ДОБАВЛЕНО
+from io import BytesIO # <--- ДОБАВЛЕНО
 from datetime import datetime, timedelta
 from typing import Dict, Union, Optional
 from functools import wraps
@@ -716,7 +718,7 @@ async def auth_password_input(message: types.Message, state: FSMContext):
 @user_router.callback_query(F.data == "telethon_auth_qr_start", StateFilter(None))
 @rate_limit(RATE_LIMIT_TIME)
 async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
-    """Начало авторизации по QR-коду (ИСПРАВЛЕНО: .image вместо .qr_code)."""
+    """Начало авторизации по QR-коду с резервной генерацией QR."""
     user_id = call.from_user.id
     if db.get_user(user_id).get('telethon_active'): 
         return await call.answer("Сессия уже активна. Сначала выполните выход.", show_alert=True)
@@ -732,9 +734,31 @@ async def auth_qr_start(call: types.CallbackQuery, state: FSMContext):
         await client.connect()
         qr_login = await client.qr_login()
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем .image для совместимости с новыми Telethon
-        img_bytes = qr_login.image 
+        # --- ИСПРАВЛЕНИЕ: ПРОВЕРКА НАЛИЧИЯ АТРИБУТА .image И РЕЗЕРВНАЯ ГЕНЕРАЦИЯ ---
+        img_bytes = None
+        if hasattr(qr_login, 'image'):
+            # Попытка использовать .image (для совместимых версий)
+            img_bytes = qr_login.image
+            logger.info(f"QR login for {user_id}: Used .image attribute.")
+        else:
+            # Резервный вариант: Получаем URL и генерируем QR вручную (если .image отсутствует)
+            qr_url = qr_login.url 
+            
+            qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+            qr.add_data(qr_url)
+            qr.make(fit=True)
+
+            img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+            
+            byte_arr = BytesIO()
+            img.save(byte_arr, format='PNG')
+            img_bytes = byte_arr.getvalue()
+            logger.info(f"QR login for {user_id}: Used fallback QR generation from URL.")
+        # --------------------------------------------------------------------------------------
         
+        if not img_bytes:
+            raise Exception("Не удалось сгенерировать QR-код: нет ни .image, ни .url.")
+            
         await call.message.answer_photo(
             BufferedInputFile(img_bytes, 'qr.png'), 
             caption="📲 **Скан QR:** Отсканируйте код на своём основном устройстве (Настройки -> Устройства/Сессии -> Сканировать QR).\n\n*Таймаут: 3 минуты.*", 
