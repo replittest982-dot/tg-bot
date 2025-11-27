@@ -385,7 +385,7 @@ class SimpleRateLimitMiddleware(BaseMiddleware):
 dp.message.middleware(SimpleRateLimitMiddleware(limit=RATE_LIMIT_TIME))
 
 # =========================================================================
-# V. TELETHON MANAGER
+# V. TELETHON MANAGER (С ИСПРАВЛЕННЫМ ASYNC DEF)
 # =========================================================================
 
 class TelethonManager:
@@ -516,7 +516,8 @@ class TelethonManager:
                 count = int(parts[1]); delay = float(parts[2]); target = parts[3] if len(parts) > 4 else event.chat_id
                 text = " ".join(parts[4:])
                 if not text: raise ValueError
-                self._start_flood_task(user_id, client, chat_id, target, count, delay, text)
+                # ИСПРАВЛЕНИЕ: await добавлен
+                await self._start_flood_task(user_id, client, chat_id, target, count, delay, text)
             except: await client.send_message(chat_id, "❌ Формат: .флуд <кол> <сек> <цель> <текст>")
         
         elif cmd == '.пкворк':
@@ -535,13 +536,15 @@ class TelethonManager:
                 lines = event.text.split('\n'); content = lines[1]
                 users = [l.strip() for l in lines[2:] if is_valid_username(l.strip())]
                 if not users: raise ValueError
-                self._start_mass_dm_task(user_id, client, chat_id, content, users)
+                # ИСПРАВЛЕНИЕ: await добавлен
+                await self._start_mass_dm_task(user_id, client, chat_id, content, users)
             except: await client.send_message(chat_id, "❌ Ошибка. Формат:\n.лс\nТекст\n@user1\n@user2")
                 
         elif cmd == '.чекгруппу':
             try:
                 target = parts[1] if len(parts) > 1 else chat_id
-                self._start_check_group_task(user_id, client, chat_id, target)
+                # ИСПРАВЛЕНИЕ: await добавлен
+                await self._start_check_group_task(user_id, client, chat_id, target)
             except: await client.send_message(chat_id, "❌ Ошибка. .чекгруппу <цель>")
 
         elif cmd == '.статус':
@@ -594,22 +597,31 @@ class TelethonManager:
                 await self._remove_task(user_id, task_id)
         return executor
     
-    def _start_flood_task(self, uid, cl, cid, tgt, cnt, dly, txt):
+    # ИСПРАВЛЕНИЕ: ASYNC DEF
+    async def _start_flood_task(self, uid, cl, cid, tgt, cnt, dly, txt):
         tid = f"fld-{random.randint(1000,9999)}"
         tsk = asyncio.create_task(self._flood_executor_factory(uid, cl, tid, tgt, cnt, dly, txt)())
-        async with store.lock: store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("flood", tid, uid, tgt); store.worker_tasks[uid][tid].task = tsk
+        async with store.lock: 
+            store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("flood", tid, uid, tgt)
+            store.worker_tasks[uid][tid].task = tsk
         asyncio.create_task(cl.send_message(cid, f"✅ Флуд запущен."))
 
-    def _start_mass_dm_task(self, uid, cl, cid, cnt, usrs):
+    # ИСПРАВЛЕНИЕ: ASYNC DEF
+    async def _start_mass_dm_task(self, uid, cl, cid, cnt, usrs):
         tid = f"dm-{random.randint(1000,9999)}"
         tsk = asyncio.create_task(self._mass_dm_executor_factory(uid, cl, tid, cnt, usrs)())
-        async with store.lock: store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("dm", tid, uid, "list"); store.worker_tasks[uid][tid].task = tsk
+        async with store.lock: 
+            store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("dm", tid, uid, "list")
+            store.worker_tasks[uid][tid].task = tsk
         asyncio.create_task(cl.send_message(cid, f"✅ Рассылка запущена."))
         
-    def _start_check_group_task(self, uid, cl, cid, tgt):
+    # ИСПРАВЛЕНИЕ: ASYNC DEF
+    async def _start_check_group_task(self, uid, cl, cid, tgt):
         tid = f"chk-{random.randint(1000,9999)}"
         tsk = asyncio.create_task(self._check_group_executor_factory(uid, cl, tid, tgt)())
-        async with store.lock: store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("scan", tid, uid, tgt); store.worker_tasks[uid][tid].task = tsk
+        async with store.lock: 
+            store.worker_tasks.setdefault(uid, {})[tid] = WorkerTask("scan", tid, uid, tgt)
+            store.worker_tasks[uid][tid].task = tsk
         asyncio.create_task(cl.send_message(cid, f"✅ Скан запущен."))
 
     async def _stop_tasks_by_type(self, uid, type):
@@ -648,13 +660,12 @@ def get_code_keyboard(current_code: str) -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="✅", callback_data="code_input_send")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# !!! ВОТ ЗДЕСЬ БЫЛА ОШИБКА, ТЕПЕРЬ ASYNC !!!
+# ИСПРАВЛЕНИЕ: Функция code_input_callback уже была ASYNC DEF, ошибок тут нет.
 @user_router.callback_query(F.data.startswith("code_input_"), TelethonAuth.CODE)
 async def code_input_callback(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     action = call.data.split("_")[-1]
     
-    # Чтобы избежать SyntaxError: 'async with' outside async function, функция должна быть async def
     async with store.lock:
         current_code = store.code_input_state.get(user_id, "")
         
@@ -664,13 +675,14 @@ async def code_input_callback(call: CallbackQuery, state: FSMContext):
         elif action == "del":
             store.code_input_state[user_id] = current_code[:-1]
         elif action == "send":
-            # Логика отправки
             pass 
 
     # Обновление UI
     new_val = store.code_input_state.get(user_id, "")
     if action == "send":
-        if not new_val: return await call.answer("Введите код!")
+        if not new_val: 
+            await call.answer("Введите код!")
+            return
         await call.message.edit_text("⏳ Проверка...")
         # Имитируем сообщение для основного хендлера
         await auth_code_input(Message(text=new_val, chat=call.message.chat, from_user=call.from_user, message_id=0, date=datetime.now()), state)
@@ -734,7 +746,9 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         )
         await call.message.delete()
         
-        await qr_login.wait(60)
+        # Ждем сканирования
+        await qr_login.wait(60) 
+        
         await msg.delete()
         await bot.send_message(uid, "✅ Успех! Запуск...")
         await tm.start_worker_session(uid, client)
@@ -833,7 +847,7 @@ async def admin_panel(msg: Message):
 @admin_only
 async def adm_promo_ask(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_promo_data)
-    await call.message.edit_text("CODE_DAYS_USES")
+    await call.message.edit_text("📝 Введите промокод в формате: CODE_DAYS_USES")
 
 @admin_router.message(AdminStates.waiting_for_promo_data)
 @admin_only
@@ -841,9 +855,9 @@ async def adm_promo_save(msg: Message, state: FSMContext):
     try:
         c, d, u = msg.text.split('_')
         if await db.add_promocode(c.upper(), int(d), int(u)):
-            await msg.answer("✅ Created")
-        else: await msg.answer("Error")
-    except: await msg.answer("Format error")
+            await msg.answer(f"✅ Промокод {c.upper()} создан на {d} дн. ({u} исп.)")
+        else: await msg.answer("❌ Ошибка при создании промокода (возможно, уже существует или неверный формат).")
+    except: await msg.answer("❌ Ошибка формата. Ожидается: CODE_DAYS_USES (например, TEST_7_10)")
     await state.clear()
 
 # --- DROPS (STUB) ---
@@ -853,15 +867,28 @@ async def drop_numb(msg: Message): await msg.answer("📝 Введите ном�
 # --- MAIN ---
 async def periodic_tasks():
     await db.init()
+    # Восстановление сессий после перезапуска
+    for uid in await db.get_active_telethon_users():
+        # Запускаем таски, но не ждем их
+        asyncio.create_task(tm.start_client_task(uid))
+
     while True:
+        # Ежечасная очистка старых сессий/пользователей
         await asyncio.sleep(3600)
         await db.cleanup_old_sessions()
 
 async def main():
     dp.include_routers(admin_router, user_router, drops_router)
+    # Запуск фоновых задач
     asyncio.create_task(periodic_tasks())
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.critical(f"Critical error in main loop: {e}")
