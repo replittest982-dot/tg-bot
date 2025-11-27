@@ -29,7 +29,8 @@ from telethon.tl.types import User, Channel, Chat
 from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError,
     PhoneNumberInvalidError, AuthKeyUnregisteredError,
-    ChatSendForbiddenError, LoginTokenExpiredError
+    # ИСПРАВЛЕНИЕ: ChatSendForbiddenError заменено на ChatForwardsRestrictedError
+    ChatForwardsRestrictedError, LoginTokenExpiredError 
 )
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
@@ -516,7 +517,6 @@ class TelethonManager:
                 count = int(parts[1]); delay = float(parts[2]); target = parts[3] if len(parts) > 4 else event.chat_id
                 text = " ".join(parts[4:])
                 if not text: raise ValueError
-                # ИСПРАВЛЕНИЕ: await добавлен
                 await self._start_flood_task(user_id, client, chat_id, target, count, delay, text)
             except: await client.send_message(chat_id, "❌ Формат: .флуд <кол> <сек> <цель> <текст>")
         
@@ -536,14 +536,12 @@ class TelethonManager:
                 lines = event.text.split('\n'); content = lines[1]
                 users = [l.strip() for l in lines[2:] if is_valid_username(l.strip())]
                 if not users: raise ValueError
-                # ИСПРАВЛЕНИЕ: await добавлен
                 await self._start_mass_dm_task(user_id, client, chat_id, content, users)
             except: await client.send_message(chat_id, "❌ Ошибка. Формат:\n.лс\nТекст\n@user1\n@user2")
                 
         elif cmd == '.чекгруппу':
             try:
                 target = parts[1] if len(parts) > 1 else chat_id
-                # ИСПРАВЛЕНИЕ: await добавлен
                 await self._start_check_group_task(user_id, client, chat_id, target)
             except: await client.send_message(chat_id, "❌ Ошибка. .чекгруппу <цель>")
 
@@ -660,7 +658,7 @@ def get_code_keyboard(current_code: str) -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="✅", callback_data="code_input_send")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ИСПРАВЛЕНИЕ: Функция code_input_callback уже была ASYNC DEF, ошибок тут нет.
+# Хендлер ввода кода (использует async with, но сам уже async)
 @user_router.callback_query(F.data.startswith("code_input_"), TelethonAuth.CODE)
 async def code_input_callback(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
@@ -700,7 +698,7 @@ async def cmd_start(message: Union[types.Message, CallbackQuery], state: FSMCont
     await db.get_user(user_id)
     
     sub = await db.get_subscription_status(user_id)
-    st = f"✅ Подписка до: {sub.strftime('%d.%m')}" if sub and sub > datetime.now(TIMEZONE_MSK) else "❌ Нет подписки"
+    st = f"✅ Подписка до: {sub.strftime('%d.%m.%Y')}" if sub and sub > datetime.now(TIMEZONE_MSK) else "❌ Нет подписки"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Вход", callback_data="auth_method_select")],
@@ -755,7 +753,8 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         
     except Exception as e:
         await bot.send_message(uid, f"Ошибка QR: {e}")
-        await client.disconnect()
+        try: await client.disconnect()
+        except: pass
 
 # --- PHONE AUTH ---
 @user_router.callback_query(F.data == "auth_phone_start")
@@ -821,17 +820,23 @@ async def promo_proc(msg: Message, state: FSMContext):
     code = msg.text.upper().strip()
     p = await db.get_promocode(code)
     if not p or p['uses_left'] <= 0: return await msg.answer("Неверный/истекший код.")
+    
+    days_added = p['duration_days']
     if await db.use_promocode(code):
-        await db.update_subscription(msg.from_user.id, p['duration_days'])
-        await msg.answer(f"✅ Активировано: +{p['duration_days']} дн.")
+        new_end = await db.update_subscription(msg.from_user.id, days_added)
+        await msg.answer(f"✅ Активировано: +{days_added} дн. Подписка до: {new_end.strftime('%d.%m.%Y')}.")
         await state.clear()
+    else:
+        await msg.answer("❌ Ошибка при использовании промокода.")
+
 
 # --- ADMIN ---
 def admin_only(func):
     @wraps(func)
     async def wrapper(message, *args, **kwargs):
         uid = message.from_user.id
-        if uid != ADMIN_ID: return
+        # Проверка, что message имеет атрибут from_user
+        if not hasattr(message, 'from_user') or uid != ADMIN_ID: return
         return await func(message, *args, **kwargs)
     return wrapper
 
@@ -839,8 +844,11 @@ def admin_only(func):
 @admin_only
 async def admin_panel(msg: Message):
     stats = await db.get_stats()
-    t = f"📊 Users: {stats['total_users']} | Workers: {stats['active_workers']}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Add Promo", callback_data="adm_promo")]])
+    t = f"📊 Users: {stats['total_users']} | Workers: {stats['active_workers']} | Drops: {stats['active_drops']}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Add Promo", callback_data="adm_promo")],
+        [InlineKeyboardButton(text="🛑 Stop All Workers", callback_data="adm_stop_all")]
+    ])
     await msg.answer(t, reply_markup=kb)
 
 @admin_router.callback_query(F.data == "adm_promo")
@@ -854,27 +862,61 @@ async def adm_promo_ask(call: CallbackQuery, state: FSMContext):
 async def adm_promo_save(msg: Message, state: FSMContext):
     try:
         c, d, u = msg.text.split('_')
-        if await db.add_promocode(c.upper(), int(d), int(u)):
-            await msg.answer(f"✅ Промокод {c.upper()} создан на {d} дн. ({u} исп.)")
-        else: await msg.answer("❌ Ошибка при создании промокода (возможно, уже существует или неверный формат).")
-    except: await msg.answer("❌ Ошибка формата. Ожидается: CODE_DAYS_USES (например, TEST_7_10)")
+        c = c.upper()
+        days = int(d)
+        uses = int(u)
+        if await db.add_promocode(c, days, uses):
+            await msg.answer(f"✅ Промокод **{c}** создан на {days} дн. ({uses} исп.)")
+        else: 
+            await msg.answer("❌ Ошибка при создании промокода (возможно, код уже существует или неверный формат).")
+    except ValueError:
+        await msg.answer("❌ Ошибка формата. Ожидается: CODE_DAYS_USES (например, TEST_7_10)")
+    except Exception as e:
+        await msg.answer(f"❌ Неизвестная ошибка: {e}")
     await state.clear()
+
+@admin_router.callback_query(F.data == "adm_stop_all")
+@admin_only
+async def adm_stop_all(call: CallbackQuery):
+    await call.answer("Запущена остановка всех воркеров...", show_alert=True)
+    total_stopped = 0
+    
+    # Копируем список, чтобы избежать изменения во время итерации
+    users_to_stop = list(store.active_workers.keys())
+    
+    for user_id in users_to_stop:
+        try:
+            await tm.stop_worker(user_id)
+            total_stopped += 1
+        except Exception as e:
+            logger.error(f"Failed to stop worker {user_id}: {e}")
+            
+    await call.message.answer(f"🛑 Остановлено {total_stopped} активных воркеров.")
+    await cmd_start(call, dp.storage.get_context(call.from_user.id))
 
 # --- DROPS (STUB) ---
 @drops_router.message(Command("numb"))
-async def drop_numb(msg: Message): await msg.answer("📝 Введите номер:")
+async def drop_numb(msg: Message): 
+    # Эта команда - просто заглушка для функционала дропов, который будет реализован
+    # в другом месте или с другой логикой
+    await msg.answer("📝 Введите номер (функционал дропов не полностью реализован в этом коде).")
 
 # --- MAIN ---
 async def periodic_tasks():
     await db.init()
+    logger.info("Database initiated. Starting worker restore.")
+    
     # Восстановление сессий после перезапуска
-    for uid in await db.get_active_telethon_users():
+    active_users = await db.get_active_telethon_users()
+    logger.info(f"Found {len(active_users)} active users to restore.")
+    for uid in active_users:
         # Запускаем таски, но не ждем их
         asyncio.create_task(tm.start_client_task(uid))
 
     while True:
         # Ежечасная очистка старых сессий/пользователей
         await asyncio.sleep(3600)
+        logger.info("Running hourly cleanup task.")
         await db.cleanup_old_sessions()
 
 async def main():
@@ -882,10 +924,12 @@ async def main():
     # Запуск фоновых задач
     asyncio.create_task(periodic_tasks())
     
+    logger.info("Starting bot polling.")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Запускаем asyncio.run, чтобы инициализировать все
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
