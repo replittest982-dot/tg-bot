@@ -26,11 +26,10 @@ from aiogram.client.default import DefaultBotProperties
 # --- TELETHON ---
 from telethon import TelegramClient, events
 from telethon.tl.types import User, Channel, Chat
-# ИСПРАВЛЕНИЕ ИМПОРТОВ: Заменены устаревшие ошибки на актуальные
 from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError,
     PhoneNumberInvalidError, AuthKeyUnregisteredError,
-    ChatWriteForbiddenError, # Вместо ChatSendForbiddenError
+    ChatWriteForbiddenError, # Исправлено для новых версий
     UserIsBlockedError, PeerIdInvalidError, UsernameInvalidError,
     UserNotMutualContactError
 )
@@ -45,47 +44,36 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
 # =========================================================================
 
-# --- ВАШИ ДАННЫЕ (ОБНОВЛЕНО) ---
-BOT_TOKEN = "7868097991:AAHGGLFnzEiL4h9aS2mkULvMvdIw8yLi9vE" # <-- НОВЫЙ ТОКЕН
+# --- ВАШИ ДАННЫЕ ---
+BOT_TOKEN = "7868097991:AAHGGLFnzEiL4h9aS2mkULvMvdIw8yLi9vE"
 ADMIN_ID = 6256576302
 API_ID = 29930612
 API_HASH = "2690aa8c364b91e47b6da1f90a71f825"
+SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
+TARGET_CHANNEL_URL = "@STAT_PRO1"
 # --------------------
 
 DB_NAME = 'bot_database.db'
 TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
-RATE_LIMIT_TIME = 1.0 
+RATE_LIMIT_TIME = 0.8 
 SESSION_DIR = 'sessions'
 BACKUP_DIR = 'backups'
 RETRY_DELAY = 5 
 PROMOCODE_MAX_LENGTH = 30 
+QR_TIMEOUT = 180
 
 # Инициализация папок
 os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs('data', exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# --- Настройка логирования ---
-_logging_setup_done = False
-def setup_logging(log_file='bot.log', level=logging.INFO):
-    global _logging_setup_done
-    if _logging_setup_done: return
-    
-    log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
-    
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+# --- Настройка логирования (Исправлено для Docker) ---
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        stream=sys.stdout # Важно для Docker логов
     )
-    file_handler.setFormatter(log_formatter)
-    
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
-    _logging_setup_done = True
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -93,12 +81,14 @@ logger = logging.getLogger(__name__)
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher(storage=MemoryStorage())
+
+# Роутеры
 user_router = Router(name='user_router')
 drops_router = Router(name='drops_router')
 admin_router = Router(name='admin_router')
 
 # =========================================================================
-# II. ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ, УТИЛИТЫ И FSM STATES
+# II. ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ И СТЕЙТЫ
 # =========================================================================
 
 class WorkerTask:
@@ -110,11 +100,11 @@ class WorkerTask:
         self.args = args
         self.task: Optional[asyncio.Task] = None
         self.start_time: datetime = datetime.now(TIMEZONE_MSK)
-        self.progress: Dict[str, Any] = {'sent': 0, 'total': 0, 'processed_count': 0} # Инициализация прогресса
+        self.progress: Dict[str, Any] = {'sent': 0, 'total': 0}
 
     def __str__(self) -> str:
         elapsed = int((datetime.now(TIMEZONE_MSK) - self.start_time).total_seconds())
-        return f"[{self.task_type.upper()}] T:{self.target} ID:{self.task_id} Время: {elapsed} сек."
+        return f"[{self.task_type.upper()}] T:{self.target} ID:{self.task_id} Время: {elapsed}s"
 
 class GlobalStorage:
     def __init__(self):
@@ -124,7 +114,7 @@ class GlobalStorage:
         self.active_workers: Dict[int, TelegramClient] = {} 
         self.worker_tasks: Dict[int, Dict[str, WorkerTask]] = {} 
         self.premium_users: Set[int] = set()
-        self.admin_jobs: Dict[str, asyncio.Task] = {} 
+        self.qr_login_tasks: Dict[int, asyncio.Task] = {} 
         self.code_input_state: Dict[int, str] = {} 
 
 store = GlobalStorage()
@@ -143,8 +133,8 @@ class PromoStates(StatesGroup):
     WAITING_CODE = State()
 
 class DropStates(StatesGroup):
-    waiting_for_phone_and_pc = State()
-    waiting_for_report_phone = State() # Добавлен стейт для отчета
+    waiting_for_phone_and_pc = State() # Основной стейт для /numb
+    waiting_for_report_phone = State() # Для отчетов
 
 class AdminStates(StatesGroup):
     waiting_for_promo_data = State()
@@ -160,13 +150,13 @@ def get_session_path(user_id: int, is_temp: bool = False) -> str:
 def to_msk_aware(dt_str: str) -> Optional[datetime]:
     if not dt_str: return None
     try:
-        naive_dt = datetime.strptime(dt_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
+        dt_str = dt_str.split('.')[0] # Отсекаем миллисекунды
+        naive_dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
         return TIMEZONE_MSK.localize(naive_dt)
     except ValueError:
         return None
 
 def get_topic_name_from_message(message: types.Message) -> Optional[str]:
-    # ИСПРАВЛЕНИЕ: Используем глобальное хранилище для получения имени ПК
     topic_key = message.message_thread_id if message.message_thread_id else message.chat.id
     return store.pc_monitoring.get(topic_key)
 
@@ -193,7 +183,6 @@ class AsyncDatabase:
                     user_id INTEGER PRIMARY KEY, 
                     telethon_active BOOLEAN DEFAULT 0,
                     subscription_end TEXT,
-                    subscription_active BOOLEAN DEFAULT 0, -- Добавлено поле
                     is_banned BOOLEAN DEFAULT 0,
                     password_2fa TEXT
                 )
@@ -218,17 +207,6 @@ class AsyncDatabase:
                     uses_left INTEGER
                 )
             """)
-            
-            # Таблица promo_codes (старое название, для совместимости если была)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS promo_codes (
-                    code TEXT PRIMARY KEY,
-                    days INTEGER,
-                    is_active BOOLEAN DEFAULT 1,
-                    max_uses INTEGER,
-                    current_uses INTEGER DEFAULT 0
-                )
-            """)
             await db.commit()
             logger.info("Database initialized successfully.")
 
@@ -238,76 +216,44 @@ class AsyncDatabase:
             await db.commit()
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as cursor:
-                result = await cursor.fetchone() 
-                return dict(result) if result else None
+                row = await cursor.fetchone()
+                return dict(row) if row else None
     
-    async def get_subscription_details(self, user_id: int) -> tuple[bool, Optional[datetime]]:
-        # Функция возвращает (активна_ли_подписка, дата_окончания)
-        user = await self.get_user(user_id)
-        if user_id == ADMIN_ID: return True, None
-        
-        if not user: return False, None
-        
-        end_str = user['subscription_end']
-        if not end_str: return False, None
-        
-        end_date = to_msk_aware(end_str)
-        if not end_date: return False, None
-        
-        is_active = end_date > datetime.now(TIMEZONE_MSK)
-        return is_active, end_date
-
     async def get_subscription_status(self, user_id: int) -> Optional[datetime]:
-        # Для совместимости
-        active, end = await self.get_subscription_details(user_id)
-        return end
-
-    async def check_subscription(self, user_id: int) -> bool:
-        active, _ = await self.get_subscription_details(user_id)
-        return active
-
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT subscription_end FROM users WHERE user_id=?", (user_id,)) as cursor:
+                result = await cursor.fetchone() 
+                if result and result[0]:
+                    return to_msk_aware(result[0])
+                return None
+                
     async def update_subscription(self, user_id: int, days: int):
         async with aiosqlite.connect(self.db_path) as db:
-            active, current_end = await self.get_subscription_details(user_id)
+            current_end = await self.get_subscription_status(user_id)
             now = datetime.now(TIMEZONE_MSK)
             
-            if active and current_end:
+            if current_end and current_end > now:
                 new_end = current_end + timedelta(days=days)
             else:
                 new_end = now + timedelta(days=days)
             
-            await db.execute("UPDATE users SET subscription_end=?, subscription_active=1 WHERE user_id=?", (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id))
+            await db.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id))
             await db.commit()
             return new_end
-    
-    async def set_subscription_status(self, user_id: int, status: bool, end_date: Optional[datetime]):
-        end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if end_date else None
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE users SET subscription_active=?, subscription_end=? WHERE user_id=?", (1 if status else 0, end_str, user_id))
-            await db.commit()
 
     async def get_promocode(self, code: str):
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            # Проверяем обе таблицы для надежности
             async with db.execute("SELECT * FROM promocodes WHERE code=?", (code.upper(),)) as cursor:
-                res = await cursor.fetchone()
-                if res: return dict(res)
-            
-            # Fallback к promo_codes
-            async with db.execute("SELECT * FROM promo_codes WHERE code=?", (code.upper(),)) as cursor:
-                res = await cursor.fetchone()
-                if res:
-                    d = dict(res)
-                    # Нормализуем ключи
-                    return {'code': d['code'], 'duration_days': d['days'], 'uses_left': d['max_uses'] - d['current_uses']}
-                return None
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     async def add_promocode(self, code: str, days: int, uses: int) -> bool:
         if len(code) > PROMOCODE_MAX_LENGTH: return False
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("INSERT INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)", (code.upper(), days, uses))
+                await db.execute("INSERT INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)", 
+                                (code.upper(), days, uses))
                 await db.commit()
                 return True
         except aiosqlite.IntegrityError:
@@ -319,7 +265,7 @@ class AsyncDatabase:
             async with db.execute("SELECT COUNT(user_id) FROM users") as cursor:
                 stats['total_users'] = (await cursor.fetchone())[0]
             now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
-            async with db.execute("SELECT COUNT(user_id) FROM users WHERE telethon_active=1",) as cursor:
+            async with db.execute("SELECT COUNT(user_id) FROM users WHERE telethon_active=1 AND subscription_end > ?", (now_str,)) as cursor:
                 stats['active_workers'] = (await cursor.fetchone())[0]
             async with db.execute("SELECT COUNT(phone) FROM drop_sessions WHERE status NOT IN ('closed', 'deleted')") as cursor:
                 stats['active_drops'] = (await cursor.fetchone())[0]
@@ -327,33 +273,21 @@ class AsyncDatabase:
     
     async def use_promocode(self, code: str) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
-            # Сначала пробуем таблицу promocodes
-            promo = await self.get_promocode(code)
-            if not promo: return False
-            
-            # Проверяем какую таблицу обновлять
-            try:
-                # Попытка обновления promocodes
-                await db.execute("UPDATE promocodes SET uses_left=uses_left-1 WHERE code=? AND uses_left>0", (code.upper(),))
-                if db.total_changes > 0:
-                    await db.commit()
-                    return True
-            except: pass
-            
-            # Попытка обновления promo_codes
-            try:
-                await db.execute("UPDATE promo_codes SET current_uses=current_uses+1 WHERE code=? AND current_uses < max_uses", (code.upper(),))
-                if db.total_changes > 0:
-                    await db.commit()
-                    return True
-            except: pass
-            
-            return False
+            promocode = await self.get_promocode(code)
+            if not promocode or promocode['uses_left'] <= 0:
+                return False
+
+            new_uses = promocode['uses_left'] - 1
+            await db.execute("UPDATE promocodes SET uses_left=? WHERE code=?", (new_uses, code.upper()))
+            await db.commit()
+            return True
             
     async def cleanup_old_sessions(self, days: int = 30):
         async with aiosqlite.connect(self.db_path) as db:
             cutoff = (datetime.now(TIMEZONE_MSK) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
             await db.execute("UPDATE drop_sessions SET status='deleted' WHERE last_status_time < ? AND status IN ('closed', 'slet', 'error')", (cutoff,))
+            now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
+            await db.execute("DELETE FROM users WHERE subscription_end IS NOT NULL AND subscription_end < ? AND telethon_active=0", (now_str,))
             await db.commit()
 
     async def set_telethon_status(self, user_id: int, status: bool):
@@ -363,8 +297,8 @@ class AsyncDatabase:
     
     async def get_active_telethon_users(self) -> List[int]:
         async with aiosqlite.connect(self.db_path) as db:
-            # Получаем всех, у кого telethon_active=1
-            async with db.execute("SELECT user_id FROM users WHERE telethon_active=1") as cursor:
+            now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
+            async with db.execute("SELECT user_id FROM users WHERE telethon_active=1 AND is_banned=0 AND (subscription_end IS NULL OR subscription_end > ?)", (now_str,)) as cursor:
                 return [row[0] for row in await cursor.fetchall()]
     
     async def set_password_2fa(self, user_id: int, password: str):
@@ -376,21 +310,24 @@ class AsyncDatabase:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM drop_sessions WHERE phone=? AND status NOT IN ('closed', 'deleted') ORDER BY start_time DESC LIMIT 1", (phone,)) as cursor:
-                result = await cursor.fetchone() 
-                return dict(result) if result else None
+                row = await cursor.fetchone() 
+                return dict(row) if row else None
     
     async def get_last_drop_session(self, drop_id: int, pc_name: str):
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM drop_sessions WHERE drop_id=? AND pc_name=? ORDER BY start_time DESC LIMIT 1", (drop_id, pc_name)) as cursor:
-                result = await cursor.fetchone() 
-                return dict(result) if result else None
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     async def create_drop_session(self, phone: str, pc_name: str, drop_id: int, status: str) -> bool:
         now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
         current = await self.get_drop_session_by_phone(phone)
-        if current and phone != 'N/A': # Разрешаем N/A дубликаты (они временные)
+        
+        # Разрешаем N/A только если это новая сессия
+        if current and phone != 'N/A': 
             return False 
+
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("INSERT INTO drop_sessions (phone, pc_name, drop_id, status, start_time, last_status_time) VALUES (?, ?, ?, ?, ?, ?)", 
@@ -400,30 +337,33 @@ class AsyncDatabase:
         except aiosqlite.IntegrityError:
             return False
 
-    async def update_drop_status_by_phone(self, phone: str, new_status: str, new_phone: Optional[str] = None) -> bool:
+    async def update_drop_status(self, old_phone: str, new_status: str, new_phone: Optional[str] = None) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
             now = datetime.now(TIMEZONE_MSK)
             now_str = now.strftime('%Y-%m-%d %H:%M:%S')
             
-            current_session = await self.get_drop_session_by_phone(phone)
+            current_session = await self.get_drop_session_by_phone(old_phone)
             if not current_session: return False
                 
             old_time = to_msk_aware(current_session.get('last_status_time')) or now
             time_diff = int((now - old_time).total_seconds())
             prosto_seconds = current_session.get('prosto_seconds', 0)
 
-            is_prosto_status = current_session['status'] in ('дайте номер', 'error', 'slet', 'повтор')
+            is_prosto_status = current_session['status'] in ('дайте номер', 'error', 'slet', 'повтор', 'замена', 'номер получен')
             if is_prosto_status:
                 prosto_seconds += time_diff
             
-            if new_phone and new_phone != phone:
-                await db.execute("UPDATE drop_sessions SET status='closed', last_status_time=? WHERE phone=?", (now_str, phone))
+            if new_phone and new_phone != old_phone:
+                # Закрываем старую
+                await db.execute("UPDATE drop_sessions SET status='closed', last_status_time=? WHERE phone=?", (now_str, old_phone))
+                # Создаем новую
                 success = await self.create_drop_session(new_phone, current_session['pc_name'], current_session['drop_id'], 'замена')
                 if not success: return False
+                # Переносим простой
                 await db.execute("UPDATE drop_sessions SET prosto_seconds=?, last_status_time=? WHERE phone=?", (prosto_seconds, now_str, new_phone))
             else:
                 query = "UPDATE drop_sessions SET status=?, last_status_time=?, prosto_seconds=? WHERE phone=?"
-                await db.execute(query, (new_status, now_str, prosto_seconds, phone))
+                await db.execute(query, (new_status, now_str, prosto_seconds, old_phone))
             
             await db.commit()
             return True
@@ -444,11 +384,10 @@ class SimpleRateLimitMiddleware(BaseMiddleware):
         user_id = event.from_user.id 
         now = datetime.now()
         last_time = self.user_timestamps.get(user_id)
+        
         if last_time and (now - last_time).total_seconds() < self.limit:
-            wait_time = round(self.limit - (now - last_time).total_seconds(), 2)
-            if wait_time > (self.limit / 2) and isinstance(event, types.Message):
-                await event.answer(f"🚫 Слишком быстро. Подождите {wait_time} сек.")
             return
+        
         self.user_timestamps[user_id] = now
         return await handler(event, data)
 
@@ -529,8 +468,8 @@ class TelethonManager:
             if not await client.is_user_authorized():
                 raise AuthKeyUnregisteredError('Session expired')
 
-            active, sub_end = await self.db.get_subscription_details(user_id)
-            if not active:
+            sub_end = await self.db.get_subscription_status(user_id)
+            if not sub_end or sub_end <= datetime.now(TIMEZONE_MSK):
                 await self._send_to_bot_user(user_id, "⚠️ Подписка истекла. Worker отключен.")
                 return 
             
@@ -568,7 +507,8 @@ class TelethonManager:
 
     async def worker_message_handler(self, user_id: int, client: TelegramClient, event: events.NewMessage.Event):
         if not event.text or not event.text.startswith('.'): return
-        msg = event.text.strip().lower(); parts = msg.split(); cmd = parts[0]
+        msg = event.text.strip(); parts = msg.split(); cmd = parts[0].lower()
+        
         allowed = ('.пкворк', '.флуд', '.стопфлуд', '.лс', '.чекгруппу', '.статус')
         if cmd not in allowed: 
             await event.delete()
@@ -581,24 +521,28 @@ class TelethonManager:
                 active = any(t.task_type == "flood" for t in store.worker_tasks.get(user_id, {}).values())
             if active:
                 await client.send_message(chat_id, "⚠️ Флуд уже запущен! Используйте .стопфлуд")
+                await event.delete()
                 return
             try:
-                count = int(parts[1]); delay = float(parts[2]); target = parts[3] if len(parts) > 4 else event.chat_id
+                count = int(parts[1]); delay = float(parts[2])
+                target = parts[3] if len(parts) > 4 else event.chat_id
                 text = " ".join(parts[4:])
                 if not text: raise ValueError
                 await self._start_flood_task(user_id, client, chat_id, target, count, delay, text)
-            except: await client.send_message(chat_id, "❌ Формат: .флуд <кол> <сек> <цель> <текст>")
+            except: 
+                await client.send_message(chat_id, "❌ Формат: **.флуд <кол> <сек> <цель> <текст>**")
+            await event.delete()
         
         elif cmd == '.пкворк':
             pc = parts[1] if len(parts) > 1 else 'PC'
             key = event.message.reply_to_msg_id or chat_id
             async with store.lock: store.pc_monitoring[key] = pc
             m = await client.send_message(chat_id, f"✅ ПК для топика установлен: **{pc}**")
-            await asyncio.sleep(2); await m.delete()
+            await asyncio.sleep(2); await m.delete(); await event.delete()
         
         elif cmd == '.стопфлуд':
             n = await self._stop_tasks_by_type(user_id, "flood")
-            await client.send_message(chat_id, f"✅ Остановлено {n} задач.")
+            await client.send_message(chat_id, f"✅ Остановлено {n} задач."); await event.delete()
             
         elif cmd == '.лс':
             try:
@@ -606,16 +550,16 @@ class TelethonManager:
                 users = [l.strip() for l in lines[2:] if is_valid_username(l.strip())]
                 if not users: raise ValueError
                 await self._start_mass_dm_task(user_id, client, chat_id, content, users)
-            except: await client.send_message(chat_id, "❌ Ошибка. Формат:\n.лс\nТекст\n@user1\n@user2")
+            except: await client.send_message(chat_id, "❌ Ошибка. Формат:\n.лс\nТекст\n@user1\n@user2"); await event.delete()
                 
         elif cmd == '.чекгруппу':
             try:
                 target = parts[1] if len(parts) > 1 else chat_id
                 await self._start_check_group_task(user_id, client, chat_id, target)
-            except: await client.send_message(chat_id, "❌ Ошибка. .чекгруппу <цель>")
+            except: await client.send_message(chat_id, "❌ Ошибка. .чекгруппу <цель>"); await event.delete()
 
         elif cmd == '.статус':
-            await self._report_status(user_id, client, chat_id)
+            await self._report_status(user_id, client, chat_id); await event.delete()
 
     def _flood_executor_factory(self, user_id: int, client: TelegramClient, task_id: str, target: Union[int, str], count: int, delay: float, text: str):
         async def executor():
@@ -627,9 +571,7 @@ class TelethonManager:
                     except FloodWaitError as e:
                         await self._send_to_bot_user(user_id, f"⏳ FloodWait {e.seconds}s.")
                         await asyncio.sleep(e.seconds)
-                    except ChatWriteForbiddenError:
-                        await self._send_to_bot_user(user_id, "❌ Запрет отправки.")
-                        break
+                    except ChatWriteForbiddenError: break
                     except Exception: break
             finally:
                 await self._remove_task(user_id, task_id)
@@ -716,7 +658,6 @@ tm = TelethonManager(bot, db)
 # =========================================================================
 
 def get_code_keyboard(current_code: str) -> InlineKeyboardMarkup:
-    # 1 2 3 ...
     digits = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣"]
     rows = []
     rows.append([InlineKeyboardButton(text=d, callback_data=f"code_input_{i+1}") for i, d in enumerate(digits[:3])])
@@ -743,7 +684,6 @@ async def code_input_callback(call: CallbackQuery, state: FSMContext):
         elif action == "send":
             pass 
 
-    # Обновление UI
     new_val = store.code_input_state.get(user_id, "")
     if action == "send":
         if not new_val: 
@@ -764,9 +704,8 @@ async def cmd_start(message: Union[types.Message, CallbackQuery], state: FSMCont
     await state.clear()
     await db.get_user(user_id)
     
-    active, sub_end = await db.get_subscription_details(user_id)
-    now = datetime.now(TIMEZONE_MSK)
-    st = f"✅ Подписка до: {sub_end.strftime('%d.%m')}" if active and sub_end else "❌ Нет подписки"
+    sub = await db.get_subscription_status(user_id)
+    st = f"✅ Подписка до: {sub.strftime('%d.%m.%Y')}" if sub and sub > datetime.now(TIMEZONE_MSK) else "❌ Нет подписки"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Вход", callback_data="auth_method_select")],
@@ -886,10 +825,14 @@ async def promo_proc(msg: Message, state: FSMContext):
     code = msg.text.upper().strip()
     p = await db.get_promocode(code)
     if not p or p['uses_left'] <= 0: return await msg.answer("Неверный/истекший код.")
+    
+    days_added = p['duration_days']
     if await db.use_promocode(code):
-        await db.update_subscription(msg.from_user.id, p['duration_days'])
-        await msg.answer(f"✅ Активировано: +{p['duration_days']} дн.")
+        new_end = await db.update_subscription(msg.from_user.id, days_added)
+        await msg.answer(f"✅ Активировано: +{days_added} дн. Подписка до: {new_end.strftime('%d.%m.%Y')}.")
         await state.clear()
+    else:
+        await msg.answer("❌ Ошибка при использовании промокода.")
 
 # --- ADMIN ---
 def admin_only(func):
@@ -904,7 +847,7 @@ def admin_only(func):
 @admin_only
 async def admin_panel(msg: Message):
     stats = await db.get_stats()
-    t = f"📊 Users: {stats['total_users']} | Workers: {stats['active_workers']}"
+    t = f"📊 Users: {stats['total_users']} | Workers: {stats['active_workers']} | Drops: {stats['active_drops']}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Add Promo", callback_data="adm_promo")]])
     await msg.answer(t, reply_markup=kb)
 
@@ -925,11 +868,11 @@ async def adm_promo_save(msg: Message, state: FSMContext):
     except: await msg.answer("Format error")
     await state.clear()
 
-# --- DROPS (IMPLEMENTED) ---
+# --- DROPS ---
 async def get_drop_context(message: Message) -> Optional[Dict]:
     topic_key = get_topic_name_from_message(message)
     if not topic_key:
-        await message.answer("❌ .пкворк")
+        await message.answer("❌ Сначала Worker должен установить ПК: `.пкворк NAME`")
         return None
     return {'drop_id': message.from_user.id, 'pc_name': topic_key}
 
@@ -951,8 +894,8 @@ async def drop_numb_input(msg: Message, state: FSMContext):
     ph = msg.text.strip()
     data = await state.get_data()
     if await db.create_drop_session(ph, data['pc_name'], data['drop_id'], 'номер'):
-        await msg.answer("✅ ОК")
-    else: await msg.answer("❌ Занят")
+        await msg.answer("✅ ОК. Номер принят.")
+    else: await msg.answer("❌ Номер занят или ошибка.")
     await state.clear()
 
 async def handle_status(msg: Message, status: str, zm=False):
@@ -961,14 +904,24 @@ async def handle_status(msg: Message, status: str, zm=False):
             parts = msg.text.split()
             if len(parts) < 3: return await msg.answer("/zm OLD NEW")
             old, new = parts[1], parts[2]
-            if await db.update_drop_status_by_phone(old, status, new):
-                await msg.answer("✅ Замена ОК")
+            if await db.update_drop_status(old, status, new):
+                await msg.answer(f"✅ Замена: {old} -> {new}")
+            else: await msg.answer("❌ Ошибка замены.")
         else:
-            if not msg.reply_to_message: return await msg.answer("Реплай на номер")
-            ph = msg.reply_to_message.text.split()[0]
-            if await db.update_drop_status_by_phone(ph, status):
-                await msg.answer(f"✅ {status}")
-    except: pass
+            # Ищем номер в реплае или аргументе
+            if msg.reply_to_message:
+                # Пытаемся вытащить номер из текста реплая (первое слово)
+                ph = msg.reply_to_message.text.split()[0]
+            elif len(msg.text.split()) > 1:
+                ph = msg.text.split()[1]
+            else:
+                return await msg.answer("❌ Реплай на номер или /cmd NUMBER")
+            
+            if await db.update_drop_status(ph, status):
+                await msg.answer(f"✅ Статус: {status}")
+            else: await msg.answer("❌ Сессия не найдена")
+    except Exception as e:
+        logger.error(f"Drop handler error: {e}")
 
 @drops_router.message(Command("vstal"))
 async def dv(m: Message): await handle_status(m, "в работе")
@@ -992,19 +945,35 @@ async def dr(msg: Message):
 
 # --- MAIN ---
 async def periodic_tasks():
-    await db.init()
-    for uid in await db.get_active_telethon_users():
+    logger.info("Starting periodic tasks...")
+    await db.init() # Инициализация БД ПЕРЕД всем остальным
+    
+    # Восстановление сессий
+    active_users = await db.get_active_telethon_users()
+    logger.info(f"Restoring {len(active_users)} workers...")
+    for uid in active_users:
         asyncio.create_task(tm.start_client_task(uid))
+
     while True:
         await asyncio.sleep(3600)
+        logger.info("Cleanup task running...")
         await db.cleanup_old_sessions()
 
 async def main():
+    logger.info("Starting Bot...")
     dp.include_routers(admin_router, user_router, drops_router)
+    
+    # Запускаем фоновые задачи как таск
     asyncio.create_task(periodic_tasks())
+    
     await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Polling started.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except: pass
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.critical(f"Critical error in main loop: {e}")
