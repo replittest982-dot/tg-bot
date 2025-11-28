@@ -44,7 +44,7 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
 # =========================================================================
 
-# --- ВАШИ ДАННЫЕ (ОБНОВЛЕНО) ---
+# --- ВАШИ ДАННЫЕ ---
 BOT_TOKEN = "7868097991:AAHGGLFnzEiL4h9aS2mkULvMvdIw8yLi9vE"
 ADMIN_ID = 6256576302
 API_ID = 29930612
@@ -67,7 +67,7 @@ os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs('data', exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# --- Настройка логирования (Исправлено для Docker) ---
+# --- Настройка логирования ---
 def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
-dp = Dispatcher(storage=MemoryStorage()) # ГЛАВНЫЙ ОБЪЕКТ
+dp = Dispatcher(storage=MemoryStorage()) # ГЛАВНЫЙ ОБЪЕКТ ДИСПЕТЧЕР
 
 # Роутеры
 user_router = Router(name='user_router')
@@ -686,7 +686,6 @@ async def code_input_callback(call: CallbackQuery, state: FSMContext):
             await call.answer("Введите код!")
             return
         await call.message.edit_text("⏳ Проверка...")
-        # Вызываем функцию обработчика, как если бы пришло сообщение
         await auth_code_input(Message(text=new_val, chat=call.message.chat, from_user=call.from_user, message_id=0, date=datetime.now()), state)
     else:
         try: await call.message.edit_text(f"🔑 Код: `{new_val}`", reply_markup=get_code_keyboard(new_val))
@@ -699,7 +698,7 @@ async def cmd_start(message: Union[types.Message, CallbackQuery], state: FSMCont
     chat = message.message if isinstance(message, CallbackQuery) else message
     user_id = message.from_user.id
     await state.clear()
-    await db.get_user(user_id) # Гарантируем, что пользователь есть в БД
+    await db.get_user(user_id) 
     
     sub = await db.get_subscription_status(user_id)
     now = datetime.now(TIMEZONE_MSK)
@@ -749,7 +748,7 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         )
         await call.message.delete()
         
-        await qr_login.wait(QR_TIMEOUT) # Используем константу
+        await qr_login.wait(QR_TIMEOUT) 
         await msg.delete()
         await bot.send_message(uid, "✅ Успех! Запуск...")
         await tm.start_worker_session(uid, client)
@@ -928,7 +927,9 @@ async def ds(m: Message): await handle_status(m, "слет")
 @drops_router.message(Command("error"))
 async def de(m: Message): await handle_status(m, "ошибка")
 @drops_router.message(Command("povt"))
-async def dp(m: Message): await handle_status(m, "повтор")
+async def dp_povt(m: Message): 
+    # ПЕРЕИМЕНОВАЛ ф-цию, чтобы исключить конфликт с переменной dp
+    await handle_status(m, "повтор")
 @drops_router.message(Command("zm"))
 async def dz(m: Message): await handle_status(m, "замена", True)
 
@@ -944,7 +945,7 @@ async def dr(msg: Message):
 # --- MAIN ---
 async def periodic_tasks():
     logger.info("Starting periodic tasks...")
-    await db.init() # Инициализация БД
+    await db.init() 
     
     active_users = await db.get_active_telethon_users()
     logger.info(f"Restoring {len(active_users)} workers...")
@@ -959,7 +960,7 @@ async def periodic_tasks():
 async def main():
     logger.info("Starting Bot...")
     
-    # ВОТ КРИТИЧЕСКАЯ СТРОКА: УБЕДИТЕСЬ, ЧТО DP - ЭТО Dispatcher
+    # ИСПОЛЬЗУЕМ DP, КОТОРЫЙ ЯВЛЯЕТСЯ Dispatcher
     dp.include_routers(admin_router, user_router, drops_router) 
     
     asyncio.create_task(periodic_tasks())
@@ -974,4 +975,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"Critical error in main loop: {e}", exc_info=True) # Добавлено exc_info для полного traceback
+        logger.critical(f"Critical error in main loop: {e}", exc_info=True)
