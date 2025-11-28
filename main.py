@@ -31,7 +31,8 @@ from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError,
     PhoneNumberInvalidError, AuthKeyUnregisteredError,
     UserIsBlockedError, PeerIdInvalidError, UsernameInvalidError,
-    ChatSendForbiddenError, UserNotMutualContactError
+    ChatWriteForbiddenError, # <-- ИСПРАВЛЕНО
+    UserNotMutualContactError
 )
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch, UserStatusRecently, UserStatusOnline, UserStatusOffline, UserStatusLastWeek, UserStatusLastMonth
@@ -295,7 +296,8 @@ class AsyncDatabase:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM promo_codes WHERE code=?", (code.upper(),)) as cursor:
-                return dict(await cursor.fetchone()) if await cursor.fetchone() else None
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     async def use_promocode(self, code: str) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
@@ -687,7 +689,7 @@ class TelethonManager:
                 except FloodWaitError as e:
                     await self._send_to_bot_user(user_id, f"⏳ **{target}**: FloodWait на {e.seconds} сек. Ожидание...")
                     await asyncio.sleep(e.seconds)
-                except ChatSendForbiddenError:
+                except ChatWriteForbiddenError: # <-- ИСПРАВЛЕНО ЗДЕСЬ
                     await self._send_to_bot_user(user_id, f"❌ **{target}**: Запрет на отправку.")
                     break
                 except Exception as e:
