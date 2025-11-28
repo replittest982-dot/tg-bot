@@ -29,7 +29,7 @@ from telethon.tl.types import User, Channel, Chat
 from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError,
     PhoneNumberInvalidError, AuthKeyUnregisteredError,
-    ChatWriteForbiddenError, # Исправлено для новых версий
+    ChatWriteForbiddenError, 
     UserIsBlockedError, PeerIdInvalidError, UsernameInvalidError,
     UserNotMutualContactError
 )
@@ -44,7 +44,7 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
 # =========================================================================
 
-# --- ВАШИ ДАННЫЕ ---
+# --- ВАШИ ДАННЫЕ (ОБНОВЛЕНО) ---
 BOT_TOKEN = "7868097991:AAHGGLFnzEiL4h9aS2mkULvMvdIw8yLi9vE"
 ADMIN_ID = 6256576302
 API_ID = 29930612
@@ -72,7 +72,7 @@ def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        stream=sys.stdout # Важно для Docker логов
+        stream=sys.stdout 
     )
 
 setup_logging()
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=MemoryStorage()) # ГЛАВНЫЙ ОБЪЕКТ
 
 # Роутеры
 user_router = Router(name='user_router')
@@ -133,8 +133,8 @@ class PromoStates(StatesGroup):
     WAITING_CODE = State()
 
 class DropStates(StatesGroup):
-    waiting_for_phone_and_pc = State() # Основной стейт для /numb
-    waiting_for_report_phone = State() # Для отчетов
+    waiting_for_phone_and_pc = State() 
+    waiting_for_report_phone = State() 
 
 class AdminStates(StatesGroup):
     waiting_for_promo_data = State()
@@ -150,7 +150,7 @@ def get_session_path(user_id: int, is_temp: bool = False) -> str:
 def to_msk_aware(dt_str: str) -> Optional[datetime]:
     if not dt_str: return None
     try:
-        dt_str = dt_str.split('.')[0] # Отсекаем миллисекунды
+        dt_str = dt_str.split('.')[0] 
         naive_dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
         return TIMEZONE_MSK.localize(naive_dt)
     except ValueError:
@@ -324,7 +324,6 @@ class AsyncDatabase:
         now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
         current = await self.get_drop_session_by_phone(phone)
         
-        # Разрешаем N/A только если это новая сессия
         if current and phone != 'N/A': 
             return False 
 
@@ -354,12 +353,9 @@ class AsyncDatabase:
                 prosto_seconds += time_diff
             
             if new_phone and new_phone != old_phone:
-                # Закрываем старую
                 await db.execute("UPDATE drop_sessions SET status='closed', last_status_time=? WHERE phone=?", (now_str, old_phone))
-                # Создаем новую
                 success = await self.create_drop_session(new_phone, current_session['pc_name'], current_session['drop_id'], 'замена')
                 if not success: return False
-                # Переносим простой
                 await db.execute("UPDATE drop_sessions SET prosto_seconds=?, last_status_time=? WHERE phone=?", (prosto_seconds, now_str, new_phone))
             else:
                 query = "UPDATE drop_sessions SET status=?, last_status_time=?, prosto_seconds=? WHERE phone=?"
@@ -690,6 +686,7 @@ async def code_input_callback(call: CallbackQuery, state: FSMContext):
             await call.answer("Введите код!")
             return
         await call.message.edit_text("⏳ Проверка...")
+        # Вызываем функцию обработчика, как если бы пришло сообщение
         await auth_code_input(Message(text=new_val, chat=call.message.chat, from_user=call.from_user, message_id=0, date=datetime.now()), state)
     else:
         try: await call.message.edit_text(f"🔑 Код: `{new_val}`", reply_markup=get_code_keyboard(new_val))
@@ -702,10 +699,11 @@ async def cmd_start(message: Union[types.Message, CallbackQuery], state: FSMCont
     chat = message.message if isinstance(message, CallbackQuery) else message
     user_id = message.from_user.id
     await state.clear()
-    await db.get_user(user_id)
+    await db.get_user(user_id) # Гарантируем, что пользователь есть в БД
     
     sub = await db.get_subscription_status(user_id)
-    st = f"✅ Подписка до: {sub.strftime('%d.%m.%Y')}" if sub and sub > datetime.now(TIMEZONE_MSK) else "❌ Нет подписки"
+    now = datetime.now(TIMEZONE_MSK)
+    st = f"✅ Подписка до: {sub.strftime('%d.%m.%Y')}" if sub and sub > now else "❌ Нет подписки"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Вход", callback_data="auth_method_select")],
@@ -751,11 +749,13 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         )
         await call.message.delete()
         
-        await qr_login.wait(60)
+        await qr_login.wait(QR_TIMEOUT) # Используем константу
         await msg.delete()
         await bot.send_message(uid, "✅ Успех! Запуск...")
         await tm.start_worker_session(uid, client)
         
+    except asyncio.TimeoutError:
+         await bot.send_message(uid, "⌛ Таймаут. QR не был отсканирован.")
     except Exception as e:
         await bot.send_message(uid, f"Ошибка QR: {e}")
         try: await client.disconnect()
@@ -908,9 +908,7 @@ async def handle_status(msg: Message, status: str, zm=False):
                 await msg.answer(f"✅ Замена: {old} -> {new}")
             else: await msg.answer("❌ Ошибка замены.")
         else:
-            # Ищем номер в реплае или аргументе
             if msg.reply_to_message:
-                # Пытаемся вытащить номер из текста реплая (первое слово)
                 ph = msg.reply_to_message.text.split()[0]
             elif len(msg.text.split()) > 1:
                 ph = msg.text.split()[1]
@@ -946,9 +944,8 @@ async def dr(msg: Message):
 # --- MAIN ---
 async def periodic_tasks():
     logger.info("Starting periodic tasks...")
-    await db.init() # Инициализация БД ПЕРЕД всем остальным
+    await db.init() # Инициализация БД
     
-    # Восстановление сессий
     active_users = await db.get_active_telethon_users()
     logger.info(f"Restoring {len(active_users)} workers...")
     for uid in active_users:
@@ -961,9 +958,10 @@ async def periodic_tasks():
 
 async def main():
     logger.info("Starting Bot...")
-    dp.include_routers(admin_router, user_router, drops_router)
     
-    # Запускаем фоновые задачи как таск
+    # ВОТ КРИТИЧЕСКАЯ СТРОКА: УБЕДИТЕСЬ, ЧТО DP - ЭТО Dispatcher
+    dp.include_routers(admin_router, user_router, drops_router) 
+    
     asyncio.create_task(periodic_tasks())
     
     await bot.delete_webhook(drop_pending_updates=True)
@@ -976,4 +974,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"Critical error in main loop: {e}")
+        logger.critical(f"Critical error in main loop: {e}", exc_info=True) # Добавлено exc_info для полного traceback
