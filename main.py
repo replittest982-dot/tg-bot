@@ -23,7 +23,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
 
-# 🛠️ ИСПРАВЛЕНИЕ ИМПОРТА ErrorEvent
+# 🛠️ ИСПРАВЛЕНИЕ ИМПОРТА ErrorEvent (Для совместимости с разными версиями)
 try:
     from aiogram.types import ErrorEvent
 except ImportError:
@@ -46,12 +46,12 @@ import pytz
 # I. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
 # =========================================================================
 
-# ✅ ВАШИ ДАННЫЕ (ВШИТЫ)
-BOT_TOKEN = "7868097991:AAG9jWr1urugbgxYsVCHnb8k1ZhuUPwdCBs"
+# ✅ ВАШИ ДАННЫЕ (ВШИТЫ) - ОБЯЗАТЕЛЬНО ПРОВЕРЬТЕ BOT_TOKEN!
+BOT_TOKEN = "7868097991:AAG48aFRhSd6dDB87I6AkrYD_mzLJgclNVk" # ⚠️ ЗАМЕНИТЕ НА ВАШ АКТУАЛЬНЫЙ ТОКЕН!
 ADMIN_ID = 6256576302
 API_ID = 29930612
 API_HASH = "2690aa8c364b91e47b6da1f90a71f825"
-DROPS_CHAT_ID = -100 # ⚠️ ЗАМЕНИТЕ НА ID ВАШЕГО ЧАТА ДЛЯ ДРОПОВ, если он используется.
+DROPS_CHAT_ID = -100 # ⚠️ ЗАМЕНИТЕ НА ID ВАШЕГО ЧАТА ДЛЯ ДРОПОВ
 
 # Настройки
 SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
@@ -370,6 +370,40 @@ def get_admin_promo_menu_keyboard(codes_list: List[Dict]) -> InlineKeyboardMarku
     builder.row(InlineKeyboardButton(text="🔙 Админ-панель", callback_data="admin_stats"))
     return builder.as_markup()
 
+# --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ ОБНОВЛЕНИЯ МЕНЮ ПОСЛЕ ДЕЙСТВИЙ ---
+async def update_menu_after_action(user_id: int, state: FSMContext, bot_instance: Bot, callback_data: str = "profile_menu", edit_message: Optional[Message] = None):
+    """Обновляет меню после успешного действия (логин, промокод и т.д.).
+    Используется для предотвращения ошибки 'Message' object has no attribute 'message'."""
+    await state.clear()
+    
+    # Создаем фиктивный CallbackQuery, используя либо переданное сообщение, либо отправляя новое
+    if not edit_message:
+        # Отправляем новое сообщение, если не было передано сообщение для редактирования
+        try:
+            edit_message = await bot_instance.send_message(user_id, "🔄 Обновление меню...")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            logger.warning(f"Failed to send menu update message to user {user_id}.")
+            return
+
+    fake_call = types.CallbackQuery( 
+        id=f'fake_update_{callback_data}', 
+        from_user=types.User(id=user_id, is_bot=False, first_name="User"), 
+        message=edit_message,
+        data=callback_data # Передаем целевые данные
+    )
+    
+    # Вызываем целевой хендлер
+    if callback_data == "worker_menu":
+        await account_menu(fake_call, state)
+    elif callback_data == "profile_menu":
+        await profile_menu(fake_call, state)
+    elif callback_data == "start_menu":
+        await profile_menu(fake_call, state) # profile_menu умеет обрабатывать start_menu
+    else:
+        # Fallback на профиль, если что-то пошло не так
+        await profile_menu(fake_call, state)
+
+
 # =========================================================================
 # V. TELETHON MANAGER
 # =========================================================================
@@ -405,14 +439,9 @@ class TelethonManager:
         
         await self.start_client_task(user_id)
         
-        # Фиктивный Call для обновления меню
-        fake_call = types.CallbackQuery( 
-            id='fake_finalize', 
-            from_user=types.User(id=user_id, is_bot=False, first_name="User"), 
-            message=await original_message.answer("🔄 Переход к управлению аккаунтом...") 
-        )
-        # Вызываем worker_menu, который теперь называется account_menu
-        await account_menu(fake_call, state) 
+        # 🛑 ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ ОБНОВЛЕНИЯ МЕНЮ
+        await update_menu_after_action(user_id, state, self.bot, callback_data="worker_menu", edit_message=original_message)
+
 
     async def start_client_task(self, user_id):
         if not await db.check_subscription(user_id):
@@ -567,6 +596,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
 # --- PROFILE MENU ---
 @user_router.callback_query(F.data.in_({"profile_menu", "start_menu"}))
 async def profile_menu(call: types.CallbackQuery, state: FSMContext):
+    # 🛑 ВАЖНО: message_to_edit = call.message
+    # Это работает, потому что этот хендлер вызывается только от CallbackQuery (или фиктивного CallbackQuery)
     user_id = call.from_user.id
     message_to_edit = call.message
     await call.answer()
@@ -585,7 +616,6 @@ async def profile_menu(call: types.CallbackQuery, state: FSMContext):
     end_date_str = user_data.get('subscription_end_date')
     end_date_info = db.to_msk_aware(end_date_str).strftime('%d.%m.%Y %H:%M MSK') if is_subscribed and end_date_str else "Не активна"
     
-    # 2. Изменение слова "Worker"
     auth_status = "✅ Авторизован" if session_exists else "❌ Не авторизован"
     active_status = "Да" if is_worker_active else "Нет"
     
@@ -619,7 +649,8 @@ async def account_menu(call: types.CallbackQuery, state: FSMContext):
 
     if not await db.check_subscription(user_id):
         await call.answer("❌ Ваша подписка истекла.", show_alert=True)
-        return await profile_menu(call, state) 
+        # 🛑 ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ ОБНОВЛЕНИЯ МЕНЮ
+        return await update_menu_after_action(user_id, state, bot, callback_data="profile_menu", edit_message=message_to_edit) 
 
     user_data = await db.get_user(user_id)
     is_worker_active = user_data.get('telethon_active', False)
@@ -665,7 +696,6 @@ async def auth_method_menu(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("🚪 **Выберите способ авторизации**:", reply_markup=builder.as_markup())
     await call.answer()
 
-# Хендлеры авторизации (PHONE, CODE, PASSWORD) остаются без изменений...
 @user_router.callback_query(F.data == "auth_by_phone")
 async def auth_by_phone_step1(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(TelethonAuth.PHONE)
@@ -759,9 +789,10 @@ async def process_promo_activation(message: types.Message, state: FSMContext):
     
     if days:
         await message.answer(f"🎉 **Промокод активирован!** +{days} дней.")
-        session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{message.from_user.id}.session'))
-        fake_call = types.CallbackQuery(id='fake', from_user=message.from_user, message=await message.answer("🔄 Обновление..."))
-        return await profile_menu(fake_call, state)
+        
+        # 🛑 ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ ОБНОВЛЕНИЯ МЕНЮ
+        await update_menu_after_action(message.from_user.id, state, bot, callback_data="profile_menu", edit_message=message)
+        
     else:
         await message.answer("❌ **Неверный код.**", reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 Профиль", callback_data="profile_menu")).as_markup())
 
