@@ -47,7 +47,7 @@ import pytz
 # =========================================================================
 
 # ✅ ВАШИ ДАННЫЕ (ВШИТЫ)
-BOT_TOKEN = "7868097991:AAG48aFRhSd6dDB7dI6AkrYD_mzLJgclNVk"
+BOT_TOKEN = "7868097991:AAG9jWr1urugbgxYsVCHnb8k1ZhuUPwdCBs"
 ADMIN_ID = 6256576302
 API_ID = 29930612
 API_HASH = "2690aa8c364b91e47b6da1f90a71f825"
