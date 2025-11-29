@@ -22,7 +22,7 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
-from aiogram.handlers import ErrorEvent 
+from aiogram.types.error import ErrorEvent
 
 # --- TELETHON ---
 from telethon import TelegramClient, events
