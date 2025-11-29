@@ -23,11 +23,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
 
-# 🛠️ ИСПРАВЛЕНИЕ ИМПОРТА ErrorEvent (Самый стабильный вариант для v3)
+# 🛠️ ИСПРАВЛЕНИЕ ИМПОРТА ErrorEvent
 try:
     from aiogram.types import ErrorEvent
 except ImportError:
-    # Фолбэк для специфических версий, чтобы код не падал
     from aiogram.types.error_event import ErrorEvent
 
 # --- TELETHON ---
@@ -44,15 +43,15 @@ import aiosqlite
 import pytz 
 
 # =========================================================================
-# I. КОНФИГУРАЦИЯ
+# I. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
 # =========================================================================
 
 # ✅ ВАШИ ДАННЫЕ (ВШИТЫ)
-BOT_TOKEN = "7868097991:AAG48aFRhSd6dDB87I6AkrYD_mzLJgclNVk"
+BOT_TOKEN = "7868097991:AAG48aFRhSd6dDB7dI6AkrYD_mzLJgclNVk"
 ADMIN_ID = 6256576302
 API_ID = 29930612
 API_HASH = "2690aa8c364b91e47b6da1f90a71f825"
-DROPS_CHAT_ID = -100 # ⚠️ ЗАМЕНИТЕ НА ID ВАШЕГО ЧАТА ДЛЯ ДРОПОВ, если он известен. Иначе бот будет работать, но дроп-команды могут не проходить проверки.
+DROPS_CHAT_ID = -100 # ⚠️ ЗАМЕНИТЕ НА ID ВАШЕГО ЧАТА ДЛЯ ДРОПОВ, если он используется.
 
 # Настройки
 SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
@@ -80,7 +79,7 @@ drops_router = Router()
 admin_router = Router()
 
 # =========================================================================
-# II. ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ
+# II. ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ И FSM СОСТОЯНИЯ
 # =========================================================================
 
 class GlobalStorage:
@@ -110,12 +109,13 @@ class PromoStates(StatesGroup):
     waiting_for_code = State()
 
 class AdminStates(StatesGroup):
-    waiting_for_promo_length = State()
-    waiting_for_promo_days = State()
-    waiting_for_promo_uses = State()
+    # Управление подпиской
     waiting_for_user_id_for_sub = State() 
     waiting_for_sub_days = State()
-
+    # Создание промокода
+    waiting_for_promo_days = State()
+    waiting_for_promo_uses = State()
+    
 # =========================================================================
 # III. DATABASE (AIOSQLITE)
 # =========================================================================
@@ -283,28 +283,6 @@ class AsyncDatabase:
             async with db.execute("SELECT COUNT(user_id) FROM users WHERE subscription_active=1") as cursor:
                 return (await cursor.fetchone())[0]
 
-    async def get_active_drops_count(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT COUNT(phone) FROM drop_sessions WHERE status NOT IN ('closed', 'deleted', 'замена_закрыт')") as cursor:
-                return (await cursor.fetchone())[0]
-
-    async def get_all_drops(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM drop_sessions ORDER BY start_time DESC") as cursor:
-                return [dict(row) for row in await cursor.fetchall()]
-
-    async def update_drop_status(self, phone: str, status: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE drop_sessions SET status=? WHERE phone=?", (status, phone))
-            await db.commit()
-            
-    async def delete_drop_session(self, phone: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM drop_sessions WHERE phone=?", (phone,))
-            await db.commit()
-            return db.total_changes > 0
-
 db = AsyncDatabase(os.path.join('data', DB_NAME))
 
 # =========================================================================
@@ -340,30 +318,56 @@ def generate_promo_code(length=8):
     characters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
-def get_main_menu_keyboard(user_id: int, is_subscribed: bool) -> InlineKeyboardMarkup:
+# --- KEYBOARDS ---
+def get_main_menu_keyboard(user_id: int, is_subscribed: bool, session_exists: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile_menu"))
+    
     if is_subscribed:
-        builder.row(InlineKeyboardButton(text="⚙️ Управление Worker", callback_data="worker_menu"))
+        # 1. Изменение кнопки для управления аккаунтом
+        text = "⚙️ Управление аккаунтом" if session_exists else "🚪 Войти в аккаунт"
+        builder.row(InlineKeyboardButton(text=text, callback_data="worker_menu"))
+    
     if not is_subscribed:
         builder.row(InlineKeyboardButton(text="🔑 Активировать подписку", callback_data="enter_promo"))
+    
     builder.row(InlineKeyboardButton(text="❓ Поддержка", url=f"https://t.me/{SUPPORT_BOT_USERNAME}"))
+    
     if user_id == ADMIN_ID:
         builder.row(InlineKeyboardButton(text="📊 Админ-панель", callback_data="admin_stats"))
+        
     return builder.as_markup()
 
-def get_worker_menu_keyboard(is_worker_active: bool, session_exists: bool) -> InlineKeyboardMarkup:
+def get_account_menu_keyboard(is_worker_active: bool, session_exists: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if is_worker_active:
-        builder.row(InlineKeyboardButton(text="🛑 Остановить Worker", callback_data="stop_worker"))
-    elif session_exists: 
-        builder.row(InlineKeyboardButton(text="▶️ Запустить Worker", callback_data="start_worker"))
     
-    # Кнопка авторизации доступна всегда для смены аккаунта или первого входа, если воркер не работает
-    if not is_worker_active: 
-        builder.row(InlineKeyboardButton(text="🚪 Новый вход/Авторизация", callback_data="auth_method_menu"))
+    if is_worker_active:
+        builder.row(InlineKeyboardButton(text="🛑 Остановить Аккаунт", callback_data="stop_worker"))
+    elif session_exists: 
+        builder.row(InlineKeyboardButton(text="▶️ Запустить Аккаунт", callback_data="start_worker"))
+        
+    builder.row(InlineKeyboardButton(text="🚪 Сменить аккаунт/Авторизация", callback_data="auth_method_menu"))
         
     builder.row(InlineKeyboardButton(text="🔙 Профиль", callback_data="profile_menu"))
+    return builder.as_markup()
+
+def get_admin_promo_menu_keyboard(codes_list: List[Dict]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo"))
+    
+    # Добавление кнопок для каждого промокода
+    for promo in codes_list:
+        code = promo['code']
+        uses = promo['uses_left']
+        days = promo['days']
+        uses_display = "∞" if uses == -1 else uses
+        
+        text = f"🔑 {code} ({days} дн. | {uses_display} исп.)"
+        builder.row(
+            InlineKeyboardButton(text=text, callback_data=f"admin_view_promo_{code}"),
+        )
+        
+    builder.row(InlineKeyboardButton(text="🔙 Админ-панель", callback_data="admin_stats"))
     return builder.as_markup()
 
 # =========================================================================
@@ -405,13 +409,14 @@ class TelethonManager:
         fake_call = types.CallbackQuery( 
             id='fake_finalize', 
             from_user=types.User(id=user_id, is_bot=False, first_name="User"), 
-            message=await original_message.answer("🔄 Переход к управлению Worker...") 
+            message=await original_message.answer("🔄 Переход к управлению аккаунтом...") 
         )
-        await worker_menu(fake_call, state) 
+        # Вызываем worker_menu, который теперь называется account_menu
+        await account_menu(fake_call, state) 
 
     async def start_client_task(self, user_id):
         if not await db.check_subscription(user_id):
-            await self._send_to_bot_user(user_id, "⚠️ **Ваша подписка истекла.** Worker не запущен.")
+            await self._send_to_bot_user(user_id, "⚠️ **Ваша подписка истекла.** Аккаунт не запущен.")
             return
 
         session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{user_id}.session'))
@@ -442,11 +447,11 @@ class TelethonManager:
             await client.start(phone=None) 
             me = await client.get_me() 
             await db.set_telethon_status(user_id, True)
-            await self._send_to_bot_user(user_id, f"🚀 Worker успешно запущен! Аккаунт: **{me.first_name}**.")
+            await self._send_to_bot_user(user_id, f"🚀 Аккаунт **{me.first_name}** запущен и готов к работе.")
             await client.run_until_disconnected()
 
         except (AuthKeyUnregisteredError, SessionPasswordNeededError, PhoneNumberInvalidError, EOFError, SessionRevokedError, UserDeactivatedBanError):
-            await self._send_to_bot_user(user_id, "⚠️ Сессия недействительна. Требуется повторная авторизация через меню.")
+            await self._send_to_bot_user(user_id, "⚠️ Сессия недействительна. Требуется повторная авторизация.")
             session_file = os.path.join(SESSION_DIR, f'session_{user_id}.session')
             if await asyncio.to_thread(os.path.exists, session_file):
                 try: await asyncio.to_thread(os.remove, session_file)
@@ -454,7 +459,7 @@ class TelethonManager:
             await self.stop_worker(user_id)
         except Exception as e:
             logger.critical(f"Worker {user_id} failed: {e}", exc_info=True)
-            await self._send_to_bot_user(user_id, f"💔 Worker отключился: `{e.__class__.__name__}`.")
+            await self._send_to_bot_user(user_id, f"💔 Аккаунт отключился: `{e.__class__.__name__}`.")
         finally:
             await self.stop_worker(user_id, silent=True) 
             await db.set_telethon_status(user_id, False)
@@ -469,7 +474,7 @@ class TelethonManager:
         if client:
             try:
                 if client.is_connected(): await client.disconnect()
-                if not silent: await self._send_to_bot_user(user_id, "🛑 Worker успешно остановлен.")
+                if not silent: await self._send_to_bot_user(user_id, "🛑 Аккаунт остановлен.")
             except Exception as e:
                 logger.warning(f"Error disconnecting {user_id}: {e}")
 
@@ -545,7 +550,7 @@ class TelethonManager:
 tm = TelethonManager(bot) 
 
 # =========================================================================
-# VI. HANDLERS (USER, AUTH, ADMIN)
+# VI. HANDLERS (USER)
 # =========================================================================
 
 # --- START ---
@@ -555,7 +560,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await db.get_user(user_id) 
     is_subscribed = await db.check_subscription(user_id)
-    await message.answer("👋 Добро пожаловать в систему STATPRO.", reply_markup=get_main_menu_keyboard(user_id, is_subscribed))
+    session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{user_id}.session'))
+
+    await message.answer("👋 Добро пожаловать в систему STATPRO.", reply_markup=get_main_menu_keyboard(user_id, is_subscribed, session_exists))
 
 # --- PROFILE MENU ---
 @user_router.callback_query(F.data.in_({"profile_menu", "start_menu"}))
@@ -566,36 +573,45 @@ async def profile_menu(call: types.CallbackQuery, state: FSMContext):
     
     await state.clear()
     
-    if call.data == "start_menu":
-        is_subscribed = await db.check_subscription(user_id)
-        await message_to_edit.edit_text("👋 Добро пожаловать в систему STATPRO.", reply_markup=get_main_menu_keyboard(user_id, is_subscribed))
-        return
-
     user_data = await db.get_user(user_id)
     is_subscribed = await db.check_subscription(user_id)
     is_worker_active = user_data.get('telethon_active', False)
+    session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{user_id}.session'))
     
+    if call.data == "start_menu":
+        await message_to_edit.edit_text("👋 Добро пожаловать в систему STATPRO.", reply_markup=get_main_menu_keyboard(user_id, is_subscribed, session_exists))
+        return
+
     end_date_str = user_data.get('subscription_end_date')
     end_date_info = db.to_msk_aware(end_date_str).strftime('%d.%m.%Y %H:%M MSK') if is_subscribed and end_date_str else "Не активна"
+    
+    # 2. Изменение слова "Worker"
+    auth_status = "✅ Авторизован" if session_exists else "❌ Не авторизован"
+    active_status = "Да" if is_worker_active else "Нет"
     
     text = (
         f"👤 **Ваш Профиль**\n\n"
         f"🔹 **ID:** `{user_id}`\n"
         f"✅ **Подписка:** {'Да' if is_subscribed else 'Нет'}\n"
         f"🗓️ **До:** `{end_date_info}`\n"
-        f"🚀 **Worker:** {'Да' if is_worker_active else 'Нет'}"
+        f"🔗 **Статус авторизации:** {auth_status}\n"
+        f"🚀 **Аккаунт запущен:** {active_status}"
     )
     
     builder = InlineKeyboardBuilder()
-    if is_subscribed: builder.row(InlineKeyboardButton(text="⚙️ Управление Worker", callback_data="worker_menu"))
-    else: builder.row(InlineKeyboardButton(text="🔑 Активировать подписку", callback_data="enter_promo"))
+    if is_subscribed: 
+        text_btn = "⚙️ Управление аккаунтом" if session_exists else "🚪 Войти в аккаунт"
+        builder.row(InlineKeyboardButton(text=text_btn, callback_data="worker_menu"))
+    else: 
+        builder.row(InlineKeyboardButton(text="🔑 Активировать подписку", callback_data="enter_promo"))
+        
     builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="start_menu"))
     
     await message_to_edit.edit_text(text, reply_markup=builder.as_markup())
 
-# --- WORKER MENU ---
+# --- УПРАВЛЕНИЕ АККАУНТОМ (бывший Worker Menu) ---
 @user_router.callback_query(F.data == "worker_menu")
-async def worker_menu(call: types.CallbackQuery, state: FSMContext): 
+async def account_menu(call: types.CallbackQuery, state: FSMContext): 
     user_id = call.from_user.id
     message_to_edit = call.message 
     await call.answer()
@@ -609,28 +625,31 @@ async def worker_menu(call: types.CallbackQuery, state: FSMContext):
     is_worker_active = user_data.get('telethon_active', False)
     session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{user_id}.session'))
 
-    status_text = "✅ **Worker активен**." if is_worker_active else "❌ **Worker не активен**."
-    text = f"⚙️ **Управление Worker**\n\n{status_text}\n\n*Для смены аккаунта нажмите 'Новый вход'.*"
+    status_text = "✅ **Аккаунт запущен**." if is_worker_active else "❌ **Аккаунт остановлен**."
     
-    await message_to_edit.edit_text(text, reply_markup=get_worker_menu_keyboard(is_worker_active, session_exists))
+    text = f"⚙️ **Управление аккаунтом**\n\n{status_text}\n\n*Для смены аккаунта используйте кнопку 'Сменить аккаунт/Авторизация'.*"
+    
+    await message_to_edit.edit_text(text, reply_markup=get_account_menu_keyboard(is_worker_active, session_exists))
 
-# --- WORKER ACTIONS ---
+
+# --- WORKER ACTIONS (Переименованы) ---
 @user_router.callback_query(F.data == "stop_worker")
 async def stop_worker_handler(call: types.CallbackQuery, state: FSMContext):
-    await call.answer("Остановка...", show_alert=False)
+    await call.answer("Остановка аккаунта...", show_alert=False)
     await tm.stop_worker(call.from_user.id)
-    return await worker_menu(call, state)
+    return await account_menu(call, state)
 
 @user_router.callback_query(F.data == "start_worker")
 async def start_worker_handler(call: types.CallbackQuery, state: FSMContext):
     session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{call.from_user.id}.session'))
     if not session_exists:
-        await call.answer("❌ Сессия не найдена. Авторизуйтесь.", show_alert=True)
-        return await worker_menu(call, state)
-    await call.answer("Запуск...", show_alert=False)
+        await call.answer("❌ Сессия не найдена. Сначала авторизуйтесь.", show_alert=True)
+        return await account_menu(call, state)
+        
+    await call.answer("Запуск аккаунта...", show_alert=False)
     await tm.start_client_task(call.from_user.id)
     await asyncio.sleep(1) 
-    return await worker_menu(call, state)
+    return await account_menu(call, state)
 
 # --- AUTH FLOW ---
 @user_router.callback_query(F.data == "auth_method_menu")
@@ -641,11 +660,12 @@ async def auth_method_menu(call: types.CallbackQuery, state: FSMContext):
     
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📲 По номеру телефона", callback_data="auth_by_phone"))
-    builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data="worker_menu")) 
+    builder.row(InlineKeyboardButton(text="🔙 Управление аккаунтом", callback_data="worker_menu")) 
     
     await call.message.edit_text("🚪 **Выберите способ авторизации**:", reply_markup=builder.as_markup())
     await call.answer()
 
+# Хендлеры авторизации (PHONE, CODE, PASSWORD) остаются без изменений...
 @user_router.callback_query(F.data == "auth_by_phone")
 async def auth_by_phone_step1(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(TelethonAuth.PHONE)
@@ -724,7 +744,7 @@ async def auth_by_phone_step4_password(message: types.Message, state: FSMContext
         if client: await client.disconnect()
         await message.answer("❌ Ошибка входа.")
 
-# --- PROMO ---
+# --- PROMO ACTIVATION ---
 @user_router.callback_query(F.data == "enter_promo")
 async def enter_promo(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(PromoStates.waiting_for_code)
@@ -739,12 +759,18 @@ async def process_promo_activation(message: types.Message, state: FSMContext):
     
     if days:
         await message.answer(f"🎉 **Промокод активирован!** +{days} дней.")
+        session_exists = await asyncio.to_thread(os.path.exists, os.path.join(SESSION_DIR, f'session_{message.from_user.id}.session'))
         fake_call = types.CallbackQuery(id='fake', from_user=message.from_user, message=await message.answer("🔄 Обновление..."))
         return await profile_menu(fake_call, state)
     else:
-        await message.answer("❌ **Неверный код.**")
+        await message.answer("❌ **Неверный код.**", reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 Профиль", callback_data="profile_menu")).as_markup())
 
-# --- ADMIN ---
+
+# =========================================================================
+# VII. HANDLERS (ADMIN)
+# =========================================================================
+
+# --- ADMIN MAIN MENU ---
 @admin_router.callback_query(F.data == "admin_stats")
 async def admin_main_menu(call: types.CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
@@ -752,81 +778,239 @@ async def admin_main_menu(call: types.CallbackQuery, state: FSMContext):
     total_users = await db.get_all_users_count()
     active_subs = await db.get_active_subs_count()
     
-    text = f"📊 **Админ-панель**\n👤 Всего: {total_users}\n✅ Активных: {active_subs}"
+    text = (
+        f"📊 **Админ-панель**\n\n"
+        f"👤 Всего пользователей: {total_users}\n"
+        f"✅ Активных подписок: {active_subs}"
+    )
+    
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🔑 Промокоды", callback_data="admin_promo_menu"))
     builder.row(InlineKeyboardButton(text="➕ Выдать подписку", callback_data="admin_give_sub"))
-    builder.row(InlineKeyboardButton(text="⬅️ Меню", callback_data="start_menu"))
+    builder.row(InlineKeyboardButton(text="⬅️ Главное меню", callback_data="start_menu"))
+    
     await call.message.edit_text(text, reply_markup=builder.as_markup())
 
-# ... (Остальные админ хендлеры: admin_promo_menu, admin_create_promo, admin_view_promo, admin_give_sub и т.д. остаются аналогичными предыдущим версиям, структура та же) ...
-# Для краткости я включу admin_give_sub так как там были вопросы:
+# --- ADMIN SUB MENU (PROMO) ---
+@admin_router.callback_query(F.data == "admin_promo_menu")
+async def admin_promo_menu(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    await state.clear()
+    
+    codes = await db.get_all_promo_codes()
+    
+    text = f"🔑 **Управление промокодами**\n\nВсего активных кодов: {len(codes)}"
+    
+    await call.message.edit_text(text, reply_markup=get_admin_promo_menu_keyboard(codes))
 
+# --- ADMIN CREATE PROMO (STEP 1: DAYS) ---
+@admin_router.callback_query(F.data == "admin_create_promo")
+async def admin_create_promo_step1(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    await state.set_state(AdminStates.waiting_for_promo_days)
+    
+    builder = InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_promo_menu"))
+    await call.message.edit_text("🗓️ **Введите количество дней** подписки для этого промокода (число):", reply_markup=builder.as_markup())
+
+@admin_router.message(AdminStates.waiting_for_promo_days)
+async def admin_create_promo_step2(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        days = int(message.text.strip())
+        if days <= 0: raise ValueError
+        await state.update_data(promo_days=days)
+        await state.set_state(AdminStates.waiting_for_promo_uses)
+        
+        await message.answer(
+            "🧮 **Введите количество использований** (число):\n\n"
+            "0 - для **бесконечного** использования.",
+            reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_promo_menu")).as_markup()
+        )
+    except ValueError:
+        await message.answer("❌ Введите корректное число дней (больше 0).")
+
+@admin_router.message(AdminStates.waiting_for_promo_uses)
+async def admin_create_promo_step3(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        uses = int(message.text.strip())
+        if uses < 0: raise ValueError
+        
+        data = await state.get_data()
+        days = data['promo_days']
+        
+        # ГЕНЕРАЦИЯ ПРОМОКОДА
+        new_code = generate_promo_code(10) # 10 символов
+        
+        success = await db.create_promo_code(new_code, days, uses)
+        
+        if success:
+            await state.clear()
+            uses_display = "бесконечно" if uses == 0 else f"{uses} раз"
+            
+            text = (
+                f"🎉 **Промокод создан!**\n\n"
+                f"🔑 Код: `{new_code}`\n"
+                f"🗓️ Дней: **{days}**\n"
+                f"🧮 Использований: **{uses_display}**"
+            )
+            await message.answer(text, reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 К промокодам", callback_data="admin_promo_menu")).as_markup())
+        else:
+            # Маловероятно, но если код совпал (коллайдер), попробуем снова
+            await message.answer("❌ Ошибка БД. Попробуйте снова.") 
+            await state.clear()
+
+    except ValueError:
+        await message.answer("❌ Введите корректное число использований (0 или больше).")
+
+# --- ADMIN VIEW/DELETE PROMO ---
+@admin_router.callback_query(F.data.startswith("admin_view_promo_"))
+async def admin_view_promo(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    await call.answer()
+    
+    code = call.data.split('_')[-1]
+    promo = await db.get_promo_code(code)
+    
+    if not promo:
+        await call.message.edit_text("❌ Промокод не найден.", reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 К промокодам", callback_data="admin_promo_menu")).as_markup())
+        return
+
+    uses_display = "Бесконечно" if promo['uses_left'] == -1 else promo['uses_left']
+    
+    text = (
+        f"🔑 **Информация о промокоде: {promo['code']}**\n\n"
+        f"🗓️ Дней подписки: **{promo['days']}**\n"
+        f"🧮 Осталось использований: **{uses_display}**\n"
+        f"⏳ Создан: {promo['created_at']} MSK"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"admin_delete_promo_{code}"))
+    builder.row(InlineKeyboardButton(text="🔙 К промокодам", callback_data="admin_promo_menu"))
+    
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+@admin_router.callback_query(F.data.startswith("admin_delete_promo_"))
+async def admin_delete_promo(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    code = call.data.split('_')[-1]
+    await call.answer(f"Промокод {code} удален.", show_alert=True)
+    
+    await db.delete_promo_code(code)
+    
+    # Возврат в меню промокодов
+    await admin_promo_menu(call, state)
+
+
+# --- ADMIN GIVE SUB ---
 @admin_router.callback_query(F.data == "admin_give_sub")
 async def admin_give_sub(call: types.CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
     await state.set_state(AdminStates.waiting_for_user_id_for_sub)
-    await call.message.edit_text("👤 ID пользователя:")
+    await call.message.edit_text("👤 **Введите ID пользователя**, которому нужно выдать подписку (число):", reply_markup=InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_stats")).as_markup())
 
 @admin_router.message(AdminStates.waiting_for_user_id_for_sub)
 async def admin_give_sub_id(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
     try:
         uid = int(message.text.strip())
+        await db.get_user(uid) # Создаст запись, если нет
         await state.update_data(target_uid=uid)
         await state.set_state(AdminStates.waiting_for_sub_days)
-        await message.answer("🗓️ Дней:")
-    except: await message.answer("Число!")
+        await message.answer(f"🗓️ Пользователь `{uid}` выбран. Введите **количество дней** подписки (число):")
+    except: await message.answer("❌ ID должен быть числом. Попробуйте снова.")
 
 @admin_router.message(AdminStates.waiting_for_sub_days)
 async def admin_give_sub_days(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
     try:
         days = int(message.text.strip())
+        if days <= 0: raise ValueError
+        
         data = await state.get_data()
         uid = data['target_uid']
+        
         user = await db.get_user(uid)
         end = db._calculate_new_end_date(user.get('subscription_end_date') if user else None, days)
         await db.set_subscription_status(uid, True, end)
-        await message.answer(f"✅ Выдано {days} дней пользователю {uid}.")
+        
+        await message.answer(
+            f"✅ **Успешно!** Выдано **{days}** дней пользователю `{uid}`. Действует до {end} MSK."
+        )
         await state.clear()
-    except: await message.answer("Ошибка.")
+        
+    except ValueError: 
+        await message.answer("❌ Количество дней должно быть положительным числом.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e.__class__.__name__}. Попробуйте снова.")
+        await state.clear()
 
-# --- COMMON ---
+
+# =========================================================================
+# VIII. MAIN
+# =========================================================================
+
+# --- GLOBAL ERROR HANDLER ---
 @dp.error()
 async def global_error_handler(event: ErrorEvent):
-    logger.error(f"Error: {event.exception}", exc_info=True)
+    exception = event.exception
+    
+    with suppress():
+        if isinstance(exception, TelegramBadRequest) and ("message is not modified" in str(exception).lower() or "can't parse entities" in str(exception).lower()): return True 
+        if isinstance(exception, TelegramRetryAfter):
+            logger.warning(f"FloodWait encountered. Sleeping for {exception.timeout}s.")
+            await asyncio.sleep(exception.timeout)
+            return True
+        if isinstance(exception, TelegramConflictError):
+            logger.critical("🚨 TelegramConflictError: Another bot instance is running!")
+            return True
+
+    logger.critical(f"🚨 КРИТИЧЕСКАЯ ОШИБКА: {exception.__class__.__name__}: {exception}", exc_info=True)
+    
+    if ADMIN_ID:
+        error_msg = (
+            f"🔥 **BOT CRASH** 🔥\n"
+            f"❌ Тип: `{exception.__class__.__name__}`\n"
+            f"📄 Ошибка: `{str(exception)[:100]}`\n" 
+            f"📍 Трейсбек:\n`{traceback.format_exc()[:1500]}`"
+        )
+        try:
+            await bot.send_message(ADMIN_ID, error_msg, parse_mode='Markdown')
+        except: pass
+            
     return True
 
-@user_router.message(F.text)
-async def unknown_cmd(message: types.Message):
-    if message.text.startswith('/'): await message.answer("Неизвестная команда.")
-
-# =========================================================================
-# VII. MAIN
-# =========================================================================
-
+# --- STARTUP ---
 async def on_startup(dispatcher: Dispatcher):
     logger.info("Bot starting...")
-    active = await db.get_active_telethon_users()
-    for uid in active:
+    await db.init() 
+    
+    # Запуск активных воркеров
+    active_users = await db.get_active_telethon_users()
+    for uid in active_users:
+        # Проверяем подписку перед запуском
         if await db.check_subscription(uid): asyncio.create_task(tm.start_client_task(uid))
-    asyncio.create_task(cleanup_temp_sessions())
-
-async def cleanup_temp_sessions():
-    while True:
-        await asyncio.sleep(3600)
-        # Логика очистки (как было раньше)
 
 async def main():
-    await db.init()
+    dp.message.middleware(RateLimitMiddleware())
+    dp.callback_query.middleware(RateLimitMiddleware())
+    
     dp.include_router(user_router)
     dp.include_router(admin_router)
     dp.include_router(drops_router)
+    
     dp.startup.register(on_startup)
     
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Polling...")
+    logger.info("Polling started...")
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.critical(f"Critical error in main loop: {e}", exc_info=True)
