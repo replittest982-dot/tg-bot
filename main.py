@@ -22,7 +22,8 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
-from aiogram.types.error import ErrorEvent
+# ✅ ИСПРАВЛЕНИЕ: ErrorEvent теперь импортируется из aiogram.types.error (для aiogram 3.x)
+from aiogram.types.error import ErrorEvent 
 
 # --- TELETHON ---
 from telethon import TelegramClient, events
@@ -797,16 +798,23 @@ async def auth_by_phone_step2_phone(message: types.Message, state: FSMContext):
     if not re.match(r'^\+\d{10,15}$', phone):
         return await message.answer("❌ Неверный формат. Введите номер, начиная с +, например `+79001234567`:")
     
+    data = await state.get_data()
+    # 1. Проверяем и закрываем старый временный клиент, если он есть
+    if old_client := store.temp_auth_clients.get(user_id):
+        if old_client.is_connected():
+            await old_client.disconnect()
+        store.temp_auth_clients.pop(user_id, None)
+
     # Сохраняем Message, которое нужно для _finalize_auth
     await state.update_data(phone=phone, original_message=message) 
 
-    # 1. Создаем временный клиент
+    # 2. Создаем временный клиент
     session_path = os.path.join(SESSION_DIR, f'temp_{user_id}')
     client = TelegramClient(session_path, API_ID, API_HASH, device_model="StatPro Auth")
     store.temp_auth_clients[user_id] = client
 
     try:
-        # 2. Подключаемся и отправляем код
+        # 3. Подключаемся и отправляем код
         await client.connect()
         send_code_result = await client.send_code_request(phone) 
         await state.update_data(send_code_hash=send_code_result.phone_code_hash)
@@ -821,9 +829,13 @@ async def auth_by_phone_step2_phone(message: types.Message, state: FSMContext):
         )
     except PhoneNumberInvalidError:
         await state.clear()
+        client.disconnect() 
+        store.temp_auth_clients.pop(user_id, None)
         return await message.answer("❌ Неверный номер телефона. Попробуйте снова через меню 'Новый вход/Авторизация'.")
     except Exception as e:
         await state.clear()
+        client.disconnect()
+        store.temp_auth_clients.pop(user_id, None)
         logger.error(f"Telethon Phone Auth Error for {user_id}: {e}", exc_info=True)
         return await message.answer(f"❌ Произошла ошибка при отправке кода: `{e.__class__.__name__}`. Попробуйте позже.")
     
