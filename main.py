@@ -587,7 +587,7 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН ParseMode) ---
+# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: ИСПОЛЬЗУЕТСЯ .format()) ---
 @admin_router.callback_query(F.data == "admin_view_promos")
 async def cb_admin_view_promos(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -600,10 +600,12 @@ async def cb_admin_view_promos(call: CallbackQuery):
         promo_list = []
         for p in promocodes:
             uses = '∞' if p['uses_left'] == 0 else p['uses_left']
-            # Используем HTML теги <code>
-            promo_list.append(
-                f"• <code>{p['code']}</code> | {p['duration_days']} д. | {uses} исп."
+            
+            # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Используется .format() вместо f-строки
+            promo_line = "• <code>{}</code> | {} д. | {} исп.".format(
+                p['code'], p['duration_days'], uses
             )
+            promo_list.append(promo_line)
         
         # Используем <pre> для форматирования в виде таблицы (HTML)
         text = (
@@ -611,9 +613,9 @@ async def cb_admin_view_promos(call: CallbackQuery):
             "<pre>"
             "КОД       | СРОК | ИСПОЛЬЗОВАНИЙ\n"
             "----------------------------------\n"
-            f"{'\n'.join(promo_list)}"
+            "{}\n"
             "</pre>\n"
-            "\nНажмите на код, чтобы скопировать его."
+            "\nНажмите на код, чтобы скопировать его.".format('\n'.join(promo_list))
         )
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
