@@ -27,9 +27,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 # --- TELETHON ---
-# ИСПРАВЛЕНО: Убран InputClientQRLogin, который вызывает ошибку импорта в новых версиях Telethon
+# ИСПРАВЛЕНО: Убран InputClientQRLogin
 from telethon import TelegramClient, events, errors, functions, utils
-from telethon.tl.types import User, Channel, Chat
+from telethon.tl.types import User, Channel, Chat # <- ИСПРАВЛЕННАЯ СТРОКА
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError, ChatForwardsRestrictedError, PasswordHashInvalidError
 
 # =========================================================================
