@@ -8,11 +8,13 @@ import string
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set, Any
-import concurrent.futures
+from io import BytesIO
 
 # Third-party Imports
 import aiosqlite
 import pytz
+import qrcode
+from PIL import Image
 from dotenv import load_dotenv
 
 # --- AIOGRAM ---
@@ -27,14 +29,17 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.enums import ParseMode 
 
 # --- TELETHON ---
-from telethon import TelegramClient, utils
-# ИСПРАВЛЕНО: Убедились, что ButtonEmptyError удален
+from telethon import TelegramClient, events, utils
+from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError, 
     AuthKeyUnregisteredError, PhoneCodeInvalidError, 
     PhoneCodeExpiredError, RpcCallFailError, 
-    PhoneNumberInvalidError, PasswordHashInvalidError, 
+    PhoneNumberInvalidError, PasswordHashInvalidError,
+    UsernameInvalidError, PeerIdInvalidError, 
+    UserNotMutualContactError
 )
+from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
 
 # =========================================================================
 # I. КОНФИГУРАЦИЯ И НАСТРОЙКА
@@ -74,9 +79,6 @@ def setup_logging():
 setup_logging() 
 logger = logging.getLogger(__name__)
 
-# Executor для синхронных задач (заглушка)
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-
 # --- Инициализация Aiogram Роутеров ---
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) 
 dp = Dispatcher(storage=MemoryStorage())
@@ -89,47 +91,37 @@ admin_router = Router(name='admin_router')
 # =========================================================================
 
 class GlobalStorage:
-    """Глобальное хранилище данных в RAM для управления воркерами и авторизацией."""
+    """Хранение данных в оперативной памяти."""
     def __init__(self):
         self.lock = asyncio.Lock()
-        # Временный клиент Telethon для процесса авторизации
         self.temp_auth_clients: Dict[int, TelegramClient] = {} 
-        # Future для QR-логина (заглушка/расширение)
         self.qr_login_future: Dict[int, asyncio.Future] = {} 
-        # Активные и запущенные клиенты (воркеры)
         self.active_workers: Dict[int, TelegramClient] = {} 
-        self.premium_users: Set[int] = set() 
 
 store = GlobalStorage()
 
 # --- FSM States ---
 class TelethonAuth(StatesGroup):
-    """Состояния для процесса авторизации Telethon."""
     WAITING_FOR_QR_SCAN = State()
     PHONE = State()
     CODE = State()
     PASSWORD = State() 
 
 class PromoStates(StatesGroup):
-    """Общее состояние для ввода промокода (User: активация, Admin: удаление)."""
     WAITING_CODE = State()
 
 class AdminPromo(StatesGroup):
-    """Состояния для создания промокода."""
     WAITING_DAYS = State() 
     WAITING_USES = State() 
 
 # --- УТИЛИТЫ ---
 def get_session_path(user_id: int, is_temp: bool = False) -> str:
-    """Возвращает базовый путь сессии (без расширения .session)."""
     suffix = '_temp' if is_temp else ''
     return os.path.join(SESSION_DIR, f'session_{user_id}{suffix}')
 
 def to_msk_aware(dt_str: str) -> Optional[datetime]:
-    """Преобразует строку даты/времени из БД в объект datetime с часовым поясом MSK."""
     if not dt_str: return None
     try:
-        # Убеждаемся, что парсим только до миллисекунд (если они есть)
         naive_dt = datetime.strptime(dt_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
         return TIMEZONE_MSK.localize(naive_dt)
     except Exception as e:
@@ -143,55 +135,49 @@ async def safe_edit_or_send(
     message_id: Optional[int] = None, 
     bot_instance: Bot = bot
 ):
-    """Централизованная функция для отказоустойчивой отправки/редактирования сообщений."""
+    """
+    Централизованная функция для ОТПРАВКИ/РЕДАКТИРОВАНИЯ сообщений. 
+    Использует delete+send для избежания Bad Request ошибок Aiogram.
+    """
+    
+    # 1. Если передан message_id, пытаемся удалить старое сообщение.
     if message_id:
         try:
-            await bot_instance.edit_message_text(
-                text, str(chat_id), message_id, reply_markup=reply_markup
-            )
-            return
+            await bot_instance.delete_message(chat_id, message_id)
         except TelegramAPIError as e:
-            logger.warning(f"Failed to edit message {message_id} for {chat_id}: {e}. Sending new message.")
-    
-    # Отправляем новое сообщение (Failover или первоначальная отправка)
+            logger.warning(f"Failed to delete old message {message_id} for {chat_id}: {e}. Sending new message.")
+        except Exception as e:
+            logger.warning(f"Unexpected error during delete for {chat_id}: {e}")
+
+    # 2. Отправляем новое сообщение.
     try:
         await bot_instance.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e_send:
         logger.error(f"FATAL: Failed to send message to {chat_id}: {e_send}")
 
 def generate_promocode(length=8) -> str:
-    """Генерирует случайный промокод."""
     characters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
 def normalize_phone(phone: str) -> str:
-    """
-    Очищает и нормализует номер телефона, добавляя '+' в начало, 
-    если код страны не указан или указан в виде 7/8.
-    """
     phone = phone.strip()
-    # Удаляем все, кроме цифр и знака +
     cleaned = re.sub(r'[^\d+]', '', phone)
 
     if not cleaned: return ""
     
-    # 1. Если уже начинается с +, возвращаем как есть
     if cleaned.startswith('+'):
         return cleaned
         
-    # 2. Если начинается с 8 или 7, заменяем на +7
     if cleaned.startswith('7') or cleaned.startswith('8'):
         return '+7' + cleaned[1:]
         
-    # 3. В других случаях предполагаем, что это международный номер без + и добавляем +
     return '+' + cleaned
 
 async def _new_telethon_client(user_id: int, is_temp: bool = False) -> TelegramClient:
-    """Создает новый экземпляр TelethonClient."""
     session_path = get_session_path(user_id, is_temp=is_temp)
     client = TelegramClient(
         session_path, API_ID, API_HASH, 
-        device_model="StatPro Auth", 
+        device_model="Worker StatPro", 
         flood_sleep_threshold=15
     )
     return client
@@ -210,7 +196,6 @@ class AsyncDatabase:
         self.db_pool = await aiosqlite.connect(self.db_path, isolation_level=None) 
         await self.db_pool.execute("PRAGMA journal_mode=WAL;")
         await self.db_pool.execute("PRAGMA synchronous=NORMAL;")
-        # ИСПРАВЛЕНО: Устанавливаем row_factory один раз при инициализации
         self.db_pool.row_factory = aiosqlite.Row
         
         await self.db_pool.execute("""
@@ -218,11 +203,11 @@ class AsyncDatabase:
                 user_id INTEGER PRIMARY KEY, 
                 telethon_active BOOLEAN DEFAULT 0,
                 subscription_end TEXT,
-                is_banned BOOLEAN DEFAULT 0,
-                password_2fa TEXT
+                is_banned BOOLEAN DEFAULT 0
             )
         """)
-        await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id, is_banned) VALUES (?, ?)", (ADMIN_ID, 0))
+        # Добавляем админа, если его нет
+        await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (ADMIN_ID,))
         
         await self.db_pool.execute("""
             CREATE TABLE IF NOT EXISTS promocodes (
@@ -235,7 +220,7 @@ class AsyncDatabase:
 
     async def get_user(self, user_id: int):
         if not self.db_pool: return None
-        # Обеспечиваем наличие пользователя в базе
+        # Обеспечиваем, что пользователь существует в базе
         await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         await self.db_pool.commit()
         
@@ -255,6 +240,7 @@ class AsyncDatabase:
         if not self.db_pool: return
         current_end = await self.get_subscription_status(user_id)
         now = datetime.now(TIMEZONE_MSK)
+        # Если подписка не активна (None или меньше текущего времени), начинаем отсчет с текущего момента
         new_end = (current_end if current_end and current_end > now else now) + timedelta(days=days)
         await self.db_pool.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (new_end.strftime('%Y-%m-%d %H:%M:%S'), user_id))
         await self.db_pool.commit()
@@ -290,6 +276,7 @@ class AsyncDatabase:
     async def get_active_telethon_users(self) -> List[int]: 
         if not self.db_pool: return []
         now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
+        # Ищем активных пользователей с активным статусом и действующей подпиской
         async with self.db_pool.execute("SELECT user_id FROM users WHERE telethon_active=1 AND is_banned=0 AND (subscription_end IS NULL OR subscription_end > ?)", (now_str,)) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
@@ -301,13 +288,11 @@ class AsyncDatabase:
             active_workers_db = (await cursor.fetchone())[0]
         return {
             'total_users': total_users, 'active_workers_db': active_workers_db,
-            'active_workers_ram': len(store.active_workers), 'premium_users_ram': len(store.premium_users)
+            'active_workers_ram': len(store.active_workers), 
         }
         
     async def delete_promocode(self, code: str) -> int:
-        """Корректное удаление промокода, возвращает количество удалённых записей."""
         if not self.db_pool: return 0
-        # Использование execute() без async with, чтобы получить rowcount
         cursor = await self.db_pool.execute("DELETE FROM promocodes WHERE code=?", (code.upper(),))
         count = cursor.rowcount or 0
         await self.db_pool.commit()
@@ -321,7 +306,7 @@ db = AsyncDatabase(os.path.join(DATA_DIR, DB_NAME))
 # =========================================================================
 
 class TelethonManager:
-    """Управление жизненным циклом Telethon Worker'ов (запуск, остановка, авторизация)."""
+    """Управление сессиями Telethon, Worker'ами и авторизацией."""
     def __init__(self, bot_instance: Bot, db_instance: AsyncDatabase):
         self.bot = bot_instance
         self.db = db_instance
@@ -330,17 +315,17 @@ class TelethonManager:
         self.tasks_lock = asyncio.Lock() 
 
     async def _send_to_bot_user(self, user_id: int, message: str, reply_markup: Optional[InlineKeyboardMarkup] = None, message_id: Optional[int] = None):
-        """Хелпер для отправки сообщений пользователю через Aiogram."""
+        """Безопасная отправка/редактирование сообщения пользователю бота."""
         await safe_edit_or_send(user_id, message, reply_markup, message_id, bot_instance=self.bot)
     
     async def _cleanup_temp_session(self, user_id: int):
-        """Удаляет временный клиент из RAM и временный файл сессии с диска."""
+        """Отключает временный клиент и удаляет временный файл сессии."""
         async with store.lock:
             client = store.temp_auth_clients.pop(user_id, None)
+            store.qr_login_future.pop(user_id, None) # Чистим QR future
         
         if client:
             try:
-                # Добавлена проверка hasattr, хотя client всегда будет иметь is_connected
                 if hasattr(client, "is_connected") and await client.is_connected(): await client.disconnect()
             except Exception:
                 pass
@@ -354,30 +339,26 @@ class TelethonManager:
                 logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}")
 
     async def start_worker_session(self, user_id: int, client: TelegramClient):
-        """
-        Завершает авторизацию: переносит временную сессию в постоянную, 
-        удаляет временные файлы и запускает воркер.
-        """
+        """Сохраняет сессию, удаляет временный файл и запускает Worker."""
         path_perm_base = get_session_path(user_id)
         path_temp_base = get_session_path(user_id, is_temp=True)
         path_perm = path_perm_base + '.session'
         path_temp = path_temp_base + '.session'
 
-        # Очистка временных клиентов из RAM и отключение
-        await self._cleanup_temp_session(user_id)
+        # Очистка предыдущего temp-состояния и остановка старого worker'а
+        await self.stop_worker(user_id, silent=True)
+        await self._cleanup_temp_session(user_id) 
 
+        # Переименование temp-файла в perm-файл (если авторизация прошла в temp)
         if os.path.exists(path_temp):
             logger.info(f"Worker {user_id}: Found temp session. Moving to permanent.")
             
-            # Удаление старой постоянной сессии, если существует
             if os.path.exists(path_perm): 
                 os.remove(path_perm)
                 logger.warning(f"Worker {user_id}: Overwrote existing permanent session.")
             
-            # Переименование временной сессии в постоянную
             os.rename(path_temp, path_perm)
             
-            # Проверка и запуск
             if os.path.exists(path_perm): 
                 logger.info(f"Worker {user_id}: Session moved successfully. Starting task.")
                 await self.start_client_task(user_id) 
@@ -385,7 +366,7 @@ class TelethonManager:
                  logger.error(f"Worker {user_id}: Failed to find permanent session after rename operation.")
                  await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
                  
-            # Очистка временного файла (повторно, если rename не удалил temp)
+            # Удаление temp-файла, если по какой-то причине он остался
             if os.path.exists(path_temp): 
                 try: os.remove(path_temp)
                 except OSError as e: logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}") 
@@ -395,8 +376,7 @@ class TelethonManager:
 
 
     async def start_client_task(self, user_id: int):
-        """Создает и запускает асинхронную задачу для основного Telethon Worker."""
-        # Останавливаем предыдущий воркер, если он активен
+        """Запускает Worker в фоновой задаче."""
         await self.stop_worker(user_id, silent=True)
         
         session_path = get_session_path(user_id) + '.session'
@@ -413,11 +393,103 @@ class TelethonManager:
             logger.critical(f"Worker {user_id}: Critical error starting client task: {e}")
             await self.db.set_telethon_status(user_id, False)
 
+    # =====================================================================
+    # ЛОГИКА WORKER'А И КОМАНД
+    # =====================================================================
+    
+    async def _handle_ls_command(self, event):
+        """Обработка команды .лс [юзернейм/ID] [сообщение]"""
+        text = event.message.message
+        parts = text.split(maxsplit=2)
+        
+        if len(parts) < 3:
+            await event.reply("❌ **.лс [юзернейм/ID] [сообщение]**: Недостаточно аргументов.")
+            return
+            
+        target = parts[1]
+        message_to_send = parts[2]
+        
+        client: TelegramClient = event.client
+        
+        try:
+            # Пытаемся получить объект пользователя/чата
+            entity = await client.get_entity(target)
+            
+            # Отправляем сообщение
+            await client.send_message(entity, message_to_send)
+            
+            # Отправляем ответ в чат, откуда пришла команда
+            await event.reply(f"✅ **Успешно:** Сообщение отправлено пользователю/чату {target}.")
+            
+        except UsernameInvalidError:
+            await event.reply(f"❌ **Ошибка:** Неверный юзернейм или ID: `{target}`.")
+        except PeerIdInvalidError:
+            await event.reply(f"❌ **Ошибка:** Неверный ID или недоступный чат: `{target}`.")
+        except UserNotMutualContactError:
+            await event.reply(f"❌ **Ошибка:** Невозможно отправить ЛС пользователю `{target}`. Он не в контактах.")
+        except Exception as e:
+            logger.error(f"Worker {client.session.user_id} .лс error: {type(e).__name__} - {e}")
+            await event.reply(f"❌ **Критическая ошибка при отправке ЛС:** {type(e).__name__}.")
+
+    async def _handle_checkgroup_command(self, event):
+        """Обработка команды .чекгруппу [юзернейм группы] [юзернейм/ID пользователя]"""
+        text = event.message.message
+        parts = text.split(maxsplit=2)
+        
+        if len(parts) < 3:
+            await event.reply("❌ **.чекгруппу [юзернейм группы] [юзернейм/ID пользователя]**: Недостаточно аргументов.")
+            return
+            
+        group_username = parts[1]
+        user_target = parts[2]
+        client: TelegramClient = event.client
+
+        try:
+            # 1. Получаем объект группы
+            group_entity = await client.get_entity(group_username)
+            
+            # 2. Получаем объект пользователя
+            user_entity = await client.get_entity(user_target)
+
+            # 3. Запрашиваем информацию об участии
+            participant = await client(GetParticipantRequest(group_entity, user_entity))
+            
+            is_member = True
+            status_text = "Участник"
+            
+            # Проверка статуса (для админов/создателей)
+            if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+                status_text = "Админ/Создатель"
+
+            # 4. Отправляем результат
+            await event.reply(
+                f"✅ **Проверка статуса в группе {group_username}:**\n"
+                f"Пользователь {user_target} является **{status_text}**."
+            )
+
+        except FloodWaitError as e:
+             await event.reply(f"❌ **FloodWait:** Пожалуйста, подождите {e.seconds} секунд перед повторной проверкой.")
+        except UsernameInvalidError:
+            await event.reply(f"❌ **Ошибка:** Неверный юзернейм группы или пользователя.")
+        except PeerIdInvalidError:
+            await event.reply(f"❌ **Ошибка:** Неверный ID или недоступный чат.")
+        except ValueError as e:
+            if 'The specified user is not a participant' in str(e):
+                 await event.reply(f"✅ **Проверка статуса в группе {group_username}:**\nПользователь {user_target} **НЕ** является участником.")
+            else:
+                 logger.error(f"Worker {client.session.user_id} .чекгруппу error: {type(e).__name__} - {e}")
+                 await event.reply(f"❌ **Критическая ошибка:** {type(e).__name__}.")
+        except Exception as e:
+            logger.error(f"Worker {client.session.user_id} .чекгруппу unhandled error: {type(e).__name__} - {e}")
+            await event.reply(f"❌ **Неизвестная ошибка:** {type(e).__name__}.")
+
+
     async def _run_worker(self, user_id: int): 
-        """Основной цикл работы Telethon клиента."""
+        """Основная логика Worker'а."""
         path = get_session_path(user_id)
         client = TelegramClient(path, self.API_ID, self.API_HASH, device_model="StatPro Worker", flood_sleep_threshold=15)
         
+        # Защита от дублирования
         async with self.tasks_lock: 
             if user_id in store.active_workers:
                 logger.warning(f"Worker {user_id}: Duplicate task detected. Disconnecting new client.")
@@ -445,7 +517,24 @@ class TelethonManager:
             logger.info(f"Worker {user_id} ({utils.get_display_name(me)}) started successfully.")
             await self._send_to_bot_user(user_id, f"✅ Worker запущен! Аккаунт: <b>{utils.get_display_name(me)}</b>\nСтатистика активна. Время подписки до: {sub_end.strftime('%d.%m.%Y %H:%M')}")
             
-            # --- Здесь будет основная логика Worker'а по сбору данных ---
+            
+            # =================================================================
+            # ИНТЕГРАЦИЯ КАСТОМНЫХ КОМАНД TELETHON
+            # =================================================================
+            
+            # Хендлер для команды .лс
+            client.add_event_handler(
+                self._handle_ls_command, 
+                events.NewMessage(pattern=r'^\.лс\s', incoming=True, chats=[user_id]) 
+            )
+            
+            # Хендлер для команды .чекгруппу
+            client.add_event_handler(
+                self._handle_checkgroup_command, 
+                events.NewMessage(pattern=r'^\.чекгруппу\s', incoming=True, chats=[user_id])
+            )
+            
+            # =================================================================
             
             await client.run_until_disconnected() 
             
@@ -465,19 +554,16 @@ class TelethonManager:
                 try: await client.disconnect()
                 except: pass
         finally:
-            # Очистка состояния в БД и RAM при остановке
             await self.db.set_telethon_status(user_id, False)
             async with self.tasks_lock:
                 store.active_workers.pop(user_id, None)
-                store.premium_users.discard(user_id)
             logger.info(f"Worker {user_id}: Task execution gracefully finished/stopped.")
 
 
     async def stop_worker(self, user_id: int, silent=False):
-        """Останавливает Telethon Worker, если он активен."""
+        """Останавливает Worker и отключает клиент."""
         async with self.tasks_lock:
             client = store.active_workers.pop(user_id, None)
-            store.premium_users.discard(user_id)
         
         if client:
             logger.info(f"Worker {user_id}: Stopping active worker instance.")
@@ -488,6 +574,48 @@ class TelethonManager:
             await self.db.set_telethon_status(user_id, False)
             if not silent:
                 await self._send_to_bot_user(user_id, "🛑 Worker успешно остановлен.")
+                
+    async def wait_for_qr_scan(self, user_id: int, client: TelegramClient, qr_login: Any, qr_future: asyncio.Future):
+        """Фоновая задача, ожидающая сканирования QR-кода."""
+        try:
+            await client.connect()
+            # Ждем сканирования
+            await qr_login.wait(timeout=65) 
+            
+            # --- АВТОРИЗАЦИЯ УСПЕШНА ---
+            if not qr_future.done():
+                qr_future.set_result(True)
+                
+            try:
+                # Проверяем, авторизован ли пользователь (пропуск 2FA)
+                if await client.is_user_authorized():
+                    logger.info(f"Worker {user_id}: QR login successful. Starting session.")
+                    await self.start_worker_session(user_id, client)
+                else:
+                    raise SessionPasswordNeededError('2FA is required')
+                    
+            except SessionPasswordNeededError:
+                # Если требуется 2FA (QR-код не пропускает этот шаг)
+                await self._send_to_bot_user(user_id, 
+                    "🔒 <b>ТРЕБУЕТСЯ ПАРОЛЬ</b>. Ваш аккаунт защищен двухфакторной аутентификацией. \nПожалуйста, воспользуйтесь 'Входом по номеру телефона' для ввода пароля, так как QR-код не позволяет его ввести.", 
+                    InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
+                )
+                
+        except TimeoutError:
+            if not qr_future.done():
+                qr_future.set_result(False)
+            await self._send_to_bot_user(user_id, "❌ Время ожидания QR-кода истекло (60 сек). Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+        
+        except Exception as e:
+            logger.error(f"QR wait error for {user_id}: {type(e).__name__} - {e}")
+            if not qr_future.done():
+                qr_future.set_result(False)
+            await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+        finally:
+            # Очистка
+            async with store.lock:
+                store.qr_login_future.pop(user_id, None)
+            await self._cleanup_temp_session(user_id)
 
 manager = TelethonManager(bot, db)
 
@@ -498,12 +626,9 @@ manager = TelethonManager(bot, db)
 
 # --- START MENU ---
 async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
-    """Генерирует разметку главного меню."""
     user_data = await db.get_user(user_id)
     is_admin = user_id == ADMIN_ID
     
-    is_active = user_id in store.active_workers
-
     auth_button_text = "🔑 Сменить Аккаунт" if user_data and user_data['telethon_active'] else "🔑 Войти в Telegram"
     
     buttons = [
@@ -518,7 +643,6 @@ async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
-    """Отправляет/редактирует главное меню."""
     markup = await get_main_menu_markup(chat_id)
     user_data = await db.get_user(chat_id)
     
@@ -529,15 +653,15 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
         sub_text = f"✅ Подписка до: <b>{sub_end.strftime('%d.%m.%Y %H:%M')}</b>"
     else:
         sub_text = "❌ Подписка не активна. Активируйте промокод или оплатите."
-        if user_data and user_data['telethon_active']:
-             # Остановка воркера, если подписка истекла, но он активен
+        # Если Worker активен в RAM, но подписка истекла, останавливаем его
+        if user_data and user_data['telethon_active'] and chat_id in store.active_workers:
              await manager.stop_worker(chat_id, silent=True)
              
-    status_worker = "🟢 Активен" if user_data and user_data['telethon_active'] and sub_end and sub_end > now_msk else "🔴 Не активен"
+    status_worker = "🟢 Активен" if chat_id in store.active_workers else "🔴 Не активен"
 
     text = (
         f"👋 <b>Добро пожаловать в StatPro!</b>\n"
-        f"Это ваш личный Worker для сбора и анализа статистики.\n\n"
+        f"Это ваш личный Worker для выполнения команд.\n\n"
         f"⚙️ Статус Worker'а: <b>{status_worker}</b>\n"
         f"📅 Статус подписки: {sub_text}\n\n"
         f"Нажмите <b>'🔑 Войти в Telegram'</b>, чтобы подключить аккаунт и начать работу."
@@ -548,7 +672,6 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
 
 @user_router.message(Command(commands=['start']))
 async def cmd_start(message: Message, state: FSMContext):
-    """USER_ROUTER: Начальная точка входа."""
     await state.clear()
     await send_main_menu(message.chat.id)
 
@@ -556,32 +679,43 @@ async def cmd_start(message: Message, state: FSMContext):
 @user_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth'}))
 @admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'})) 
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
-    """Общий хендлер отмены для User и Admin."""
     user_id = call.from_user.id
     current_state = await state.get_state()
     if current_state:
         await state.clear()
     
-    # Очистка временных данных Telethon (RAM и диск)
+    # Обязательная очистка временной сессии
     await manager._cleanup_temp_session(user_id)
 
     await call.answer() 
     
-    # Переход в админ-панель (только для админа)
     if call.data == 'admin_panel' and user_id == ADMIN_ID:
+        # Редирект в админ-панель
         return await cb_admin_stats(call, state)
         
     await send_main_menu(user_id, call.message.message_id) 
 
-# --- USER: ИНИЦИАЦИЯ АВТОРИЗАЦИИ ---
+# --- USER: ИНИЦИАЦИЯ АВТОРИЗАЦИИ (МЕНЮ ВЫБОРА) ---
 @user_router.callback_query(F.data == "cb_auth_menu")
 async def cb_auth_menu(call: CallbackQuery, state: FSMContext):
-    """Инициирует процесс авторизации через номер телефона."""
     await state.clear() 
-    await state.set_state(TelethonAuth.PHONE)
-    
-    # Удаляем старую временную сессию, если она есть
     await manager._cleanup_temp_session(call.from_user.id)
+    
+    text = "🔑 <b>Выберите способ входа в Telegram:</b>"
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 Вход по QR-коду", callback_data="cb_auth_qr")],
+        [InlineKeyboardButton(text="📞 Вход по номеру телефона", callback_data="cb_auth_phone")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]
+    ])
+    
+    await call.answer()
+    await safe_edit_or_send(call.from_user.id, text, markup, call.message.message_id)
+
+
+# --- USER: ИНИЦИАЦИЯ АВТОРИЗАЦИИ ПО НОМЕРУ ---
+@user_router.callback_query(F.data == "cb_auth_phone")
+async def cb_auth_phone_init(call: CallbackQuery, state: FSMContext):
+    await state.set_state(TelethonAuth.PHONE)
     
     text = (
         "✍️ <b>Шаг 1: Введите номер телефона</b>\n"
@@ -593,26 +727,87 @@ async def cb_auth_menu(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await safe_edit_or_send(call.from_user.id, text, markup, call.message.message_id)
 
+
+# --- USER: ИНИЦИАЦИЯ АВТОРИЗАЦИИ ПО QR ---
+@user_router.callback_query(F.data == "cb_auth_qr")
+async def cb_auth_qr_init(call: CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    
+    await manager._cleanup_temp_session(user_id)
+    
+    # Удаляем меню выбора и отправляем сообщение ожидания
+    await safe_edit_or_send(user_id, "⏳ Генерирую QR-код. Пожалуйста, подождите...", call.message.message_id)
+
+    client = await _new_telethon_client(user_id, is_temp=True)
+    
+    async with store.lock:
+        if user_id in store.temp_auth_clients:
+             try: await store.temp_auth_clients[user_id].disconnect() 
+             except: pass
+        store.temp_auth_clients[user_id] = client 
+
+    try:
+        await client.connect()
+        qr_login = await client.qr_login()
+        
+        # Генерация QR-кода как изображения
+        qr_img = qrcode.make(qr_login.url)
+        
+        # Сохраняем в память (BytesIO) для отправки
+        qr_bytes = BytesIO()
+        qr_img.save(qr_bytes, format='PNG')
+        qr_bytes.seek(0)
+        
+        # Отправляем QR-код как фото
+        await bot.send_photo(
+            chat_id=user_id,
+            photo=qr_bytes,
+            caption=(
+                "📷 <b>Шаг 1: Сканируйте QR-код</b>\n"
+                "Перейдите в <b>Настройки</b> -> <b>Устройства</b> -> <b>Сканировать QR-код</b> в вашем основном приложении Telegram.\n\n"
+                "❗️**Внимание:** Код действует 60 секунд."
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]
+            ])
+        )
+        
+        await state.set_state(TelethonAuth.WAITING_FOR_QR_SCAN)
+        
+        # Создаем Future для ожидания сканирования
+        qr_future = asyncio.get_event_loop().create_future()
+        async with store.lock:
+            store.qr_login_future[user_id] = qr_future
+            
+        # Запускаем фоновую задачу для ожидания сканирования
+        asyncio.create_task(manager.wait_for_qr_scan(user_id, client, qr_login, qr_future), name=f"qr-waiter-{user_id}")
+        
+    except Exception as e:
+        logger.error(f"QR Auth error for {user_id}: {e}")
+        await manager._cleanup_temp_session(user_id)
+        await state.clear()
+        await manager._send_to_bot_user(user_id, "❌ Произошла ошибка при генерации QR-кода. Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+    
+    await call.answer()
+
+
 # --- USER: ШАГ 1 - НОМЕР ТЕЛЕФОНА ---
 @user_router.message(TelethonAuth.PHONE)
 async def msg_auth_phone(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    phone = normalize_phone(message.text) # Используем исправленную функцию normalize_phone
+    phone = normalize_phone(message.text)
     
     if not re.fullmatch(r'\+\d{7,15}', phone):
-        return await message.reply("❌ Некорректный формат номера. Введите, начиная с '+' (например, `+79001234567`).")
+        return await manager._send_to_bot_user(user_id, "❌ Некорректный формат номера. Введите, начиная с '+' (например, `+79001234567`).", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]]))
 
-    await message.answer("⏳ Подключаюсь к Telegram и отправляю код...")
+    await manager._send_to_bot_user(user_id, "⏳ Подключаюсь к Telegram и отправляю код...", message_id=message.message_id) 
 
-    # Создание временного клиента
     client = await _new_telethon_client(user_id, is_temp=True)
 
     try:
         await client.connect()
-        # Отправка кода
         sent_code = await client.send_code_request(phone)
         
-        # Сохранение данных в FSM и RAM
         await state.update_data(phone=phone, sent_code=sent_code)
         await state.set_state(TelethonAuth.CODE)
         
@@ -643,6 +838,7 @@ async def msg_auth_phone(message: Message, state: FSMContext):
         await state.clear()
         await manager._send_to_bot_user(user_id, "❌ Произошла ошибка. Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
     
+    # Отключение клиента, так как в следующем шаге он будет переподключаться
     if client and user_id in store.temp_auth_clients:
         try:
             await client.disconnect() 
@@ -658,12 +854,11 @@ async def msg_auth_code(message: Message, state: FSMContext):
     
     if not code or not data.get('phone') or not data.get('sent_code'):
         await manager._cleanup_temp_session(user_id)
-        return await message.reply("❌ Ошибка данных. Начните авторизацию заново.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
+        return await manager._send_to_bot_user(user_id, "❌ Ошибка данных. Начните авторизацию заново.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
 
     phone = data['phone']
     sent_code = data['sent_code']
     
-    # Получаем временный клиент из RAM
     async with store.lock:
         client = store.temp_auth_clients.get(user_id)
         if not client:
@@ -671,21 +866,18 @@ async def msg_auth_code(message: Message, state: FSMContext):
              await state.clear()
              return await manager._send_to_bot_user(user_id, "❌ Сессия авторизации истекла. Начните заново.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
 
-    await message.answer("⏳ Проверяю код...")
+    await manager._send_to_bot_user(user_id, "⏳ Проверяю код...", message_id=message.message_id)
     
     try:
-        # Повторное подключение для завершения авторизации
         await client.connect()
         
-        # Попытка авторизации с кодом
         await client.sign_in(phone, code, password=None, phone_code_hash=sent_code.phone_code_hash)
         
-        # --- АВТОРИЗАЦИЯ УСПЕШНА ---
+        # --- АВТОРИЗАЦИЯ УСПЕШНА (БЕЗ 2FA) ---
         await state.clear()
         await manager.start_worker_session(user_id, client)
         
     except SessionPasswordNeededError:
-        # Требуется 2FA пароль
         await state.set_state(TelethonAuth.PASSWORD)
         await manager._send_to_bot_user(
             user_id, 
@@ -713,11 +905,10 @@ async def msg_auth_password(message: Message, state: FSMContext):
     data = await state.get_data()
 
     if not password:
-        return await message.reply("❌ Пароль не может быть пустым.")
+        return await manager._send_to_bot_user(user_id, "❌ Пароль не может быть пустым.")
         
     phone = data.get('phone')
     
-    # Получаем временный клиент из RAM
     async with store.lock:
         client = store.temp_auth_clients.get(user_id)
         if not client:
@@ -725,16 +916,14 @@ async def msg_auth_password(message: Message, state: FSMContext):
              await state.clear()
              return await manager._send_to_bot_user(user_id, "❌ Сессия авторизации истекла. Начните заново.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
 
-    await message.answer("⏳ Проверяю пароль...")
+    await manager._send_to_bot_user(user_id, "⏳ Проверяю пароль...", message_id=message.message_id)
 
     try:
-        # Повторное подключение для завершения авторизации
         await client.connect()
         
-        # Попытка авторизации с паролем
         await client.sign_in(phone, password=password)
         
-        # --- АВТОРИЗАЦИЯ УСПЕШНА ---
+        # --- АВТОРИЗАЦИЯ УСПЕШНА (С 2FA) ---
         await state.clear()
         await manager.start_worker_session(user_id, client) 
         
@@ -750,7 +939,6 @@ async def msg_auth_password(message: Message, state: FSMContext):
 # --- USER: АКТИВАЦИЯ ПРОМОКОДА (Инициация) ---
 @user_router.callback_query(F.data == "cb_activate_promo")
 async def cb_activate_promo(call: CallbackQuery, state: FSMContext):
-    """USER_ROUTER: Инициация ввода промокода для активации."""
     await state.set_state(PromoStates.WAITING_CODE)
     
     text = "🎁 <b>Введите промокод для активации:</b>"
@@ -764,7 +952,6 @@ async def cb_activate_promo(call: CallbackQuery, state: FSMContext):
 # --- USER: ОБРАБОТЧИК ВВОДА ПРОМОКОДА (Активация) ---
 @user_router.message(PromoStates.WAITING_CODE)
 async def msg_activate_promo(message: Message, state: FSMContext):
-    """USER_ROUTER: Обрабатывает ввод промокода и активирует подписку."""
     code = message.text.strip().upper()
     user_id = message.from_user.id
     
@@ -773,36 +960,28 @@ async def msg_activate_promo(message: Message, state: FSMContext):
     await state.clear()
     
     if not promo_data or promo_data['uses_left'] == 0:
-        await message.reply("❌ Неверный или использованный промокод.")
+        await manager._send_to_bot_user(user_id, "❌ Неверный или использованный промокод.")
     else:
         await db.use_promocode(code)
         days_added = promo_data['duration_days']
         new_end = await db.update_subscription(user_id, days_added)
         
-        await message.reply(
+        await manager._send_to_bot_user(
+            user_id,
             f"🎉 <b>Промокод активирован!</b>\n"
             f"Вам добавлено {days_added} дней подписки.\n"
             f"Новый срок окончания: <b>{new_end.strftime('%d.%m.%Y %H:%M')}</b>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
         )
         
-        # Проверка сессии перед запуском Worker
         session_path = get_session_path(user_id) + '.session'
-        if not user_id in store.active_workers and os.path.exists(session_path):
+        # Пытаемся запустить Worker, если есть файл сессии
+        if os.path.exists(session_path) and not user_id in store.active_workers:
             await manager.start_client_task(user_id)
         elif not os.path.exists(session_path):
-             await message.answer("⚠️ Подписка активирована, но для запуска Worker'а требуется войти в Telegram (нет файла сессии).")
+             await manager._send_to_bot_user(user_id, "⚠️ Подписка активирована, но для запуска Worker'а требуется войти в Telegram (нет файла сессии).")
             
     
-# --- FALLBACK (USER) ---
-@user_router.callback_query()
-async def cb_fallback_handler_user(call: CallbackQuery, state: FSMContext):
-    """USER_ROUTER: Отказоустойчивый хендлер для необработанных колбэков."""
-    logger.warning(f"User {call.from_user.id}: Unhandled CallbackQuery: {call.data}")
-    await call.answer("🔄 Обновляю меню...", show_alert=False)
-    await state.clear()
-    await send_main_menu(call.from_user.id, call.message.message_id) 
-
 # --- Worker Status and Stop Handlers ---
 @user_router.callback_query(F.data == "cb_worker_stop")
 async def cb_worker_stop(call: CallbackQuery):
@@ -824,19 +1003,31 @@ async def cb_worker_status(call: CallbackQuery, state: FSMContext):
         text = "🔴 Аккаунт не подключен (нет сессии). Пожалуйста, войдите в Telegram."
     elif not sub_end or sub_end <= now_msk:
         text = "⚠️ Подписка истекла. Worker не активен. Продлите подписку."
+        if is_active: # Останавливаем, если запущен, но подписка истекла
+             await manager.stop_worker(user_id, silent=True)
+             is_active = False
     elif is_active:
         text = f"🟢 Worker активен и работает.\nАккаунт подключен.\nПодписка до: <b>{sub_end.strftime('%d.%m.%Y %H:%M')}</b>"
     else:
-        text = "🟡 Аккаунт подключен, подписка активна, но Worker не запущен (возможно, был остановлен вручную). \nДля повторного запуска нажмите `🔑 Сменить Аккаунт` или перезапустите бота."
+        text = "🟡 Аккаунт подключен, подписка активна, но Worker не запущен (возможно, был остановлен вручную).\nНажмите 'Сменить Аккаунт', чтобы перезапустить его."
 
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Остановить Worker", callback_data="cb_worker_stop")] if is_active else [],
+        [InlineKeyboardButton(text="🛑 Остановить Worker", callback_data="cb_worker_stop")] if is_active else 
+        [InlineKeyboardButton(text="🔄 Перезапустить Worker", callback_data="cb_auth_menu")] if session_exists and sub_end and sub_end > now_msk else [],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="cancel_auth")]
     ])
     
     await call.answer()
     await safe_edit_or_send(user_id, text, markup, call.message.message_id)
+
+# --- FALLBACK (USER) ---
+@user_router.callback_query()
+async def cb_fallback_handler_user(call: CallbackQuery, state: FSMContext):
+    logger.warning(f"User {call.from_user.id}: Unhandled CallbackQuery: {call.data}")
+    await call.answer("🔄 Обновляю меню...", show_alert=False)
+    await state.clear()
+    await send_main_menu(call.from_user.id, call.message.message_id) 
 
 
 # =========================================================================
@@ -846,7 +1037,6 @@ async def cb_worker_status(call: CallbackQuery, state: FSMContext):
 # --- ADMIN PANEL START ---
 @admin_router.callback_query(F.data.in_({"admin_stats", "admin_panel"}), F.from_user.id == ADMIN_ID)
 async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
-    """ADMIN_ROUTER: Отображает статистику и главное меню админки."""
     await state.clear()
     stats = await db.get_stats()
     
@@ -926,7 +1116,7 @@ async def msg_admin_promo_days(message: Message, state: FSMContext):
         days = int(message.text.strip())
         if days < 0: raise ValueError("Non-negative days only")
     except ValueError:
-        return await message.reply("❌ Неверный формат. Введите только положительное число дней или 0.")
+        return await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число дней или 0.")
     
     await state.update_data(days=days)
     await state.set_state(AdminPromo.WAITING_USES)
@@ -939,11 +1129,11 @@ async def msg_admin_promo_days(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
     ])
     
-    await message.reply(text, reply_markup=markup)
+    await manager._send_to_bot_user(message.chat.id, text, markup, message.message_id)
 
 @admin_router.message(AdminPromo.WAITING_DAYS, F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_days_invalid(message: Message):
-    await message.reply("❌ Неверный формат. Введите только положительное число дней или 0.")
+    await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число дней или 0.")
 
 
 # --- PROMO CREATE (STEP 3: USES INPUT) ---
@@ -953,7 +1143,7 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
         uses = int(message.text.strip())
         if uses < 0: raise ValueError("Non-negative uses only")
     except ValueError:
-        return await message.reply("❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
+        return await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
 
     data = await state.get_data()
     promo_code = data['promo_code']
@@ -967,11 +1157,12 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
         await db.db_pool.commit()
     except aiosqlite.IntegrityError:
         await state.clear()
-        return await message.reply("❌ Ошибка: Промокод с таким кодом уже существует. Повторите создание.")
+        return await manager._send_to_bot_user(message.chat.id, "❌ Ошибка: Промокод с таким кодом уже существует. Повторите создание.")
     
     await state.clear()
     
-    await message.reply(
+    await manager._send_to_bot_user(
+        message.chat.id,
         f"🎉 <b>Промокод создан!</b>\n\n"
         f"Код: <code>{promo_code}</code>\n"
         f"Срок: {days} д.\n"
@@ -983,13 +1174,12 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
 
 @admin_router.message(AdminPromo.WAITING_USES, F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_uses_invalid(message: Message):
-    await message.reply("❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
+    await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
 
 
 # --- PROMO DELETE (Инициация) ---
 @admin_router.callback_query(F.data == "admin_delete_promo_init", F.from_user.id == ADMIN_ID)
 async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
-    """ADMIN_ROUTER: Инициация ввода промокода для удаления."""
     await state.set_state(PromoStates.WAITING_CODE)
     
     text = "✍️ <b>Введите промокод, который нужно удалить:</b>"
@@ -1002,27 +1192,27 @@ async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
 # --- PROMO DELETE (Обработка ввода) ---
 @admin_router.message(PromoStates.WAITING_CODE, F.from_user.id == ADMIN_ID)
 async def msg_admin_delete_promo(message: Message, state: FSMContext):
-    """ADMIN_ROUTER: Обрабатывает ввод промокода и удаляет его из БД."""
     code = message.text.strip().upper()
     
     try:
-        # Используем выделенный метод db.delete_promocode
         rows_deleted = await db.delete_promocode(code)
     except Exception as e:
         logger.error(f"Admin {message.from_user.id}: Failed to delete promocode {code}: {e}")
-        await message.reply("❌ Произошла ошибка базы данных при удалении промокода.")
+        await manager._send_to_bot_user(message.chat.id, "❌ Произошла ошибка базы данных при удалении промокода.")
         await state.clear()
         return
 
     await state.clear()
     
     if rows_deleted > 0:
-        await message.reply(
+        await manager._send_to_bot_user(
+            message.chat.id,
             f"🗑 <b>Промокод <code>{code}</code> успешно удален.</b>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ В админ-панель", callback_data="admin_stats")]])
         )
     else:
-        await message.reply(
+        await manager._send_to_bot_user(
+            message.chat.id,
             f"❌ Промокод <code>{code}</code> не найден в базе данных.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ В админ-панель", callback_data="admin_stats")]])
         )
@@ -1030,7 +1220,6 @@ async def msg_admin_delete_promo(message: Message, state: FSMContext):
 # --- FALLBACK (ADMIN) ---
 @admin_router.callback_query(F.from_user.id == ADMIN_ID)
 async def cb_fallback_handler_admin(call: CallbackQuery, state: FSMContext):
-    """ADMIN_ROUTER: Отказоустойчивый хендлер для необработанных колбэков админа."""
     logger.warning(f"Admin {call.from_user.id}: Unhandled CallbackQuery: {call.data}")
     await call.answer("🔄 Обновляю меню...", show_alert=False)
     await state.clear()
@@ -1051,7 +1240,6 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     tasks = []
     for user_id in active_users:
         try:
-            # Запуск worker-задачи (внутри start_client_task есть проверка файла сессии)
             task = manager.start_client_task(user_id) 
             if task:
                 tasks.append(task)
@@ -1059,11 +1247,9 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
             logger.error(f"Failed to restore worker {user_id} on startup: {e}")
             await db.set_telethon_status(user_id, False)
 
-    # Дожидаемся завершения всех задач (даже если они упали) для чистого старта
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Регистрация роутеров
     dispatcher.include_router(user_router)
     dispatcher.include_router(admin_router)
     
