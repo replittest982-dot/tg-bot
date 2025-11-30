@@ -4,6 +4,7 @@ import logging.handlers
 import os
 import re
 import random
+import string # Добавлен для генерации промокода
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Union, Set, Any, Tuple
@@ -27,9 +28,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 # --- TELETHON ---
-# ИСПРАВЛЕНО: Убран InputClientQRLogin
 from telethon import TelegramClient, events, errors, functions, utils
-from telethon.tl.types import User, Channel, Chat # <- ИСПРАВЛЕННАЯ СТРОКА
+from telethon.tl.types import User, Channel, Chat
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError, ChatForwardsRestrictedError, PasswordHashInvalidError
 
 # =========================================================================
@@ -44,7 +44,6 @@ API_ID = int(os.getenv("API_ID", 37185453))
 API_HASH = os.getenv("API_HASH")
 
 if not BOT_TOKEN or not API_HASH:
-    # Эта ошибка сработает, если BOT_TOKEN или API_HASH не заданы в .env
     raise ValueError("BOT_TOKEN или API_HASH не найдены в .env файле.")
 
 DB_NAME = 'bot_database.db'
@@ -149,6 +148,10 @@ def to_msk_aware(dt_str: str) -> Optional[datetime]:
 
 def is_valid_phone(phone: str) -> bool:
     return re.match(r'^\+?\d{7,15}$', phone) is not None
+
+def generate_promocode(length: int = 8) -> str:
+    characters = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(characters) for _ in range(length))
 
 # =========================================================================
 # III. БАЗА ДАННЫХ (Полная реализация методов)
@@ -682,6 +685,7 @@ async def cb_admin_stats(call: CallbackQuery):
     
     await call.message.edit_text(text, reply_markup=kb)
 
+# ИЗМЕНЕНО: Новая логика генерации промокода
 @admin_router.message(Command('genpromo'))
 @admin_router.callback_query(F.data == "cmd_genpromo_start")
 async def cmd_genpromo_start(update: Union[Message, CallbackQuery], state: FSMContext):
@@ -689,11 +693,14 @@ async def cmd_genpromo_start(update: Union[Message, CallbackQuery], state: FSMCo
     
     if isinstance(update, CallbackQuery):
         await update.answer()
-        await update.message.delete()
+        # Удаление предыдущего сообщения, чтобы не было ошибок TelegramBadRequest
+        try: await update.message.delete()
+        except: pass
     
     await state.set_state(AdminStates.waiting_for_promo_data)
-    text = "🔑 Введите данные для промокода в формате: `КОД 7 10` (Код, Дни, Использований)\n\n"
-    text += "Пример: `TESTPROMO 30 1`"
+    text = "🔑 **Генерация Промокода**\n\n"
+    text += "Введите данные в формате: `ДНИ ИСПОЛЬЗОВАНИЯ`\n"
+    text += "Пример: `30 5` (30 дней, 5 использований)"
     
     await bot.send_message(update.from_user.id, text)
 
@@ -703,11 +710,11 @@ async def cmd_genpromo_process(message: Message, state: FSMContext):
     await state.clear()
     
     parts = message.text.split()
-    if len(parts) != 3:
-        return await message.answer("❌ Неверный формат. Нужно: `КОД 7 10`")
+    if len(parts) != 2: # Ожидаем только 2 части: Дни и Использования
+        return await message.answer("❌ Неверный формат. Нужно: `ДНИ ИСПОЛЬЗОВАНИЯ` (например, `30 5`).")
         
-    code, days_str, uses_str = parts
-    code = code.upper()
+    days_str, uses_str = parts
+    
     try:
         days = int(days_str)
         uses = int(uses_str)
@@ -717,10 +724,16 @@ async def cmd_genpromo_process(message: Message, state: FSMContext):
     if days <= 0 or uses <= 0:
         return await message.answer("❌ Дни и Использования должны быть положительными.")
         
+    # Генерация уникального промокода
+    generated_code = generate_promocode(10) # 10 символов
+        
     try:
-        await db.db_pool.execute("INSERT OR REPLACE INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)", (code, days, uses))
+        await db.db_pool.execute("INSERT OR REPLACE INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)", (generated_code, days, uses))
         await db.db_pool.commit()
-        await message.answer(f"✅ Промокод **{code}** создан.\nСрок: **{days}** дней. Использований: **{uses}**.")
+        await message.answer(f"✅ Промокод успешно создан!\n\n"
+                             f"**Код:** `{generated_code}`\n"
+                             f"**Срок:** **{days}** дней.\n"
+                             f"**Использований:** **{uses}**.")
     except Exception as e:
         logger.error(f"Error creating promocode: {e}")
         await message.answer("❌ Ошибка при создании промокода.")
@@ -761,10 +774,13 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
         login_token_response = await client(functions.auth.ExportLoginTokenRequest(
             api_id=API_ID,
             api_hash=API_HASH,
-            except_ids=[] # Тут обычно указывается ID, но можно оставить пустым, если не нужно исключать
+            except_ids=[]
         ))
         
-        url = login_token_response.url
+        # ИСПРАВЛЕНИЕ ОШИБКИ: Используем utils.qrcode.url_from_token
+        token = login_token_response.token
+        url = utils.qrcode.url_from_token(token)
+        
         qr_img = qrcode.make(url)
         buf = BytesIO()
         qr_img.save(buf, format='JPEG')
@@ -787,21 +803,21 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
         await bot.send_message(user_id, "❌ Время ожидания QR-кода истекло (120с).")
     except Exception as e:
         logger.error(f"QR Auth error for {user_id}: {e}")
-        await bot.send_message(user_id, f"❌ Ошибка авторизации: {e}")
+        await bot.send_message(user_id, f"❌ Ошибка авторизации: '{e}'")
     finally:
         async with store.lock:
             store.qr_login_future.pop(user_id, None)
             store.temp_auth_clients.pop(user_id, None)
         await state.clear()
         try:
-            # Пытаемся удалить сообщение с QR-кодом, если оно еще есть
+            # Пытаемся удалить сообщение с QR-кодом
             if 'qr_message' in locals():
                  await qr_message.delete()
         except Exception:
             pass
         # Возвращаемся в главное меню, если это не было сделано через auth_success
-        if not state.get_state():
-             await send_main_menu(user_id, state, message=call.message)
+        if not (await state.get_state()):
+             await send_main_menu(user_id, state, call=call) # Возвращаем call, т.к. message был удален
 
 
 # --- FSM Handlers for Promo ---
