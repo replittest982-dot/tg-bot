@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set, Any
 from io import BytesIO
 import concurrent.futures
+import sys
 
 # Third-party Imports
 import aiosqlite
@@ -482,7 +483,8 @@ async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, 
 
 # --- CANCEL Handler ---
 @user_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth'}))
-@admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'}))
+# Хендлер админа также обрабатывает эти колбэки
+@admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'})) 
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     
@@ -508,6 +510,7 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
     # Если это админ-панель, возвращаемся в нее, иначе в главное меню
     if call.data == 'admin_panel' and user_id == ADMIN_ID:
         await call.answer()
+        # Вызов cb_admin_stats, который использует safe_edit_or_send
         return await cb_admin_stats(call, state)
         
     await call.answer() 
@@ -567,9 +570,16 @@ async def cb_activate_promo(call: CallbackQuery, state: FSMContext):
     await safe_edit_or_send(call.from_user.id, text, markup, call.message.message_id)
 
 
-# 4. ОБРАБОТЧИК ВВОДА ПРОМОКОДА 
+# 4. ОБРАБОТЧИК ВВОДА ПРОМОКОДА (ИСПОЛЬЗУЕТСЯ АДМИНКОЙ ДЛЯ УДАЛЕНИЯ!)
 @user_router.message(PromoStates.WAITING_CODE)
 async def msg_activate_promo(message: Message, state: FSMContext):
+    # Примечание: Этот хендлер ловит код, если пользователь находится в PromoStates.WAITING_CODE.
+    # Если это не админ, он активирует промокод. Если это админ, этот код перенаправит его 
+    # в msg_admin_delete_promo, если админ вводил код для удаления, но мы оставим это здесь 
+    # для активации промокода.
+    
+    # ПЕРЕХОД К АДМИНСКОМУ УДАЛЕНИЮ: см. раздел VII
+    
     code = message.text.strip().upper()
     
     promo_data = await db.get_promocode(code)
@@ -589,7 +599,10 @@ async def msg_activate_promo(message: Message, state: FSMContext):
         
         # Если Worker не активен, запускаем его, т.к. появилась подписка
         if not message.from_user.id in store.active_workers:
-            await manager.start_client_task(message.from_user.id)
+            # Убеждаемся, что сессия существует, прежде чем пытаться запустить
+            session_path = get_session_path(message.from_user.id) + '.session'
+            if os.path.exists(session_path):
+                 await manager.start_client_task(message.from_user.id)
             
     await state.clear()
 
@@ -631,6 +644,7 @@ async def cb_fallback_handler(call: CallbackQuery, state: FSMContext):
     logger.warning(f"Unhandled CallbackQuery from user {call.from_user.id}: {call.data}")
     await call.answer("🔄 Обновляю меню...", show_alert=False)
     await state.clear()
+    # Отказоустойчивый возврат в меню
     await send_main_menu(call.from_user.id, call.message.message_id) 
 
 
@@ -638,7 +652,6 @@ async def cb_fallback_handler(call: CallbackQuery, state: FSMContext):
 # VI. TELETHON AUTH LOGIC (Сокращенный)
 # =========================================================================
 
-# (Только для демонстрации, что логика FSM осталась)
 @user_router.message(TelethonAuth.CODE, F.text.regexp(r'^\d{4,5}$'))
 async def msg_auth_code(message: Message, state: FSMContext):
     code = message.text.strip()
@@ -700,7 +713,7 @@ async def msg_auth_code(message: Message, state: FSMContext):
 # --- ADMIN PANEL START ---
 @admin_router.callback_query(F.data.in_({"admin_stats", "admin_panel"}))
 async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
-    # Фильтр на роутере уже гарантирует, что это ADMIN_ID
+    # Фильтр на роутере гарантирует, что это ADMIN_ID
     
     await state.clear()
     stats = await db.get_stats()
@@ -857,13 +870,12 @@ async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
     await safe_edit_or_send(call.from_user.id, text, markup, call.message.message_id)
 
 
+# УСИЛЕНИЕ: Отдельный хендлер для удаления, чтобы не конфликтовать с активацией
 @admin_router.message(PromoStates.WAITING_CODE)
 async def msg_admin_delete_promo(message: Message, state: FSMContext):
-    # Этот хендлер может быть вызван как из админки, так и из обычного меню "Активировать"
-    if message.from_user.id != ADMIN_ID:
-        # Если это не админ, передаем сообщение в обычный обработчик активации
-        return await msg_activate_promo(message, state) 
-
+    # Этот хендлер срабатывает только для ADMIN_ID, когда он находится в состоянии WAITING_CODE.
+    # Это гарантирует, что обычный пользователь, находясь в WAITING_CODE, не сможет вызвать удаление.
+    
     code = message.text.strip().upper()
 
     async with db.db_pool.execute("DELETE FROM promocodes WHERE code=?", (code,)) as cursor:
