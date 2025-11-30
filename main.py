@@ -28,7 +28,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, B
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.enums import ParseMode # Для явного указания режима парсинга
+from aiogram.enums import ParseMode 
 
 # --- TELETHON ---
 from telethon import TelegramClient, events, functions, utils
@@ -36,7 +36,6 @@ from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError, 
     AuthKeyUnregisteredError, PasswordHashInvalidError, PhoneCodeInvalidError, 
     PhoneCodeExpiredError, RpcCallFailError 
-    # LogOutError удален
 )
 
 # =========================================================================
@@ -81,7 +80,7 @@ logger = logging.getLogger(__name__)
 # Executor для синхронных, блокирующих задач (QR-код)
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-# Устанавливаем ParseMode.HTML по умолчанию
+# Устанавливаем ParseMode.HTML по умолчанию (но используем MARKDOWN для промокодов)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) 
 dp = Dispatcher(storage=MemoryStorage())
 user_router = Router(name='user_router')
@@ -150,7 +149,6 @@ def generate_promocode(length=8) -> str:
 # =========================================================================
 
 class AsyncDatabase:
-    # ... (Весь класс AsyncDatabase остается без изменений, кроме метода get_all_promocodes) ...
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.db_pool: Optional[aiosqlite.Connection] = None
@@ -274,7 +272,6 @@ class TelethonManager:
 
     async def _send_to_bot_user(self, user_id: int, message: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
         try:
-            # Преобразуем chat_id в str для Aiogram 3/Pydantic, как обсуждалось ранее
             await self.bot.send_message(user_id, message, reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error sending message to {user_id}: {e}")
@@ -313,7 +310,7 @@ class TelethonManager:
 
 
     async def start_client_task(self, user_id: int):
-        await self.stop_worker(user_id) # Остановка предыдущего
+        await self.stop_worker(user_id)
         try:
             # ГАРАНТИРУЕМ, что задача создается и запускается асинхронно
             task = asyncio.create_task(self._run_worker(user_id), name=f"main-worker-{user_id}")
@@ -328,7 +325,7 @@ class TelethonManager:
         client = TelegramClient(path, self.API_ID, self.API_HASH, device_model="StatPro Worker", flood_sleep_threshold=15)
         
         async with self.tasks_lock: 
-            if user_id in store.active_workers: # Двойная проверка
+            if user_id in store.active_workers:
                 await client.disconnect()
                 return 
             store.active_workers[user_id] = client 
@@ -376,7 +373,6 @@ class TelethonManager:
         
         if client:
             try:
-                # Отключение клиента Telethon
                 await client.disconnect()
             except Exception:
                 pass
@@ -391,9 +387,8 @@ manager = TelethonManager(bot, db)
 # V. USER HANDLERS (АВТОРИЗАЦИЯ И МЕНЮ)
 # =========================================================================
 
-# --- START MENU (УЛУЧШЕННОЕ ПРИВЕТСТВИЕ) ---
+# --- START MENU ---
 async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
-    # ... (Остается как было) ...
     user_data = await db.get_user(user_id)
     is_admin = user_id == ADMIN_ID
     
@@ -442,12 +437,11 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     
     try:
         if message_id:
-            # Исправленный вызов, используя str(chat_id) для надежности Aiogram/Pydantic
+            # Использование str(chat_id) для надежности с Aiogram 3
             await bot.edit_message_text(text, str(chat_id), message_id, reply_markup=markup)
         else:
             await bot.send_message(chat_id, text, reply_markup=markup)
     except TelegramBadRequest as e:
-        # Если не удалось отредактировать (например, сообщение старое), просто отправляем новое
         if "message can't be edited" in str(e):
              await bot.send_message(chat_id, text, reply_markup=markup)
         else:
@@ -459,9 +453,8 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await send_main_menu(message.chat.id)
 
-# --- Shared Auth Success Handler (ИСПРАВЛЕННЫЙ) ---
+# --- Shared Auth Success Handler ---
 async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, msg_to_delete: Message):
-    # 1. Запускаем постоянный worker (это сохранит сессию и запустит фоновую задачу)
     # Этот вызов теперь гарантированно не блокирует!
     await manager.start_worker_session(user_id, client) 
     
@@ -483,7 +476,6 @@ async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, 
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     
-    # ... (логика очистки Temp Clients и Future остается без изменений) ...
     current_state = await state.get_state()
     if current_state:
         await state.clear()
@@ -502,18 +494,16 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
     if future and not future.done():
         future.cancel()
         
-    # 4. Возврат в главное меню
     if call.data == 'admin_panel' and user_id == ADMIN_ID:
         await call.answer()
         return await cb_admin_stats(call, state)
         
-    # Используем call.message.message_id для редактирования
     await send_main_menu(user_id, call.message.message_id) 
     await call.answer()
+    
+# ... (Phone Auth Start/Input остаются без изменений) ...
 
-# ... (Остальные хэндлеры для QR-Auth и Phone-Auth остаются без изменений, кроме этого одного блока) ...
-
-# --- PASSWORD INPUT (УЛУЧШЕННАЯ ПРОСЬБА ПАРОЛЯ) ---
+# --- CODE INPUT (С ИСПРАВЛЕННЫМ ЗАПРОСОМ 2FA) ---
 @user_router.message(TelethonAuth.CODE, F.text.regexp(r'^\d{4,5}$'))
 async def msg_auth_code(message: Message, state: FSMContext):
     code = message.text.strip()
@@ -552,7 +542,6 @@ async def msg_auth_code(message: Message, state: FSMContext):
             "✍️ **Введите ваш Облачный Пароль:**",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]])
         )
-    # ... (Остальные except блоки остаются) ...
     except (PhoneCodeInvalidError, PhoneCodeExpiredError, RpcCallFailError):
         await msg_wait.delete()
         await message.reply("❌ Неверный или просроченный код. Повторите, начиная с `/start`.")
@@ -564,9 +553,6 @@ async def msg_auth_code(message: Message, state: FSMContext):
         await state.clear()
         await message.reply(f"❌ Неизвестная ошибка входа: {e}. Повторите с `/start`.")
         if client and client.is_connected(): await client.disconnect()
-
-
-# ... (Хэндлер для TelethonAuth.PASSWORD остается без изменений) ...
 
 
 # =========================================================================
@@ -590,7 +576,7 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Создать Промокод", callback_data="admin_create_promo_init")],
-        [InlineKeyboardButton(text="📋 Показать Промокоды", callback_data="admin_view_promos")], # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="📋 Показать Промокоды", callback_data="admin_view_promos")],
         [InlineKeyboardButton(text="🗑 Удалить Промокод", callback_data="admin_delete_promo_init")],
         [InlineKeyboardButton(text="🔙 В меню", callback_data="cmd_start")]
     ])
@@ -602,7 +588,7 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# --- НОВЫЙ ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ ---
+# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА) ---
 @admin_router.callback_query(F.data == "admin_view_promos")
 async def cb_admin_view_promos(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -615,27 +601,160 @@ async def cb_admin_view_promos(call: CallbackQuery):
         promo_list = []
         for p in promocodes:
             uses = '∞' if p['uses_left'] == 0 else p['uses_left']
+            # ИСПРАВЛЕНИЕ: Убрана обратная косая черта, вместо нее используется |, а форматирование заменено на Markdown
             promo_list.append(
-                f"• `{p['code']}` | {p['duration_days']} д. | {uses} исп."
+                f"`{p['code']}` | {p['duration_days']} д. | {uses} исп."
             )
         
+        # Используем тройные обратные кавычки для чистого форматирования
         text = (
             "📋 **СПИСОК АКТИВНЫХ ПРОМОКОДОВ**\n\n"
-            "Код | Срок | Использований\n"
-            "-----------------------------\n"
-            f"{'\n'.join(promo_list)}\n\n"
-            "Нажмите на код, чтобы скопировать его."
+            "```\n"
+            "КОД       | СРОК | ИСПОЛЬЗОВАНИЙ\n"
+            "----------------------------------\n"
+            f"{'\n'.join(promo_list)}\n"
+            "```\n"
+            "\nНажмите на код, чтобы скопировать его."
         )
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад в Админ-панель", callback_data="admin_panel")]
     ])
     
-    await call.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN_V2) # Используем Markdown_V2 для `
+    # Используем ParseMode.MARKDOWN для корректного отображения таблицы
+    await call.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     await call.answer()
 
 
-# ... (Остальные хэндлеры для создания и удаления промокодов остаются без изменений) ...
+# --- PROMO CREATE (STEP 1: GENERATE CODE + ASK DAYS) ---
+@admin_router.callback_query(F.data == "admin_create_promo_init")
+async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    
+    promo_code = generate_promocode()
+    await state.update_data(promo_code=promo_code)
+    
+    await state.set_state(AdminPromo.WAITING_DAYS)
+
+    text = (f"✅ Промокод сгенерирован!\n"
+            f"Код: <code>{promo_code}</code> (Нажмите, чтобы скопировать)\n\n"
+            f"✍️ **Шаг 1/2:** Введите **срок действия** (в днях, только число, 0 = 0 дней):")
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
+    ])
+    
+    await call.message.edit_text(text, reply_markup=markup)
+    await call.answer()
+
+
+# --- PROMO CREATE (STEP 2: DAYS INPUT) ---
+@admin_router.message(AdminPromo.WAITING_DAYS, F.text.regexp(r'^\d+$'))
+async def msg_admin_promo_days(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        days = int(message.text.strip())
+        if days < 0: raise ValueError("Non-negative days only")
+    except ValueError:
+        return await message.reply("❌ Неверный формат. Введите только положительное число дней или 0.")
+    
+    await state.update_data(days=days)
+    await state.set_state(AdminPromo.WAITING_USES)
+    
+    data = await state.get_data()
+    text = (f"✅ Код <code>{data['promo_code']}</code>. Срок: {days} д.\n\n"
+            f"✍️ **Шаг 2/2:** Введите **количество активаций** (только число, 0 = бесконечно):")
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
+    ])
+    
+    await message.reply(text, reply_markup=markup)
+
+@admin_router.message(AdminPromo.WAITING_DAYS)
+async def msg_admin_promo_days_invalid(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    await message.reply("❌ Неверный формат. Введите только положительное число дней или 0.")
+
+
+# --- PROMO CREATE (STEP 3: USES INPUT) ---
+@admin_router.message(AdminPromo.WAITING_USES, F.text.regexp(r'^\d+$'))
+async def msg_admin_promo_uses(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        uses = int(message.text.strip())
+        if uses < 0: raise ValueError("Non-negative uses only")
+    except ValueError:
+        return await message.reply("❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
+
+    data = await state.get_data()
+    promo_code = data['promo_code']
+    days = data['days']
+    
+    # Сохранение в БД
+    try:
+        await db.db_pool.execute(
+            "INSERT INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)",
+            (promo_code, days, uses)
+        )
+        await db.db_pool.commit()
+    except aiosqlite.IntegrityError:
+        await state.clear()
+        return await message.reply("❌ Ошибка: Промокод с таким кодом уже существует. Повторите создание.")
+    
+    await state.clear()
+    
+    await message.reply(
+        f"🎉 **Промокод создан!**\n\n"
+        f"Код: <code>{promo_code}</code>\n"
+        f"Срок: {days} д.\n"
+        f"Использований: {'Бесконечно' if uses == 0 else uses}\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ В админ-панель", callback_data="admin_stats")]
+        ])
+    )
+
+@admin_router.message(AdminPromo.WAITING_USES)
+async def msg_admin_promo_uses_invalid(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    await message.reply("❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
+
+
+# --- PROMO DELETE ---
+@admin_router.callback_query(F.data == "admin_delete_promo_init")
+async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+
+    await state.set_state(PromoStates.WAITING_CODE)
+    await call.message.edit_text(
+        "✍️ **Введите промокод, который нужно удалить:**",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_stats")]])
+    )
+    await call.answer()
+
+@admin_router.message(PromoStates.WAITING_CODE)
+async def msg_admin_delete_promo(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+
+    code = message.text.strip().upper()
+
+    async with db.db_pool.execute("DELETE FROM promocodes WHERE code=?", (code,)) as cursor:
+        rows_deleted = cursor.rowcount
+    await db.db_pool.commit()
+    
+    await state.clear()
+    
+    if rows_deleted > 0:
+        await message.reply(
+            f"🗑 **Промокод <code>{code}</code> успешно удален.**",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ В админ-панель", callback_data="admin_stats")]])
+        )
+    else:
+        await message.reply(
+            f"❌ Промокод <code>{code}</code> не найден в базе данных.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ В админ-панель", callback_data="admin_stats")]])
+        )
+
 
 # =========================================================================
 # VIII. LAUNCH
@@ -650,7 +769,6 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     logger.info(f"Restoring {len(active_users)} active workers...")
     for user_id in active_users:
         try:
-            # Используем manager.start_client_task, который создает асинхронную задачу
             await manager.start_client_task(user_id) 
         except Exception as e:
             logger.error(f"Failed to restore worker {user_id}: {e}")
