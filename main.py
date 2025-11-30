@@ -27,7 +27,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.enums import ParseMode 
 
 # --- TELETHON ---
-from telethon import TelegramClient, functions, utils
+from telethon import TelegramClient, utils
 from telethon.errors import (
     FloodWaitError, SessionPasswordNeededError, 
     AuthKeyUnregisteredError, PhoneCodeInvalidError, 
@@ -72,7 +72,7 @@ def setup_logging():
 setup_logging() 
 logger = logging.getLogger(__name__)
 
-# Executor для синхронных задач (для QR-кода, оставлен как заглушка, но не используется)
+# Executor для синхронных задач (заглушка)
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 # --- Инициализация Aiogram Роутеров ---
@@ -80,7 +80,7 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 
 user_router = Router(name='user_router')
-# ADMIN ROUTER: Строгая фильтрация по ID администратора
+# Строгая фильтрация по ID администратора
 admin_router = Router(name='admin_router', filters=[F.from_user.id == ADMIN_ID])
 
 # =========================================================================
@@ -287,17 +287,20 @@ class TelethonManager:
         await safe_edit_or_send(user_id, message, reply_markup, bot_instance=self.bot)
     
     async def start_worker_session(self, user_id: int, client: TelegramClient):
-        """Завершает авторизацию: переносит временную сессию в постоянную и запускает воркер."""
+        """
+        Завершает авторизацию: переносит временную сессию в постоянную, 
+        удаляет временные файлы и запускает воркер.
+        """
         path_perm_base = get_session_path(user_id)
         path_temp_base = get_session_path(user_id, is_temp=True)
         path_perm = path_perm_base + '.session'
         path_temp = path_temp_base + '.session'
 
-        # Очистка временных клиентов
+        # Очистка временных клиентов из RAM
         async with store.lock:
             store.temp_auth_clients.pop(user_id, None)
 
-        # Отключение клиента, если он еще подключен (важно перед переименованием)
+        # Отключение клиента перед переименованием
         if client:
             try:
                 if await client.is_connected(): await client.disconnect()
@@ -306,14 +309,15 @@ class TelethonManager:
 
         if os.path.exists(path_temp):
             logger.info(f"Worker {user_id}: Found temp session. Moving to permanent.")
-            # Перенос временного файла сессии в постоянный
+            
+            # Удаление старой постоянной сессии, если существует
             if os.path.exists(path_perm): 
                 os.remove(path_perm)
                 logger.warning(f"Worker {user_id}: Overwrote existing permanent session.")
             
             os.rename(path_temp, path_perm)
             
-            # Проверка: успешный перенос файла сессии - КРИТИЧЕСКИ ВАЖНО
+            # Проверка и запуск
             if os.path.exists(path_perm): 
                 logger.info(f"Worker {user_id}: Session moved successfully. Starting task.")
                 await self.start_client_task(user_id) 
@@ -336,7 +340,7 @@ class TelethonManager:
         
         session_path = get_session_path(user_id) + '.session'
         if not os.path.exists(session_path):
-             logger.warning(f"Worker {user_id}: Attempted to start, but permanent session file not found at {session_path}")
+             logger.warning(f"Worker {user_id}: Attempted to start, but permanent session file not found.")
              await self.db.set_telethon_status(user_id, False)
              return
              
@@ -355,7 +359,7 @@ class TelethonManager:
         
         async with self.tasks_lock: 
             if user_id in store.active_workers:
-                logger.warning(f"Worker {user_id}: Duplicate task detected. Disconnecting old client.")
+                logger.warning(f"Worker {user_id}: Duplicate task detected. Disconnecting new client.")
                 await client.disconnect()
                 return 
             store.active_workers[user_id] = client 
@@ -363,6 +367,7 @@ class TelethonManager:
         try:
             await client.connect()
             if not await client.is_user_authorized(): 
+                logger.error(f"Worker {user_id}: Client is not authorized after connection attempt.")
                 raise AuthKeyUnregisteredError('Session expired or unauthorized')
 
             sub_end = await self.db.get_subscription_status(user_id)
@@ -380,7 +385,7 @@ class TelethonManager:
             await client.run_until_disconnected() 
             
         except AuthKeyUnregisteredError:
-            logger.error(f"Worker {user_id}: Session expired (AuthKeyUnregisteredError).")
+            logger.error(f"Worker {user_id}: Session expired (AuthKeyUnregisteredError). Deleting session file.")
             await self._send_to_bot_user(user_id, "❌ Сессия истекла/отозвана. Требуется повторный вход.")
             session_file = path + '.session'
             if os.path.exists(session_file): os.remove(session_file)
@@ -390,7 +395,7 @@ class TelethonManager:
             await self._send_to_bot_user(user_id, f"⚠️ FloodWait. Worker будет остановлен на {e.seconds} секунд.")
             await self.db.set_telethon_status(user_id, False)
         except Exception as e:
-            logger.error(f"Worker {user_id} error: {type(e).__name__} - {e}")
+            logger.error(f"Worker {user_id} unhandled error: {type(e).__name__} - {e}")
             if client and client.is_connected(): 
                 try: await client.disconnect()
                 except: pass
@@ -400,7 +405,7 @@ class TelethonManager:
             async with self.tasks_lock:
                 store.active_workers.pop(user_id, None)
                 store.premium_users.discard(user_id)
-            logger.info(f"Worker {user_id}: Task execution finished.")
+            logger.info(f"Worker {user_id}: Task execution gracefully finished/stopped.")
 
 
     async def stop_worker(self, user_id: int, silent=False):
@@ -410,11 +415,11 @@ class TelethonManager:
             store.premium_users.discard(user_id)
         
         if client:
-            logger.info(f"Worker {user_id}: Stopping active worker.")
+            logger.info(f"Worker {user_id}: Stopping active worker instance.")
             try:
                 await client.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Worker {user_id}: Error during client disconnect: {e}")
             await self.db.set_telethon_status(user_id, False)
             if not silent:
                 await self._send_to_bot_user(user_id, "🛑 Worker успешно остановлен.")
@@ -427,7 +432,6 @@ manager = TelethonManager(bot, db)
 # =========================================================================
 
 # --- START MENU (Опущено для краткости) ---
-# ... (функции формирования и отправки меню) ...
 async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
     user_data = await db.get_user(user_id)
     is_admin = user_id == ADMIN_ID
@@ -568,7 +572,7 @@ async def cb_fallback_handler_user(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await send_main_menu(call.from_user.id, call.message.message_id) 
 
-# --- Заглушки для Auth (для минимальной функциональности) ---
+# --- Заглушки для Auth ---
 @user_router.callback_query(F.data == "cb_auth_menu")
 async def cb_auth_menu(call: CallbackQuery, state: FSMContext):
     await call.answer()
@@ -816,14 +820,14 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     await db.init()
     
     active_users = await db.get_active_telethon_users()
-    logger.info(f"Restoring {len(active_users)} workers from database...")
+    logger.info(f"Restoring {len(active_users)} workers from database for re-check and startup.")
     
     for user_id in active_users:
         try:
             # Запуск worker-задачи (внутри start_client_task есть проверка файла сессии)
             await manager.start_client_task(user_id) 
         except Exception as e:
-            logger.error(f"Failed to restore worker {user_id}: {e}")
+            logger.error(f"Failed to restore worker {user_id} on startup: {e}")
             await db.set_telethon_status(user_id, False)
 
     # Регистрация роутеров
