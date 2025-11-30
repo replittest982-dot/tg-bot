@@ -27,7 +27,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile, CallbackQuery
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.enums import ParseMode 
 
 # --- TELETHON ---
@@ -411,7 +411,7 @@ async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ИСПРАВЛЕН: Добавлена обработка TelegramBadRequest
+# ИСПРАВЛЕН: Теперь отлавливает любые TelegramAPIError при редактировании.
 async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     markup = await get_main_menu_markup(chat_id)
     user_data = await db.get_user(chat_id)
@@ -440,16 +440,19 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     )
     
     try:
+        # 1. Пытаемся отредактировать сообщение (если оно есть)
         if message_id:
             await bot.edit_message_text(text, str(chat_id), message_id, reply_markup=markup)
         else:
             await bot.send_message(chat_id, text, reply_markup=markup)
             
-    except TelegramBadRequest as e:
-        logger.warning(f"TelegramBadRequest in send_main_menu: {e}")
-        # Если редактирование не удалось (из-за Business connection или др.), ОТПРАВЛЯЕМ НОВОЕ СООБЩЕНИЕ
-        # Это гарантирует, что кнопки всегда работают.
-        await bot.send_message(chat_id, text, reply_markup=markup)
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError (Edit/Send) in send_main_menu: {e}. Attempting to send new message.")
+        # 2. При любой ошибке API (включая Bad Request), отправляем новое сообщение
+        try:
+             await bot.send_message(chat_id, text, reply_markup=markup)
+        except Exception as e_send:
+             logger.error(f"FATAL: Failed to send new message after edit failure: {e_send}")
 
 
 @user_router.message(Command(commands=['start']))
@@ -465,14 +468,14 @@ async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, 
     
     try:
         await msg_to_delete.delete()
-    except TelegramBadRequest:
+    except TelegramAPIError:
         pass
     
     await send_main_menu(user_id)
 
 
 # --- CANCEL Handler ---
-# ИСПРАВЛЕН: Добавлена обработка TelegramBadRequest
+# ИСПРАВЛЕН: Агрессивная обработка ошибок, чтобы кнопки работали.
 @user_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth'}))
 @admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'}))
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
@@ -500,14 +503,11 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return await cb_admin_stats(call, state)
         
-    await call.answer() # Отвечаем на колбэк, чтобы убрать часы
+    # Сначала отвечаем на колбэк, чтобы убрать часы
+    await call.answer() 
     
-    try:
-        # Пытаемся отредактировать сообщение, вызвавшее колбэк
-        await send_main_menu(user_id, call.message.message_id) 
-    except TelegramBadRequest:
-        # Если не можем редактировать, отправляем новое сообщение
-        await send_main_menu(user_id) 
+    # Теперь вызываем send_main_menu, которая содержит логику отказоустойчивости
+    await send_main_menu(user_id, call.message.message_id) 
     
 # ... (Остальные функции авторизации) ...
 
@@ -569,6 +569,7 @@ async def msg_auth_code(message: Message, state: FSMContext):
 # =========================================================================
 
 # --- ADMIN PANEL START ---
+# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data.in_({"admin_stats", "admin_panel"}))
 async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return await call.answer("🛑 Доступ запрещен.", show_alert=True)
@@ -590,15 +591,15 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="🔙 В меню", callback_data="cmd_start")]
     ])
     
+    await call.answer()
     try:
         await call.message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
-        # Редактируем, если не удалось, из-за Business connection или др.
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_admin_stats: {e}. Sending new message.")
         await call.message.answer(text, reply_markup=markup)
-    await call.answer()
 
 
-# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: ИСПОЛЬЗУЕТСЯ .format() для обхода SyntaxError) ---
+# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: .format() и агрессивная обработка ошибок) ---
 @admin_router.callback_query(F.data == "admin_view_promos")
 async def cb_admin_view_promos(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -612,7 +613,7 @@ async def cb_admin_view_promos(call: CallbackQuery):
         for p in promocodes:
             uses = '∞' if p['uses_left'] == 0 else p['uses_left']
             
-            # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Используется .format() вместо f-строки
+            # Используется .format()
             promo_line = "• <code>{}</code> | {} д. | {} исп.".format(
                 p['code'], p['duration_days'], uses
             )
@@ -633,15 +634,16 @@ async def cb_admin_view_promos(call: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад в Админ-панель", callback_data="admin_panel")]
     ])
     
-    # Используем ParseMode.HTML (по умолчанию)
+    await call.answer()
     try:
         await call.message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_admin_view_promos: {e}. Sending new message.")
         await call.message.answer(text, reply_markup=markup)
-    await call.answer()
 
 
 # --- PROMO CREATE (STEP 1: GENERATE CODE + ASK DAYS) ---
+# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data == "admin_create_promo_init")
 async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
@@ -659,11 +661,12 @@ async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
     ])
     
+    await call.answer()
     try:
         await call.message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_admin_create_promo_init: {e}. Sending new message.")
         await call.message.answer(text, reply_markup=markup)
-    await call.answer()
 
 
 # --- PROMO CREATE (STEP 2: DAYS INPUT) ---
@@ -739,6 +742,7 @@ async def msg_admin_promo_uses_invalid(message: Message):
 
 
 # --- PROMO DELETE ---
+# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data == "admin_delete_promo_init")
 async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
@@ -748,11 +752,12 @@ async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
     text = "✍️ <b>Введите промокод, который нужно удалить:</b>"
     markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_stats")]])
     
+    await call.answer()
     try:
         await call.message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_admin_delete_promo_init: {e}. Sending new message.")
         await call.message.answer(text, reply_markup=markup)
-    await call.answer()
 
 
 @admin_router.message(PromoStates.WAITING_CODE)
