@@ -116,7 +116,6 @@ class PromoStates(StatesGroup):
     WAITING_CODE = State()
 
 class AdminStates(StatesGroup):
-    # Новые состояния для инлайн-создания промокода
     SELECT_DAYS = State()
     SELECT_USES = State()
     waiting_for_broadcast_message = State()
@@ -235,11 +234,6 @@ class AsyncDatabase:
         await self.db_pool.execute("UPDATE users SET telethon_active=? WHERE user_id=?", (1 if status else 0, user_id))
         await self.db_pool.commit()
         
-    async def ban_user(self, user_id: int, is_banned: bool):
-        if not self.db_pool: return
-        await self.db_pool.execute("UPDATE users SET is_banned=? WHERE user_id=?", (1 if is_banned else 0, user_id))
-        await self.db_pool.commit()
-
     async def get_active_telethon_users(self) -> List[int]: 
         if not self.db_pool: return []
         now_str = datetime.now(TIMEZONE_MSK).strftime('%Y-%m-%d %H:%M:%S')
@@ -267,12 +261,6 @@ class AsyncDatabase:
         await self.db_pool.execute("UPDATE drop_sessions SET status=?, last_status_time=? WHERE phone=?", (new_status, now_str, old_phone))
         await self.db_pool.commit()
         return True
-
-    async def cleanup_old_sessions(self, days: int = 30):
-        if not self.db_pool: return
-        cutoff = (datetime.now(TIMEZONE_MSK) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
-        await self.db_pool.execute("UPDATE drop_sessions SET status='deleted' WHERE last_status_time < ?", (cutoff,))
-        await self.db_pool.commit()
         
     async def get_stats(self) -> Dict[str, Any]:
         if not self.db_pool: return {}
@@ -484,6 +472,21 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
 
     try:
         await client.connect()
+        
+        # --- НОВЫЙ ОБРАБОТЧИК ДЛЯ QR-АВТОРИЗАЦИИ (ФИКС) ---
+        @client.on(events.NewMessage)
+        async def qr_auth_check(event):
+            try:
+                # Проверка, что клиент авторизован. Если 2FA нужен, то эта проверка сработает 
+                # только после ввода 2FA на телефоне.
+                if await client.is_user_authorized():
+                    if user_id in store.qr_login_future and not store.qr_login_future[user_id].done():
+                        store.qr_login_future[user_id].set_result(True)
+                        client.remove_event_handler(qr_auth_check) 
+            except Exception:
+                pass 
+        # ---------------------------------------------
+        
         # ✅ ИСПРАВЛЕННАЯ ЛОГИКА ГЕНЕРАЦИИ URL
         login_token_response = await client(functions.auth.ExportLoginTokenRequest(api_id=API_ID, api_hash=API_HASH, except_ids=[]))
         token_base64 = base64.urlsafe_b64encode(login_token_response.token).decode('utf-8').rstrip('=')
@@ -494,12 +497,13 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
         qr.save(buf, format='JPEG')
         qr_data = BufferedInputFile(buf.getvalue(), filename='qr.jpg')
         
+        # Удаляем предыдущее сообщение, чтобы не засорять чат
         await call.message.delete()
         
         future = asyncio.Future()
         async with store.lock: store.qr_login_future[user_id] = future
         
-        msg = await bot.send_photo(user_id, qr_data, caption="📸 <b>Отсканируйте QR в Telegram</b>\n\nНастройки -> Устройства -> Подключить.\nТаймер: 120 сек.", 
+        msg = await bot.send_photo(user_id, qr_data, caption="📸 <b>Отсканируйте QR в Telegram</b>\n\nНастройки -> Устройства -> Подключить.\nТаймер: 120 сек. Если у вас 2FA, введите его на телефоне.", 
                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cmd_start")]]))
 
         await asyncio.wait_for(future, timeout=QR_TIMEOUT)
@@ -597,10 +601,18 @@ async def promo_code_input(message: Message, state: FSMContext):
 async def cb_admin_stats(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
     stats = await db.get_stats()
-    text = (f"📊 <b>Статистика</b>\n\n"
-            f"Всего юзеров: {stats['total_users']}\n"
-            f"Активных Worker: {stats['active_workers_db']}\n"
-            f"Активных Drops: {stats['active_drops']}")
+
+    tasks_running = sum(len(tasks) for tasks in store.worker_tasks.values())
+    
+    text = (f"📊 <b>Административная Статистика</b>\n\n"
+            f"👥 <b>Пользователи</b>\n"
+            f" • Всего в DB: <b>{stats['total_users']}</b>\n"
+            f" • Активных Worker'ов (DB): <b>{stats['active_workers_db']}</b>\n"
+            
+            "\n🤖 <b>Worker'ы (RAM)</b>\n"
+            f" • Активных Worker'ов: <b>{stats['active_workers_ram']}</b>\n"
+            f" • Активных задач: <b>{tasks_running}</b>\n"
+            f" • Активных Drops: <b>{stats['active_drops']}</b>") # Обновленный текст статистики
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Создать Промокод", callback_data="admin_create_promo_init")],
