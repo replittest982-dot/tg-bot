@@ -411,6 +411,7 @@ async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# ИСПРАВЛЕН: Добавлена обработка TelegramBadRequest
 async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     markup = await get_main_menu_markup(chat_id)
     user_data = await db.get_user(chat_id)
@@ -443,11 +444,12 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
             await bot.edit_message_text(text, str(chat_id), message_id, reply_markup=markup)
         else:
             await bot.send_message(chat_id, text, reply_markup=markup)
+            
     except TelegramBadRequest as e:
-        if "message can't be edited" in str(e):
-             await bot.send_message(chat_id, text, reply_markup=markup)
-        else:
-            logger.warning(f"TelegramBadRequest in send_main_menu: {e}")
+        logger.warning(f"TelegramBadRequest in send_main_menu: {e}")
+        # Если редактирование не удалось (из-за Business connection или др.), ОТПРАВЛЯЕМ НОВОЕ СООБЩЕНИЕ
+        # Это гарантирует, что кнопки всегда работают.
+        await bot.send_message(chat_id, text, reply_markup=markup)
 
 
 @user_router.message(Command(commands=['start']))
@@ -470,6 +472,7 @@ async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, 
 
 
 # --- CANCEL Handler ---
+# ИСПРАВЛЕН: Добавлена обработка TelegramBadRequest
 @user_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth'}))
 @admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'}))
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
@@ -497,10 +500,17 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return await cb_admin_stats(call, state)
         
-    await send_main_menu(user_id, call.message.message_id) 
-    await call.answer()
+    await call.answer() # Отвечаем на колбэк, чтобы убрать часы
     
-# ... (Phone Auth Start/Input остаются без изменений) ...
+    try:
+        # Пытаемся отредактировать сообщение, вызвавшее колбэк
+        await send_main_menu(user_id, call.message.message_id) 
+    except TelegramBadRequest:
+        # Если не можем редактировать, отправляем новое сообщение
+        await send_main_menu(user_id) 
+    
+# ... (Остальные функции авторизации) ...
+
 
 # --- CODE INPUT (С ИСПРАВЛЕННЫМ ЗАПРОСОМ 2FA) ---
 @user_router.message(TelethonAuth.CODE, F.text.regexp(r'^\d{4,5}$'))
@@ -583,11 +593,12 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     try:
         await call.message.edit_text(text, reply_markup=markup)
     except TelegramBadRequest:
-        pass 
+        # Редактируем, если не удалось, из-за Business connection или др.
+        await call.message.answer(text, reply_markup=markup)
     await call.answer()
 
 
-# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: ИСПОЛЬЗУЕТСЯ .format()) ---
+# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: ИСПОЛЬЗУЕТСЯ .format() для обхода SyntaxError) ---
 @admin_router.callback_query(F.data == "admin_view_promos")
 async def cb_admin_view_promos(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -623,7 +634,10 @@ async def cb_admin_view_promos(call: CallbackQuery):
     ])
     
     # Используем ParseMode.HTML (по умолчанию)
-    await call.message.edit_text(text, reply_markup=markup)
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        await call.message.answer(text, reply_markup=markup)
     await call.answer()
 
 
@@ -645,7 +659,10 @@ async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
     ])
     
-    await call.message.edit_text(text, reply_markup=markup)
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        await call.message.answer(text, reply_markup=markup)
     await call.answer()
 
 
@@ -727,11 +744,16 @@ async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
 
     await state.set_state(PromoStates.WAITING_CODE)
-    await call.message.edit_text(
-        "✍️ <b>Введите промокод, который нужно удалить:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_stats")]])
-    )
+    
+    text = "✍️ <b>Введите промокод, который нужно удалить:</b>"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_stats")]])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        await call.message.answer(text, reply_markup=markup)
     await call.answer()
+
 
 @admin_router.message(PromoStates.WAITING_CODE)
 async def msg_admin_delete_promo(message: Message, state: FSMContext):
