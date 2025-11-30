@@ -27,8 +27,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 # --- TELETHON ---
+# ИСПРАВЛЕНО: Убран InputClientQRLogin, который вызывает ошибку импорта в новых версиях Telethon
 from telethon import TelegramClient, events, errors, functions, utils
-from telethon.tl.types import User, Channel, Chat, InputClientQRLogin
+from telethon.tl.types import User, Channel, Chat
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError, ChatForwardsRestrictedError, PasswordHashInvalidError
 
 # =========================================================================
@@ -43,6 +44,7 @@ API_ID = int(os.getenv("API_ID", 37185453))
 API_HASH = os.getenv("API_HASH")
 
 if not BOT_TOKEN or not API_HASH:
+    # Эта ошибка сработает, если BOT_TOKEN или API_HASH не заданы в .env
     raise ValueError("BOT_TOKEN или API_HASH не найдены в .env файле.")
 
 DB_NAME = 'bot_database.db'
@@ -516,10 +518,10 @@ tm = TelethonManager(bot, db)
 @dp.errors()
 async def errors_handler(event: ErrorEvent):
     exc = event.exception
-    user_id = getattr(getattr(event.update, 'message', None), 'from_user', None) or \
-              getattr(getattr(event.update, 'callback_query', None), 'from_user', None)
+    user_id_obj = getattr(getattr(event.update, 'message', None), 'from_user', None) or \
+                  getattr(getattr(event.update, 'callback_query', None), 'from_user', None)
     
-    user_info = f"UID:{user_id.id if user_id else 'N/A'}"
+    user_info = f"UID:{user_id_obj.id if user_id_obj else 'N/A'}"
     
     if isinstance(exc, TelegramForbiddenError):
         logger.warning(f"🚫 Forbidden {user_info}: Bot was blocked by user.")
@@ -641,7 +643,7 @@ async def cmd_numb(message: Message, state: FSMContext):
     else:
         await message.answer(f"❌ Не удалось обновить статус дропа для **{phone}**.")
 
-# --- Admin Router Handlers (Полностью реализовано) ---
+# --- Admin Router Handlers ---
 
 @admin_router.callback_query(F.data == "admin_stats")
 async def cb_admin_stats(call: CallbackQuery):
@@ -755,10 +757,11 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
 
     try:
         await client.connect()
+        # Запрос токена для QR-логина
         login_token_response = await client(functions.auth.ExportLoginTokenRequest(
             api_id=API_ID,
             api_hash=API_HASH,
-            except_ids=[utils.get_peer_id(await client.get_me())]
+            except_ids=[] # Тут обычно указывается ID, но можно оставить пустым, если не нужно исключать
         ))
         
         url = login_token_response.url
@@ -791,10 +794,15 @@ async def cb_auth_qr_start(call: CallbackQuery, state: FSMContext):
             store.temp_auth_clients.pop(user_id, None)
         await state.clear()
         try:
-            await qr_message.delete()
+            # Пытаемся удалить сообщение с QR-кодом, если оно еще есть
+            if 'qr_message' in locals():
+                 await qr_message.delete()
         except Exception:
             pass
-        await send_main_menu(user_id, state, message=call.message)
+        # Возвращаемся в главное меню, если это не было сделано через auth_success
+        if not state.get_state():
+             await send_main_menu(user_id, state, message=call.message)
+
 
 # --- FSM Handlers for Promo ---
 
@@ -841,7 +849,6 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     active_users = await db.get_active_telethon_users()
     tasks = []
     for user_id in active_users:
-        # Для защиты от ошибок в БД, игнорируем исключения при запуске
         tasks.append(asyncio.create_task(tm.start_client_task(user_id), name=f"restore-task-{user_id}"))
         logger.info(f"Attempting to restore worker for user {user_id}")
 
@@ -885,6 +892,7 @@ async def main_run():
     dp.shutdown.register(on_shutdown)
     
     # Запуск фоновой задачи для очистки DB
+    # Запускается как fire-and-forget, так как неблокирующая
     cleanup_task = asyncio.create_task(db.cleanup_old_sessions(days=30), name="db-cleanup-task")
 
     logger.info("Starting bot polling...")
