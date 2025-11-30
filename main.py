@@ -27,7 +27,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, BufferedInputFile, CallbackQuery
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest # Используем оба для совместимости
 from aiogram.enums import ParseMode 
 
 # --- TELETHON ---
@@ -272,7 +272,6 @@ class TelethonManager:
 
     async def _send_to_bot_user(self, user_id: int, message: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
         try:
-            # Используем HTML по умолчанию
             await self.bot.send_message(user_id, message, reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error sending message to {user_id}: {e}")
@@ -284,26 +283,21 @@ class TelethonManager:
         path_perm = path_perm_base + '.session'
         path_temp = path_temp_base + '.session'
 
-        # Очистка временного клиента
         async with store.lock:
             store.temp_auth_clients.pop(user_id, None)
 
-        # 1. Завершаем временное соединение, если оно еще активно
         if client:
             try:
                 if await client.is_connected(): await client.disconnect()
             except Exception:
                 pass
 
-        # 2. Переименовываем временный файл сессии в постоянный
         if os.path.exists(path_temp):
             if os.path.exists(path_perm): os.remove(path_perm)
             os.rename(path_temp, path_perm)
             
-            # 3. Запуск Worker'а как отдельной задачи
             await self.start_client_task(user_id) 
             
-            # 4. Удаляем временные файлы
             if os.path.exists(path_temp_base): os.remove(path_temp_base)
         else:
             await self._send_to_bot_user(user_id, "❌ Файл сессии не найден. Авторизация не завершена.")
@@ -313,7 +307,6 @@ class TelethonManager:
     async def start_client_task(self, user_id: int):
         await self.stop_worker(user_id)
         try:
-            # ГАРАНТИРУЕМ, что задача создается и запускается асинхронно
             task = asyncio.create_task(self._run_worker(user_id), name=f"main-worker-{user_id}")
             logger.info(f"Main worker task created for user {user_id}")
             return task
@@ -342,10 +335,8 @@ class TelethonManager:
             
             await self.db.set_telethon_status(user_id, True)
             me = await client.get_me()
-            # Используем HTML-теги <b> для жирного текста
             await self._send_to_bot_user(user_id, f"✅ Worker запущен! Аккаунт: <b>{utils.get_display_name(me)}</b>\nСтатистика активна. Время подписки до: {sub_end.strftime('%d.%m.%Y %H:%M')}")
             
-            # --- ОСНОВНАЯ ЛОГИКА WORKER (Цикл ожидания) ---
             await client.run_until_disconnected() 
             
         except AuthKeyUnregisteredError:
@@ -411,17 +402,15 @@ async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ИСПРАВЛЕН: Теперь отлавливает любые TelegramAPIError при редактировании.
+# Усиленная Отказоустойчивость: Ловит все TelegramAPIError
 async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     markup = await get_main_menu_markup(chat_id)
     user_data = await db.get_user(chat_id)
     
     sub_end = await db.get_subscription_status(chat_id)
-    
     now_msk = datetime.now(TIMEZONE_MSK)
     
     if sub_end and sub_end > now_msk:
-        # Используем HTML-теги <b>
         sub_text = f"✅ Подписка до: <b>{sub_end.strftime('%d.%m.%Y %H:%M')}</b>"
     else:
         sub_text = "❌ Подписка не активна. Активируйте промокод или оплатите."
@@ -430,7 +419,6 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
              
     status_worker = "🟢 Активен" if user_data and user_data['telethon_active'] else "🔴 Не активен"
 
-    # УЛУЧШЕННЫЙ ТЕКСТ ПРИВЕТСТВИЯ (HTML)
     text = (
         f"👋 <b>Добро пожаловать в StatPro!</b>\n"
         f"Это ваш личный Worker для сбора и анализа статистики.\n\n"
@@ -440,7 +428,6 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
     )
     
     try:
-        # 1. Пытаемся отредактировать сообщение (если оно есть)
         if message_id:
             await bot.edit_message_text(text, str(chat_id), message_id, reply_markup=markup)
         else:
@@ -448,8 +435,8 @@ async def send_main_menu(chat_id: int, message_id: Optional[int] = None):
             
     except TelegramAPIError as e:
         logger.warning(f"TelegramAPIError (Edit/Send) in send_main_menu: {e}. Attempting to send new message.")
-        # 2. При любой ошибке API (включая Bad Request), отправляем новое сообщение
         try:
+             # Повторная попытка отправить, если редактирование не удалось
              await bot.send_message(chat_id, text, reply_markup=markup)
         except Exception as e_send:
              logger.error(f"FATAL: Failed to send new message after edit failure: {e_send}")
@@ -475,7 +462,6 @@ async def auth_success(user_id: int, client: TelegramClient, state: FSMContext, 
 
 
 # --- CANCEL Handler ---
-# ИСПРАВЛЕН: Агрессивная обработка ошибок, чтобы кнопки работали.
 @user_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth'}))
 @admin_router.callback_query(F.data.in_({'cmd_start', 'cancel_auth', 'admin_panel'}))
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
@@ -503,16 +489,157 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return await cb_admin_stats(call, state)
         
-    # Сначала отвечаем на колбэк, чтобы убрать часы
     await call.answer() 
     
-    # Теперь вызываем send_main_menu, которая содержит логику отказоустойчивости
+    # Используем отказоустойчивую функцию
     await send_main_menu(user_id, call.message.message_id) 
+
+
+# --- НОВЫЕ ХЕНДЛЕРЫ МЕНЮ ДЛЯ УСТРАНЕНИЯ "is not handled" ---
+
+# 1. МЕНЮ АВТОРИЗАЦИИ
+@user_router.callback_query(F.data == "cb_auth_menu")
+async def cb_auth_menu(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.clear()
     
-# ... (Остальные функции авторизации) ...
+    text = "Выберите способ авторизации:"
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 По номеру телефона", callback_data="cb_auth_phone_init")],
+        [InlineKeyboardButton(text="🖼️ Через QR-код (рекомендуется)", callback_data="cb_auth_qr_init")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="cancel_auth")]
+    ])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_auth_menu: {e}. Sending new message.")
+        await call.message.answer(text, reply_markup=markup)
+        
+# 2. СТАТУС WORKER
+@user_router.callback_query(F.data == "cb_worker_status")
+async def cb_worker_status(call: CallbackQuery, state: FSMContext):
+    user_data = await db.get_user(call.from_user.id)
+    is_active = call.from_user.id in store.active_workers
+    sub_end = await db.get_subscription_status(call.from_user.id)
+    
+    if not is_active:
+        text = "🔴 Worker не активен. Подключите аккаунт через '🔑 Войти в Telegram'."
+    elif not sub_end or sub_end <= datetime.now(TIMEZONE_MSK):
+        text = "⚠️ Worker не активен. Срок подписки истек."
+    else:
+        text = f"🟢 Worker активен и работает.\nАккаунт подключен.\nПодписка до: <b>{sub_end.strftime('%d.%m.%Y %H:%M')}</b>"
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛑 Остановить Worker", callback_data="cb_worker_stop")] if is_active else [],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="cancel_auth")]
+    ])
+    
+    await call.answer()
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_worker_status: {e}. Sending new message.")
+        await call.message.answer(text, reply_markup=markup)
+
+# 3. АКТИВАЦИЯ ПРОМОКОДА
+@user_router.callback_query(F.data == "cb_activate_promo")
+async def cb_activate_promo(call: CallbackQuery, state: FSMContext):
+    await state.set_state(PromoStates.WAITING_CODE)
+    
+    text = "🎁 <b>Введите промокод для активации:</b>"
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="cancel_auth")]
+    ])
+    
+    await call.answer()
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramAPIError as e:
+        logger.warning(f"TelegramAPIError in cb_activate_promo: {e}. Sending new message.")
+        await call.message.answer(text, reply_markup=markup)
 
 
-# --- CODE INPUT (С ИСПРАВЛЕННЫМ ЗАПРОСОМ 2FA) ---
+# 4. ОБРАБОТЧИК ВВОДА ПРОМОКОДА (ИЗМЕНЕНИЕ: Теперь использует PromoStates.WAITING_CODE)
+@user_router.message(PromoStates.WAITING_CODE)
+async def msg_activate_promo(message: Message, state: FSMContext):
+    code = message.text.strip().upper()
+    
+    promo_data = await db.get_promocode(code)
+    
+    if not promo_data or promo_data['uses_left'] == 0:
+        await message.reply("❌ Неверный или использованный промокод.")
+    else:
+        await db.use_promocode(code)
+        new_end = await db.update_subscription(message.from_user.id, promo_data['duration_days'])
+        
+        await message.reply(
+            f"🎉 <b>Промокод активирован!</b>\n"
+            f"Вам добавлено {promo_data['duration_days']} дней подписки.\n"
+            f"Новый срок окончания: <b>{new_end.strftime('%d.%m.%Y %H:%M')}</b>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
+        )
+        
+        # Если Worker не активен, запускаем его, т.к. появилась подписка
+        if not message.from_user.id in store.active_workers:
+            await manager.start_client_task(message.from_user.id)
+            
+    await state.clear()
+
+
+# 5. ЗАГЛУШКИ АВТОРИЗАЦИИ
+@user_router.callback_query(F.data == "cb_auth_phone_init")
+async def cb_auth_phone_init(call: CallbackQuery, state: FSMContext):
+    await call.answer("📱 Запрос номера телефона...", show_alert=False)
+    # Здесь начнется ваша FSM-цепочка для авторизации по телефону
+    await state.set_state(TelethonAuth.PHONE)
+    
+    text = "✍️ <b>Введите ваш номер телефона</b> в международном формате (например, +79001234567):"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramAPIError:
+        await call.message.answer(text, reply_markup=markup)
+
+
+@user_router.callback_query(F.data == "cb_auth_qr_init")
+async def cb_auth_qr_init(call: CallbackQuery, state: FSMContext):
+    # Здесь начнется ваша логика QR-кода
+    await call.answer("🖼️ Запуск QR-авторизации...", show_alert=False)
+    
+    text = "⏳ **Ожидание генерации QR-кода.**\n\n(Здесь будет сгенерирован и отправлен QR-код для входа через другое устройство)"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]])
+    
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramAPIError:
+        await call.message.answer(text, reply_markup=markup)
+        
+        
+@user_router.callback_query(F.data == "cb_worker_stop")
+async def cb_worker_stop(call: CallbackQuery):
+    await manager.stop_worker(call.from_user.id)
+    await call.answer("🛑 Worker остановлен.", show_alert=True)
+    await send_main_menu(call.from_user.id, call.message.message_id)
+
+
+# --- FALLBACK: Обработка необработанных Callback Queries ---
+@user_router.callback_query()
+@admin_router.callback_query()
+async def cb_fallback_handler(call: CallbackQuery, state: FSMContext):
+    logger.warning(f"Unhandled CallbackQuery from user {call.from_user.id}: {call.data}")
+    await call.answer("🔄 Обновляю меню...", show_alert=False)
+    await state.clear()
+    await send_main_menu(call.from_user.id, call.message.message_id) 
+
+
+# =========================================================================
+# VI. TELETHON AUTH LOGIC (Сокращенный для экономии места, но включен)
+# =========================================================================
+
+# (Остальные FSM-хендлеры: msg_auth_phone, msg_auth_code, msg_auth_password)
+# ...
 @user_router.message(TelethonAuth.CODE, F.text.regexp(r'^\d{4,5}$'))
 async def msg_auth_code(message: Message, state: FSMContext):
     code = message.text.strip()
@@ -542,7 +669,6 @@ async def msg_auth_code(message: Message, state: FSMContext):
         await auth_success(user_id, client, state, msg_wait)
 
     except SessionPasswordNeededError:
-        # 2FA требуется - УЛУЧШЕННОЕ СООБЩЕНИЕ (HTML)
         await state.set_state(TelethonAuth.PASSWORD)
         await msg_wait.delete()
         await message.reply(
@@ -562,14 +688,13 @@ async def msg_auth_code(message: Message, state: FSMContext):
         await state.clear()
         await message.reply(f"❌ Неизвестная ошибка входа: {e}. Повторите с <code>/start</code>.")
         if client and client.is_connected(): await client.disconnect()
-
-
+        
+# ...
 # =========================================================================
-# VII. ADMIN HANDLERS 
+# VII. ADMIN HANDLERS (Также усилены)
 # =========================================================================
 
 # --- ADMIN PANEL START ---
-# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data.in_({"admin_stats", "admin_panel"}))
 async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return await call.answer("🛑 Доступ запрещен.", show_alert=True)
@@ -599,7 +724,7 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
         await call.message.answer(text, reply_markup=markup)
 
 
-# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ (ИСПРАВЛЕН: .format() и агрессивная обработка ошибок) ---
+# --- ХЕНДЛЕР: ПРОСМОТР ПРОМОКОДОВ ---
 @admin_router.callback_query(F.data == "admin_view_promos")
 async def cb_admin_view_promos(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -613,13 +738,11 @@ async def cb_admin_view_promos(call: CallbackQuery):
         for p in promocodes:
             uses = '∞' if p['uses_left'] == 0 else p['uses_left']
             
-            # Используется .format()
             promo_line = "• <code>{}</code> | {} д. | {} исп.".format(
                 p['code'], p['duration_days'], uses
             )
             promo_list.append(promo_line)
         
-        # Используем <pre> для форматирования в виде таблицы (HTML)
         text = (
             "📋 <b>СПИСОК АКТИВНЫХ ПРОМОКОДОВ</b>\n\n"
             "<pre>"
@@ -643,7 +766,6 @@ async def cb_admin_view_promos(call: CallbackQuery):
 
 
 # --- PROMO CREATE (STEP 1: GENERATE CODE + ASK DAYS) ---
-# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data == "admin_create_promo_init")
 async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
@@ -712,7 +834,6 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
     promo_code = data['promo_code']
     days = data['days']
     
-    # Сохранение в БД
     try:
         await db.db_pool.execute(
             "INSERT INTO promocodes (code, duration_days, uses_left) VALUES (?, ?, ?)",
@@ -742,7 +863,6 @@ async def msg_admin_promo_uses_invalid(message: Message):
 
 
 # --- PROMO DELETE ---
-# ИСПРАВЛЕН: Агрессивная обработка ошибок
 @admin_router.callback_query(F.data == "admin_delete_promo_init")
 async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
@@ -792,7 +912,6 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     logger.info("Bot starting up...")
     await db.init()
     
-    # Восстановление активных воркеров из БД
     active_users = await db.get_active_telethon_users()
     logger.info(f"Restoring {len(active_users)} active workers...")
     for user_id in active_users:
