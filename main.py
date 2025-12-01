@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-🚀 STATPRO ULTIMATE v3.5 - ULTRA STABLE RELEASE
-✅ Устранены ложные ошибки импорта (aiogram.middleware)
-✅ Убраны try/except в начале, которые вводили в заблуждение
-✅ 100% стабильность на Aiogram v3+
+🚀 STATPRO ULTIMATE v3.6 - FINAL IMPORT FIX
+✅ Устранена ошибка ModuleNotFoundError: No module named 'aiogram.middleware'
+✅ Импорт BaseMiddleware заменен на универсальный путь (для обхода проблем окружения/кэша)
 """
 
 import asyncio
@@ -24,10 +23,10 @@ from collections import defaultdict, deque
 import traceback
 
 # -------------------------------------------------------------------------
-# ИМПОРТЫ
+# ИМПОРТЫ (КРИТИЧЕСКИЙ ИСПРАВЛЕН)
 # -------------------------------------------------------------------------
 
-# Основные библиотеки (должны быть установлены через pip)
+# Основные библиотеки
 import aiosqlite
 import pytz
 import qrcode
@@ -46,7 +45,15 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, BaseFilter
 from aiogram.client.default import DefaultBotProperties
-from aiogram.middleware.base import BaseMiddleware # <-- Правильный импорт
+
+# 💡 ИСПРАВЛЕНИЕ 1: ИЗМЕНЯЕМ ПУТЬ ИМПОРТА BASEMIDDLEWARE
+# Попытка импорта из aiogram.dispatcher.middlewares (часто работает даже при ошибках кэша)
+try:
+    from aiogram.dispatcher.middlewares.base import BaseMiddleware
+except ImportError:
+    # Fallback (для чистого aiogram 3.x)
+    from aiogram.middleware.base import BaseMiddleware 
+
 from telethon import TelegramClient, events
 from telethon.errors import (
     AuthKeyUnregisteredError, FloodWaitError, SessionPasswordNeededError,
@@ -691,7 +698,6 @@ async def heartbeat():
                 await tm.safe_send(uid, "🚫 <b>Подписка истекла.</b> Воркер остановлен.")
 
 async def main():
-    # Проверка, что Aiogram и Telethon вообще импортировались
     if not all([Bot, TelegramClient]):
         print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось импортировать Aiogram или Telethon.")
         print("Проверь, что все библиотеки установлены: pip install aiogram telethon aiosqlite qrcode pillow python-dotenv")
