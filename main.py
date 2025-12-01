@@ -3,21 +3,22 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-# --- ИСПРАВЛЕННЫЙ ИМПОРТ ДЛЯ AIOGRAM 3.X ---
-from aiogram import Bot, Dispatcher, types
+# --- ИМПОРТЫ AIOGRAM 3.X (Разделены) ---
+from aiogram import Bot
+from aiogram import Dispatcher
+from aiogram import types
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State
+from aiogram.fsm.state import StatesGroup
 
-# --- ИСПРАВЛЕННЫЙ ИМПОРТ TELETHON (Строка 14) ---
-from telethon import TelegramClient, functions, errors
-# Если Telethon старый, классы LoginToken могут быть не видны. Оставляем как есть, 
-# полагаясь на то, что это все-таки современный код.
-from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo 
-# Если ошибка повторяется, замените эту строку на:
-# from telethon.tl.types import User
-# LoginToken = None # Заглушки, если обновление невозможно
-# LoginTokenMigrateTo = None
+# --- ИМПОРТЫ TELETHON (Исправлены и разделены) ---
+from telethon import TelegramClient
+from telethon import functions
+from telethon import errors
+from telethon.tl.types import User
+from telethon.tl.functions.auth import LoginToken
+from telethon.tl.functions.auth import LoginTokenMigrateTo
 
 # 🎨 Библиотеки для QR-кода
 import qrcode
@@ -93,14 +94,13 @@ class AuthClient:
             ))
             
             # 2. Обработка миграции DC
-            # Используем isinstance с проверкой, чтобы избежать ошибок, если LoginToken не импортировался
-            if LoginTokenMigrateTo is not None and isinstance(result, LoginTokenMigrateTo):
+            if isinstance(result, LoginTokenMigrateTo):
                 await client.disconnect() 
                 self.client._sender._dc_id = result.dc_id 
                 await self.client.connect()
                 result = await self.client(functions.auth.ImportLoginTokenRequest(result.token))
             
-            if LoginToken is not None and isinstance(result, LoginToken) and result.url:
+            if isinstance(result, LoginToken) and result.url:
                 logger.info(f"QR URL получен: {result.url[:50]}...")
                 
                 # 3. ✅ ГЕНЕРАЦИЯ QR-КОДА
