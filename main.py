@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Set, Any
 from io import BytesIO
+import sqlite3 # Импортируем для явной обработки ошибки
 
 # Third-party Imports
 import aiosqlite
@@ -65,6 +66,7 @@ TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
 SESSION_DIR = 'sessions'
 DATA_DIR = 'data'
 
+# Убедимся, что директории существуют
 os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -204,31 +206,36 @@ class AsyncDatabase:
         self.db_pool: Optional[aiosqlite.Connection] = None
 
     async def init(self):
-        self.db_pool = await aiosqlite.connect(self.db_path, isolation_level=None) 
-        await self.db_pool.execute("PRAGMA journal_mode=WAL;")
-        await self.db_pool.execute("PRAGMA synchronous=NORMAL;")
-        self.db_pool.row_factory = aiosqlite.Row
-        
-        await self.db_pool.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY, 
-                telethon_active BOOLEAN DEFAULT 0,
-                subscription_end TEXT,
-                is_banned BOOLEAN DEFAULT 0
-            )
-        """)
-        # Добавляем админа, если его нет
-        if ADMIN_ID != 0:
-            await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (ADMIN_ID,))
-        
-        await self.db_pool.execute("""
-            CREATE TABLE IF NOT EXISTS promocodes (
-                code TEXT PRIMARY KEY,
-                duration_days INTEGER,
-                uses_left INTEGER
-            )
-        """)
-        await self.db_pool.commit()
+        try:
+            self.db_pool = await aiosqlite.connect(self.db_path, isolation_level=None) 
+            await self.db_pool.execute("PRAGMA journal_mode=WAL;")
+            await self.db_pool.execute("PRAGMA synchronous=NORMAL;")
+            self.db_pool.row_factory = aiosqlite.Row
+            
+            await self.db_pool.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY, 
+                    telethon_active BOOLEAN DEFAULT 0,
+                    subscription_end TEXT,
+                    is_banned BOOLEAN DEFAULT 0
+                )
+            """)
+            # Добавляем админа, если его нет
+            if ADMIN_ID != 0:
+                await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (ADMIN_ID,))
+            
+            await self.db_pool.execute("""
+                CREATE TABLE IF NOT EXISTS promocodes (
+                    code TEXT PRIMARY KEY,
+                    duration_days INTEGER,
+                    uses_left INTEGER
+                )
+            """)
+            await self.db_pool.commit()
+            logger.info("Database initialized successfully.")
+        except sqlite3.OperationalError as e:
+            logger.critical(f"FATAL DB ERROR: Cannot open database file {self.db_path}. Check permissions! Error: {e}")
+            sys.exit(1) # Выход, если не удалось открыть основную базу данных
 
     async def get_user(self, user_id: int):
         if not self.db_pool: return None
@@ -355,11 +362,25 @@ class TelethonManager:
                 logger.info(f"Worker {user_id}: Temporary session file cleaned up.")
             except OSError as e: 
                 logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}")
+                
+    async def handle_telethon_error(self, user_id: int, error_type: str, e: Exception, message: str):
+        """Обработчик критических ошибок Telethon/SQLite."""
+        logger.error(f"Worker {user_id}: Critical {error_type} error: {type(e).__name__} - {e}")
+        
+        # 1. Специфический обработчик для ошибки с правами доступа
+        if isinstance(e, sqlite3.OperationalError) and 'unable to open database file' in str(e):
+             message = "❌ **Критическая ошибка:** Не удалось открыть/создать файл сессии. Это, скорее всего, **проблема с правами доступа** на сервере. Пожалуйста, выполните команду `chmod -R 777 sessions data` на вашем хостинге."
+        elif isinstance(e, sqlite3.OperationalError) and 'attempt to write a readonly database' in str(e):
+             message = "❌ **Критическая ошибка:** База данных сессий доступна только для чтения. **Проверьте права доступа** к папке `sessions` (требуются права на запись)."
+
+        await self._send_to_bot_user(user_id, message)
+        await self._cleanup_temp_session(user_id) 
+
 
     async def start_worker_session(self, user_id: int, client_temp: TelegramClient):
         """
         Сохраняет сессию в постоянный файл, удаляет временный и запускает Worker.
-        ИСПРАВЛЕНИЕ: Убрали 'await' перед _copy_session_from для предотвращения TypeError.
+        Устранены TypeError и добавлены обработчики sqlite3.
         """
         path_perm = get_session_path(user_id)
         
@@ -379,17 +400,17 @@ class TelethonManager:
             client_perm = await _new_telethon_client(user_id, is_temp=False) 
             
             # Копируем авторизационные данные из временного клиента в постоянный
-            # *** ИСПРАВЛЕНО: УБРАН 'await' ***
+            # *** ИСПРАВЛЕНО: УБРАН 'await' для _copy_session_from ***
             client_perm._copy_session_from(client_temp) 
             
             # Принудительное сохранение сессии в постоянный файл
-            # При копировании сессия клиента_perm уже имеет постоянный путь
             client_perm.session.save()
             logger.info(f"Worker {user_id}: Session successfully copied and saved to permanent path.")
 
-        except Exception as e:
-            logger.error(f"Worker {user_id}: Failed to save permanent session file: {type(e).__name__} - {e}")
-            await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
+        except (sqlite3.OperationalError, Exception) as e:
+            # Обработка всех критических ошибок сохранения сессии, включая SQLite
+            await self.handle_telethon_error(user_id, "Session Save", e, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
+            
             if client_perm: 
                 try: await client_perm.disconnect() 
                 except: pass
@@ -439,6 +460,7 @@ class TelethonManager:
     
     async def _handle_ls_command(self, event):
         """Обработка команды .лс [юзернейм/ID] [сообщение]"""
+        # ... (Код обработки .лс - не менялся) ...
         text = event.message.message
         parts = text.split(maxsplit=2)
         
@@ -471,8 +493,10 @@ class TelethonManager:
             logger.error(f"Worker {client.session.user_id} .лс error: {type(e).__name__} - {e}")
             await event.reply(f"❌ **Критическая ошибка при отправке ЛС:** {type(e).__name__}.")
 
+
     async def _handle_checkgroup_command(self, event):
         """Обработка команды .чекгруппу [юзернейм группы] [юзернейм/ID пользователя]"""
+        # ... (Код обработки .чекгруппу - не менялся) ...
         text = event.message.message
         parts = text.split(maxsplit=2)
         
@@ -830,6 +854,8 @@ async def cb_auth_qr_init(call: CallbackQuery, state: FSMContext):
         # Запускаем фоновую задачу для ожидания сканирования
         asyncio.create_task(manager.wait_for_qr_scan(user_id, client, qr_login, qr_future), name=f"qr-waiter-{user_id}")
         
+    except sqlite3.OperationalError as e:
+        await manager.handle_telethon_error(user_id, "QR Init", e, "❌ Критическая ошибка при генерации QR (проблема с правами). Повторите попытку.")
     except Exception as e:
         logger.error(f"QR Auth error for {user_id}: {e}")
         await manager._cleanup_temp_session(user_id)
@@ -893,6 +919,8 @@ async def msg_auth_phone(message: Message, state: FSMContext):
             InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]])
         )
 
+    except sqlite3.OperationalError as e:
+        await manager.handle_telethon_error(user_id, "Auth Phone", e, "❌ Критическая ошибка при создании сессии (проблема с правами). Повторите вход.")
     except PhoneNumberInvalidError:
         await manager._cleanup_temp_session(user_id)
         await state.clear()
@@ -1302,7 +1330,7 @@ async def msg_admin_delete_promo(message: Message, state: FSMContext):
 
     await state.clear()
     
-    # Удаляем сообщение пользователя, чтобы избежать конфликта с safe_edit_or_send
+    # Удаляем сообщение пользователя, чтобы избежать конфликтов
     try: await bot.delete_message(message.chat.id, message.message_id)
     except: pass
     
@@ -1335,6 +1363,8 @@ async def cb_fallback_handler_admin(call: CallbackQuery, state: FSMContext):
 
 async def on_startup(dispatcher: Dispatcher, bot: Bot):
     logger.info("Bot starting up...")
+    
+    # Инициализация DB - теперь с проверкой прав
     await db.init()
     
     active_users = await db.get_active_telethon_users()
