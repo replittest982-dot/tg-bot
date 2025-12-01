@@ -51,6 +51,7 @@ from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Измените на ваш фактический ID
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH")
@@ -143,7 +144,7 @@ async def safe_edit_or_send(
     Использует delete+send для избежания Bad Request ошибок Aiogram.
     """
     
-    # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Предотвращение ошибки Pydantic
+    # Предотвращение ошибки Pydantic/int в reply_markup
     if isinstance(reply_markup, int):
         logger.error(f"CORRECTION: Received int {reply_markup} as reply_markup for {chat_id}. Setting to None.")
         reply_markup = None
@@ -151,9 +152,11 @@ async def safe_edit_or_send(
     # 1. Если передан message_id, пытаемся удалить старое сообщение.
     if message_id:
         try:
+            # Пытаемся удалить сообщение
             await bot_instance.delete_message(chat_id, message_id)
         except TelegramAPIError as e:
-            logger.warning(f"Failed to delete old message {message_id} for {chat_id}: {e}. Sending new message.")
+            # logger.warning(f"Failed to delete old message {message_id} for {chat_id}: {e}. Sending new message.")
+            pass # Игнорируем ошибки удаления, просто отправляем новое
         except Exception as e:
             logger.warning(f"Unexpected error during delete for {chat_id}: {e}")
 
@@ -215,7 +218,8 @@ class AsyncDatabase:
             )
         """)
         # Добавляем админа, если его нет
-        await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (ADMIN_ID,))
+        if ADMIN_ID != 0:
+            await self.db_pool.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (ADMIN_ID,))
         
         await self.db_pool.execute("""
             CREATE TABLE IF NOT EXISTS promocodes (
@@ -352,35 +356,51 @@ class TelethonManager:
             except OSError as e: 
                 logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}")
 
-    async def start_worker_session(self, user_id: int, client: TelegramClient):
+    async def start_worker_session(self, user_id: int, client_temp: TelegramClient):
         """
         Сохраняет сессию в постоянный файл, удаляет временный и запускает Worker.
-        Используем client.session.save() для надежного сохранения.
+        ИСПРАВЛЕНИЕ: Копируем данные из temp-сессии в новую, постоянную сессию.
         """
         path_perm = get_session_path(user_id)
         
         # 1. Очистка старого состояния и остановка worker'а
         await self.stop_worker(user_id, silent=True)
-
-        # 2. **КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:** Принудительное сохранение сессии в постоянный файл.
+        
+        client_perm = None
+        
+        # 2. **КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:** Создаем новый клиент с постоянным путем
         try:
-            # Принудительно меняем путь сессии клиента на постоянный путь
-            if client.session.filename != path_perm:
-                 client.session.set_file(path_perm)
-
+            # Убеждаемся, что временный клиент подключен и содержит данные
+            if not await client_temp.is_connected():
+                # Подключаем его, чтобы убедиться, что данные сессии загружены
+                await client_temp.connect() 
+                
+            # Создаем новый клиент с постоянным путем сессии
+            client_perm = await _new_telethon_client(user_id, is_temp=False) 
+            
+            # Копируем авторизационные данные из временного клиента в постоянный
+            # Это самый надежный способ передать авторизационную информацию
+            await client_perm._copy_session_from(client_temp)
+            
             # Принудительное сохранение сессии в постоянный файл
-            client.session.save()
-            logger.info(f"Worker {user_id}: Session successfully saved to permanent path.")
+            # При копировании сессия клиента_perm уже имеет постоянный путь
+            client_perm.session.save()
+            logger.info(f"Worker {user_id}: Session successfully copied and saved to permanent path.")
 
         except Exception as e:
-            logger.error(f"Worker {user_id}: Failed to save permanent session file: {e}")
+            logger.error(f"Worker {user_id}: Failed to save permanent session file: {type(e).__name__} - {e}")
             await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
+            if client_perm: 
+                try: await client_perm.disconnect() 
+                except: pass
             await self._cleanup_temp_session(user_id) 
             return
 
-        # 3. Очистка временного клиента и временного файла сессии (если был создан)
-        # Временный клиент уже не нужен, так как мы сохранили сессию.
+        # 3. Очистка временного клиента и временного файла сессии
         await self._cleanup_temp_session(user_id) 
+        if client_perm: # Отключаем постоянный клиент, чтобы его мог запустить _run_worker
+             try: await client_perm.disconnect() 
+             except: pass
         
         # 4. Запуск Worker'а
         if os.path.exists(path_perm + '.session'): 
@@ -610,7 +630,7 @@ class TelethonManager:
                 
             # Проверяем, авторизован ли пользователь (пропуск 2FA)
             if await client.is_user_authorized():
-                # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+                # Явное сообщение об успешном входе перед запуском Worker
                 await self._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
                 logger.info(f"Worker {user_id}: QR login successful. Starting session.")
                 await self.start_worker_session(user_id, client)
@@ -678,7 +698,7 @@ async def get_main_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎁 Активировать Промокод", callback_data="cb_activate_promo")],
     ]
     
-    if is_admin:
+    if is_admin and ADMIN_ID != 0:
         buttons.append([InlineKeyboardButton(text="🔧 Админ-Панель", callback_data="admin_stats")])
         
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -730,7 +750,7 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
 
     await call.answer() 
     
-    if call.data == 'admin_panel' and user_id == ADMIN_ID:
+    if call.data == 'admin_panel' and user_id == ADMIN_ID and ADMIN_ID != 0:
         # Редирект в админ-панель
         return await cb_admin_stats(call, state)
         
@@ -783,7 +803,7 @@ async def cb_auth_qr_init(call: CallbackQuery, state: FSMContext):
         qr_bytes = BytesIO()
         qr_img.save(qr_bytes, format='PNG')
         
-        # ИСПРАВЛЕНИЕ: Используем BufferedInputFile для Aiogram v3+
+        # Используем BufferedInputFile для Aiogram v3+
         qr_file = BufferedInputFile(qr_bytes.getvalue(), filename="qr_code.png")
         
         # Отправляем QR-код как фото
@@ -842,8 +862,12 @@ async def msg_auth_phone(message: Message, state: FSMContext):
     if not re.fullmatch(r'\+\d{7,15}', phone):
         return await manager._send_to_bot_user(user_id, "❌ Некорректный формат номера. Введите, начиная с '+' (например, `+79001234567`).", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]]))
 
-    # ИСПРАВЛЕНИЕ: Удаляем старое сообщение, чтобы избежать конфликта с safe_edit_or_send
-    await bot.delete_message(user_id, message.message_id)
+    # Удаляем сообщение пользователя, чтобы избежать конфликта с safe_edit_or_send
+    try:
+        await bot.delete_message(user_id, message.message_id)
+    except Exception:
+        pass
+        
     await manager._send_to_bot_user(user_id, "⏳ Подключаюсь к Telegram и отправляю код...") 
 
     client = await _new_telethon_client(user_id, is_temp=True)
@@ -883,15 +907,6 @@ async def msg_auth_phone(message: Message, state: FSMContext):
         await state.clear()
         await manager._send_to_bot_user(user_id, "❌ Произошла ошибка. Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
     
-    # Отключение клиента, так как в следующем шаге он будет переподключаться
-    if client and user_id in store.temp_auth_clients:
-        try:
-            # Не дисконнектим, так как client нужен в следующем шаге для sign_in.
-            # Оставим его в store.temp_auth_clients.
-            pass
-        except Exception:
-             pass
-
 # --- USER: ШАГ 2 - КОД ИЗ TELEGRAM ---
 @user_router.message(TelethonAuth.CODE)
 async def msg_auth_code(message: Message, state: FSMContext):
@@ -913,7 +928,11 @@ async def msg_auth_code(message: Message, state: FSMContext):
              await state.clear()
              return await manager._send_to_bot_user(user_id, "❌ Сессия авторизации истекла. Начните заново.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
 
-    await bot.delete_message(user_id, message.message_id)
+    try:
+        await bot.delete_message(user_id, message.message_id)
+    except Exception:
+        pass
+        
     await manager._send_to_bot_user(user_id, "⏳ Проверяю код...")
     
     try:
@@ -924,7 +943,7 @@ async def msg_auth_code(message: Message, state: FSMContext):
         
         # --- АВТОРИЗАЦИЯ УСПЕШНА (БЕЗ 2FA) ---
         await state.clear()
-        # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+        # Явное сообщение об успешном входе перед запуском Worker
         await manager._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
         await manager.start_worker_session(user_id, client)
         
@@ -967,7 +986,11 @@ async def msg_auth_password(message: Message, state: FSMContext):
              await state.clear()
              return await manager._send_to_bot_user(user_id, "❌ Сессия авторизации истекла. Начните заново.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔑 Начать заново", callback_data="cb_auth_menu")]]))
 
-    await bot.delete_message(user_id, message.message_id)
+    try:
+        await bot.delete_message(user_id, message.message_id)
+    except Exception:
+        pass
+        
     await manager._send_to_bot_user(user_id, "⏳ Проверяю пароль...")
 
     try:
@@ -978,7 +1001,7 @@ async def msg_auth_password(message: Message, state: FSMContext):
         
         # --- АВТОРИЗАЦИЯ УСПЕШНА (С 2FA) ---
         await state.clear()
-        # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+        # Явное сообщение об успешном входе перед запуском Worker
         await manager._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
         await manager.start_worker_session(user_id, client) 
         
@@ -1092,6 +1115,9 @@ async def cb_fallback_handler_user(call: CallbackQuery, state: FSMContext):
 # --- ADMIN PANEL START ---
 @admin_router.callback_query(F.data.in_({"admin_stats", "admin_panel"}), F.from_user.id == ADMIN_ID)
 async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
+    if ADMIN_ID == 0:
+        return await call.answer("❌ Админ ID не установлен.")
+        
     await state.clear()
     stats = await db.get_stats()
     
@@ -1115,6 +1141,7 @@ async def cb_admin_stats(call: CallbackQuery, state: FSMContext):
 # --- ПРОСМОТР ПРОМОКОДОВ ---
 @admin_router.callback_query(F.data == "admin_view_promos", F.from_user.id == ADMIN_ID)
 async def cb_admin_view_promos(call: CallbackQuery):
+    if ADMIN_ID == 0: return await call.answer("❌ Админ ID не установлен.")
     promocodes = await db.get_all_promocodes()
     
     if not promocodes:
@@ -1147,6 +1174,7 @@ async def cb_admin_view_promos(call: CallbackQuery):
 # --- PROMO CREATE (STEP 1: GENERATE CODE + ASK DAYS) ---
 @admin_router.callback_query(F.data == "admin_create_promo_init", F.from_user.id == ADMIN_ID)
 async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
+    if ADMIN_ID == 0: return await call.answer("❌ Админ ID не установлен.")
     promo_code = generate_promocode()
     await state.update_data(promo_code=promo_code)
     
@@ -1167,6 +1195,7 @@ async def cb_admin_create_promo_init(call: CallbackQuery, state: FSMContext):
 # --- PROMO CREATE (STEP 2: DAYS INPUT) ---
 @admin_router.message(AdminPromo.WAITING_DAYS, F.text.regexp(r'^\d+$'), F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_days(message: Message, state: FSMContext):
+    if ADMIN_ID == 0: return
     try:
         days = int(message.text.strip())
         if days < 0: raise ValueError("Non-negative days only")
@@ -1184,16 +1213,22 @@ async def msg_admin_promo_days(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]
     ])
     
-    await manager._send_to_bot_user(message.chat.id, text, markup, message.message_id)
+    # Удаляем сообщение пользователя, чтобы избежать конфликта с safe_edit_or_send
+    try: await bot.delete_message(message.chat.id, message.message_id)
+    except: pass
+    
+    await manager._send_to_bot_user(message.chat.id, text, markup)
 
 @admin_router.message(AdminPromo.WAITING_DAYS, F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_days_invalid(message: Message):
+    if ADMIN_ID == 0: return
     await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число дней или 0.")
 
 
 # --- PROMO CREATE (STEP 3: USES INPUT) ---
 @admin_router.message(AdminPromo.WAITING_USES, F.text.regexp(r'^\d+$'), F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_uses(message: Message, state: FSMContext):
+    if ADMIN_ID == 0: return
     try:
         uses = int(message.text.strip())
         if uses < 0: raise ValueError("Non-negative uses only")
@@ -1216,6 +1251,10 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
     
     await state.clear()
     
+    # Удаляем сообщение пользователя, чтобы избежать конфликта с safe_edit_or_send
+    try: await bot.delete_message(message.chat.id, message.message_id)
+    except: pass
+    
     await manager._send_to_bot_user(
         message.chat.id,
         f"🎉 <b>Промокод создан!</b>\n\n"
@@ -1229,12 +1268,14 @@ async def msg_admin_promo_uses(message: Message, state: FSMContext):
 
 @admin_router.message(AdminPromo.WAITING_USES, F.from_user.id == ADMIN_ID)
 async def msg_admin_promo_uses_invalid(message: Message):
+    if ADMIN_ID == 0: return
     await manager._send_to_bot_user(message.chat.id, "❌ Неверный формат. Введите только положительное число или 0 (для бесконечных активаций).")
 
 
 # --- PROMO DELETE (Инициация) ---
 @admin_router.callback_query(F.data == "admin_delete_promo_init", F.from_user.id == ADMIN_ID)
 async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
+    if ADMIN_ID == 0: return await call.answer("❌ Админ ID не установлен.")
     await state.set_state(PromoStates.WAITING_CODE)
     
     text = "✍️ <b>Введите промокод, который нужно удалить:</b>"
@@ -1247,6 +1288,7 @@ async def cb_admin_delete_promo_init(call: CallbackQuery, state: FSMContext):
 # --- PROMO DELETE (Обработка ввода) ---
 @admin_router.message(PromoStates.WAITING_CODE, F.from_user.id == ADMIN_ID)
 async def msg_admin_delete_promo(message: Message, state: FSMContext):
+    if ADMIN_ID == 0: return
     code = message.text.strip().upper()
     
     try:
@@ -1258,6 +1300,10 @@ async def msg_admin_delete_promo(message: Message, state: FSMContext):
         return
 
     await state.clear()
+    
+    # Удаляем сообщение пользователя, чтобы избежать конфликта с safe_edit_or_send
+    try: await bot.delete_message(message.chat.id, message.message_id)
+    except: pass
     
     if rows_deleted > 0:
         await manager._send_to_bot_user(
@@ -1275,6 +1321,7 @@ async def msg_admin_delete_promo(message: Message, state: FSMContext):
 # --- FALLBACK (ADMIN) ---
 @admin_router.callback_query(F.from_user.id == ADMIN_ID)
 async def cb_fallback_handler_admin(call: CallbackQuery, state: FSMContext):
+    if ADMIN_ID == 0: return await call.answer("❌ Админ ID не установлен.")
     logger.warning(f"Admin {call.from_user.id}: Unhandled CallbackQuery: {call.data}")
     await call.answer("🔄 Обновляю меню...", show_alert=False)
     await state.clear()
@@ -1307,7 +1354,8 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     
     # NOTE: Ждем завершения восстановления воркеров перед началом polling
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Не дожидаемся, чтобы не блокировать запуск бота, просто планируем
+        pass 
     
     logger.info("Bot ready and polling started!")
 
