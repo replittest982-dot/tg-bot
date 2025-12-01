@@ -906,7 +906,8 @@ async def cb_stop_worker(callback: CallbackQuery):
 # VI. ЗАПУСК БОТА
 # =========================================================================
 
-async def on_startup(dp: Dispatcher):
+# ИСПРАВЛЕНА: Удален аргумент 'dp', который вызывал ошибку Aiogram
+async def on_startup():
     """Выполняется при запуске бота."""
     await db.init()
     logger.info("Starting up and attempting to restore active workers...")
@@ -922,10 +923,12 @@ async def on_startup(dp: Dispatcher):
 
 
 async def main():
-    dp.startup.register(on_startup)
+    # Регистрация функции запуска без аргументов
+    dp.startup.register(on_startup) 
     dp.include_router(user_router)
     # Здесь можно добавить admin_router и другие
     logger.info("Starting Aiogram Bot polling...")
+    # Aiogram 3.x передает Bot в start_polling
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
