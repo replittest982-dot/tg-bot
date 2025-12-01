@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-🚀 STATPRO ULTIMATE v3.6 - FINAL IMPORT FIX
-✅ Устранена ошибка ModuleNotFoundError: No module named 'aiogram.middleware'
-✅ Импорт BaseMiddleware заменен на универсальный путь (для обхода проблем окружения/кэша)
+🚀 STATPRO ULTIMATE v3.7 - FINAL LOCK FIX
+✅ Устранена ошибка AttributeError: module 'asyncio' has no attribute 'RLock'
+✅ RLock заменена на стандартную asyncio.Lock
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from collections import defaultdict, deque
 import traceback
 
 # -------------------------------------------------------------------------
-# ИМПОРТЫ (КРИТИЧЕСКИЙ ИСПРАВЛЕН)
+# ИМПОРТЫ
 # -------------------------------------------------------------------------
 
 # Основные библиотеки
@@ -46,13 +46,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.filters import Command, BaseFilter
 from aiogram.client.default import DefaultBotProperties
 
-# 💡 ИСПРАВЛЕНИЕ 1: ИЗМЕНЯЕМ ПУТЬ ИМПОРТА BASEMIDDLEWARE
-# Попытка импорта из aiogram.dispatcher.middlewares (часто работает даже при ошибках кэша)
-try:
-    from aiogram.dispatcher.middlewares.base import BaseMiddleware
-except ImportError:
-    # Fallback (для чистого aiogram 3.x)
-    from aiogram.middleware.base import BaseMiddleware 
+# 💡 ИСПРАВЛЕНИЕ: Используем правильный импорт BaseMiddleware для Aiogram v3+
+from aiogram.middleware.base import BaseMiddleware 
 
 from telethon import TelegramClient, events
 from telethon.errors import (
@@ -280,7 +275,8 @@ db = UltimateDB(DB_PATH)
 
 class Storage:
     def __init__(self):
-        self.lock = asyncio.RLock()
+        # 💡 ИСПРАВЛЕНИЕ: asyncio не имеет RLock. Используем Lock.
+        self.lock = asyncio.Lock()
         self.active_workers: Dict[int, TelegramClient] = {}
         self.worker_tasks: Dict[int, Dict[str, asyncio.Task]] = defaultdict(dict)
         self.auth_clients: Dict[int, TelegramClient] = {}
