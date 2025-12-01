@@ -3,10 +3,11 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, types, executor
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+# --- ИСПРАВЛЕННЫЙ ИМПОРТ ДЛЯ AIOGRAM 3.X ---
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage 
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from telethon import TelegramClient, functions, errors
 from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo
@@ -15,7 +16,7 @@ from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo
 import qrcode
 from io import BytesIO 
 
-# --- 1. КОНФИГУРАЦИЯ (Исправлено: удалены непечатаемые символы) ---
+# --- 1. КОНФИГУРАЦИЯ ---
 API_ID = 35775411 
 API_HASH = '4f8220840326cb5f74e1771c0c4248f2' 
 BOT_TOKEN = '7868097991:AAFpy_z12t8noMn96rO1LtIJiADOhAfbwYY' 
@@ -29,8 +30,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Инициализация для Aiogram 3
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage())
+dp = Dispatcher(storage=MemoryStorage())
 
 # --- 2. БАЗА ДАННЫХ ---
 DB = {'users': {ADMIN_ID: {'subscription': datetime(2025, 12, 31, 15, 30, 41)}}, 'workers': {}}
@@ -182,29 +184,30 @@ class AuthClient:
             return False, f"❌ Ошибка: {str(e)}. Нажми /start."
 
 # --- 5. КЛАВИАТУРЫ ---
-AUTH_KEYBOARD = types.InlineKeyboardMarkup(row_width=1).add(
-    types.InlineKeyboardButton("🔑 QR авторизация", callback_data="qr_auth"),
-    types.InlineKeyboardButton("📞 По номеру", callback_data="phone_auth")
-)
+AUTH_KEYBOARD = types.InlineKeyboardMarkup(inline_keyboard=[
+    [types.InlineKeyboardButton(text="🔑 QR авторизация", callback_data="qr_auth")],
+    [types.InlineKeyboardButton(text="📞 По номеру", callback_data="phone_auth")]
+])
 
-RESEND_KEYBOARD = types.InlineKeyboardMarkup().add(
-    types.InlineKeyboardButton("🔄 Код ещё раз", callback_data="resend_code")
-)
+RESEND_KEYBOARD = types.InlineKeyboardMarkup(inline_keyboard=[
+    [types.InlineKeyboardButton(text="🔄 Код ещё раз", callback_data="resend_code")]
+])
 
 # --- 6. ХЕНДЛЕРЫ ---
-@dp.message_handler(commands=['start'])
+# Хендлеры для Aiogram 3
+@dp.message(commands=['start'])
 async def start_cmd(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return await message.reply("🚫 Доступ только для админа")
-    await state.finish()
+    await state.clear()
     await message.reply("Выбери метод:", reply_markup=AUTH_KEYBOARD)
 
-@dp.callback_query_handler(lambda c: c.data == 'qr_auth', state="*")
+@dp.callback_query(lambda c: c.data == 'qr_auth')
 async def qr_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
-        return await bot.answer_callback_query(callback.id, "🚫 Нет доступа")
+        return await callback.answer("🚫 Нет доступа")
     
-    await bot.answer_callback_query(callback.id)
+    await callback.answer()
     user_id = callback.from_user.id
     
     auth_client = AuthClient(user_id)
@@ -217,13 +220,12 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
         qr_path = result_path
         # ✅ ОТПРАВКА QR-КОДА
         try:
-            with open(qr_path, 'rb') as photo:
-                await bot.send_photo(
-                    user_id,
-                    photo,
-                    caption="✅ **QR-код для авторизации готов!** Отсканируйте его официальным клиентом Telegram. (Действителен ~5 минут)"
-                )
-            await AuthStates.waiting_for_qr_scan.set()
+            await bot.send_photo(
+                user_id,
+                photo=types.FSInputFile(qr_path),
+                caption="✅ **QR-код для авторизации готов!** Отсканируйте его официальным клиентом Telegram. (Действителен ~5 минут)"
+            )
+            await state.set_state(AuthStates.waiting_for_qr_scan)
         except Exception as e:
             logger.error(f"Error sending QR: {e}")
             await bot.send_message(user_id, "❌ Не удалось отправить QR-код. Попробуйте по номеру.")
@@ -233,30 +235,28 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
                 os.remove(qr_path)
         
     else:
-        # result_path здесь содержит сообщение об ошибке
         await bot.send_message(user_id, result_path)
-        await bot.send_message(user_id, "Или нажми на кнопку:", reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("📞 По номеру", callback_data="phone_auth")
-        ))
+        await bot.send_message(user_id, "Или нажми на кнопку:", reply_markup=AUTH_KEYBOARD)
 
-@dp.message_handler(state=AuthStates.waiting_for_qr_scan)
+@dp.message(AuthStates.waiting_for_qr_scan)
 async def process_qr_wait(message: types.Message, state: FSMContext):
     await message.reply("Ожидаем сканирования QR-кода. Если QR-код истек или не сработал, начните заново /start.")
 
 
-@dp.callback_query_handler(lambda c: c.data in ['phone_auth', 'resend_code'], state="*")
+@dp.callback_query(lambda c: c.data in ['phone_auth', 'resend_code'])
 async def phone_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
-        return await bot.answer_callback_query(callback.id, "🚫 Нет доступа")
+        return await callback.answer("🚫 Нет доступа")
     
-    await bot.answer_callback_query(callback.id)
+    await callback.answer()
     user_id = callback.from_user.id
     
     data = await state.get_data()
+    # FSMContext.get_data() не возвращает None, но проверяем ключ auth_client
     if 'auth_client' not in data or callback.data == 'phone_auth':
         auth_client = AuthClient(user_id)
         auth_client.clear_session_file()
-        await state.update_data(auth_client=auth_client)
+        await state.set_data({'auth_client': auth_client})
     else:
         auth_client = data['auth_client']
 
@@ -264,10 +264,10 @@ async def phone_start(callback: types.CallbackQuery, state: FSMContext):
         user_id, 
         "📞 **Введите номер** (+79001234567):"
     )
-    await AuthStates.waiting_for_phone.set()
+    await state.set_state(AuthStates.waiting_for_phone)
 
 
-@dp.message_handler(state=AuthStates.waiting_for_phone)
+@dp.message(AuthStates.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
@@ -275,11 +275,11 @@ async def process_phone(message: types.Message, state: FSMContext):
     success, msg = await auth_client.send_code(message.text.strip())
     if success:
         await message.reply("🔑 **Код отправлен!** Введите код:", reply_markup=RESEND_KEYBOARD) 
-        await AuthStates.waiting_for_code.set()
+        await state.set_state(AuthStates.waiting_for_code)
     else:
         await message.reply(msg)
 
-@dp.message_handler(state=AuthStates.waiting_for_code)
+@dp.message(AuthStates.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
@@ -289,15 +289,15 @@ async def process_code(message: types.Message, state: FSMContext):
     await message.reply(msg)
     
     if "✅ Успех" in msg: 
-        await state.finish()
+        await state.clear()
     elif "🔑 Требуется пароль" in msg: 
-        await AuthStates.waiting_for_password.set()
+        await state.set_state(AuthStates.waiting_for_password)
     else: 
         if "Нажми /start" in msg:
-            await state.finish()
+            await state.clear()
 
 
-@dp.message_handler(state=AuthStates.waiting_for_password)
+@dp.message(AuthStates.waiting_for_password)
 async def process_password(message: types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
@@ -306,17 +306,18 @@ async def process_password(message: types.Message, state: FSMContext):
     await message.reply(msg)
     
     if success:
-        await state.finish()
+        await state.clear()
     else:
         if "Нажми /start" in msg:
-            await state.finish()
+            await state.clear()
         else:
             await message.reply("❌ Попробуй ещё раз или /start")
 
 # --- 7. ЗАПУСК ---
-async def on_startup(_):
+async def on_startup(bot: Bot): # Aiogram 3 передает объект Bot в startup
     init_db()
     logger.info("✅ Bot started")
 
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    # --- ИСПРАВЛЕННЫЙ ЗАПУСК ДЛЯ AIOGRAM 3.X ---
+    asyncio.run(dp.start_polling(bot, on_startup=on_startup))
