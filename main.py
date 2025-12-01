@@ -3,22 +3,21 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-# --- ИМПОРТЫ AIOGRAM 3.X (Разделены) ---
+# --- ИМПОРТЫ AIOGRAM 3.X (Исправлены псевдонимы для типов) ---
 from aiogram import Bot
 from aiogram import Dispatcher
-from aiogram import types
+from aiogram import types as aio_types # <-- ИЗМЕНЕНО: Используем псевдоним
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
 from aiogram.fsm.state import StatesGroup
 from aiogram.types import FSInputFile # Точное местоположение для FSInputFile
 
-# --- ИМПОРТЫ TELETHON (ИСПРАВЛЕНО ДЛЯ СТАРЫХ ВЕРСИЙ) ---
+# --- ИМПОРТЫ TELETHON ---
 from telethon import TelegramClient
 from telethon import functions
 from telethon import errors
-# Импортируем базовые модули, а типы вызываем через них
-from telethon.tl import types
+from telethon.tl import types # <--- Теперь это types Telethon, не конфликтует
 from telethon.tl.types import User 
 # Обратите внимание: LoginToken и LoginTokenMigrateTo теперь будут types.LoginToken и types.LoginTokenMigrateTo
 
@@ -96,14 +95,12 @@ class AuthClient:
             ))
             
             # 2. Обработка миграции DC
-            # ИСПОЛЬЗУЕМ types.LoginTokenMigrateTo
             if isinstance(result, types.LoginTokenMigrateTo):
                 await client.disconnect() 
                 self.client._sender._dc_id = result.dc_id 
                 await self.client.connect()
                 result = await self.client(functions.auth.ImportLoginTokenRequest(result.token))
             
-            # ИСПОЛЬЗУЕМ types.LoginToken
             if isinstance(result, types.LoginToken) and result.url:
                 logger.info(f"QR URL получен: {result.url[:50]}...")
                 
@@ -196,25 +193,27 @@ class AuthClient:
             return False, f"❌ Ошибка: {str(e)}. Нажми /start."
 
 # --- 5. КЛАВИАТУРЫ ---
-AUTH_KEYBOARD = types.InlineKeyboardMarkup(inline_keyboard=[
-    [types.InlineKeyboardButton(text="🔑 QR авторизация", callback_data="qr_auth")],
-    [types.InlineKeyboardButton(text="📞 По номеру", callback_data="phone_auth")]
+# ИСПОЛЬЗУЕМ aio_types
+AUTH_KEYBOARD = aio_types.InlineKeyboardMarkup(inline_keyboard=[
+    [aio_types.InlineKeyboardButton(text="🔑 QR авторизация", callback_data="qr_auth")],
+    [aio_types.InlineKeyboardButton(text="📞 По номеру", callback_data="phone_auth")]
 ])
 
-RESEND_KEYBOARD = types.InlineKeyboardMarkup(inline_keyboard=[
-    [types.InlineKeyboardButton(text="🔄 Код ещё раз", callback_data="resend_code")]
+RESEND_KEYBOARD = aio_types.InlineKeyboardMarkup(inline_keyboard=[
+    [aio_types.InlineKeyboardButton(text="🔄 Код ещё раз", callback_data="resend_code")]
 ])
 
 # --- 6. ХЕНДЛЕРЫ ---
+# ИСПОЛЬЗУЕМ aio_types
 @dp.message(commands=['start'])
-async def start_cmd(message: types.Message, state: FSMContext):
+async def start_cmd(message: aio_types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return await message.reply("🚫 Доступ только для админа")
     await state.clear()
     await message.reply("Выбери метод:", reply_markup=AUTH_KEYBOARD)
 
 @dp.callback_query(lambda c: c.data == 'qr_auth')
-async def qr_start(callback: types.CallbackQuery, state: FSMContext):
+async def qr_start(callback: aio_types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("🚫 Нет доступа")
     
@@ -231,7 +230,6 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
         qr_path = result_path
         # ✅ ОТПРАВКА QR-КОДА
         try:
-            # ИСПОЛЬЗУЕМ FSInputFile
             await bot.send_photo(
                 user_id,
                 photo=FSInputFile(qr_path),
@@ -251,12 +249,12 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
         await bot.send_message(user_id, "Или нажми на кнопку:", reply_markup=AUTH_KEYBOARD)
 
 @dp.message(AuthStates.waiting_for_qr_scan)
-async def process_qr_wait(message: types.Message, state: FSMContext):
+async def process_qr_wait(message: aio_types.Message, state: FSMContext):
     await message.reply("Ожидаем сканирования QR-кода. Если QR-код истек или не сработал, начните заново /start.")
 
 
 @dp.callback_query(lambda c: c.data in ['phone_auth', 'resend_code'])
-async def phone_start(callback: types.CallbackQuery, state: FSMContext):
+async def phone_start(callback: aio_types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return await callback.answer("🚫 Нет доступа")
     
@@ -279,7 +277,7 @@ async def phone_start(callback: types.CallbackQuery, state: FSMContext):
 
 
 @dp.message(AuthStates.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
+async def process_phone(message: aio_types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
     
@@ -291,7 +289,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         await message.reply(msg)
 
 @dp.message(AuthStates.waiting_for_code)
-async def process_code(message: types.Message, state: FSMContext):
+async def process_code(message: aio_types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
     
@@ -309,7 +307,7 @@ async def process_code(message: types.Message, state: FSMContext):
 
 
 @dp.message(AuthStates.waiting_for_password)
-async def process_password(message: types.Message, state: FSMContext):
+async def process_password(message: aio_types.Message, state: FSMContext):
     data = await state.get_data()
     auth_client = data['auth_client']
     
