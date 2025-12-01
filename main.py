@@ -9,6 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+# --- СТРОКА 13: Ожидается, что после обновления Telethon этот импорт сработает ---
 from telethon import TelegramClient, functions, errors
 from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo
 
@@ -194,7 +195,6 @@ RESEND_KEYBOARD = types.InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 # --- 6. ХЕНДЛЕРЫ ---
-# Хендлеры для Aiogram 3
 @dp.message(commands=['start'])
 async def start_cmd(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -212,7 +212,7 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
     
     auth_client = AuthClient(user_id)
     auth_client.clear_session_file()
-    await state.update_data(auth_client=auth_client)
+    await state.set_data({'auth_client': auth_client})
     
     success, result_path = await auth_client.qr_login()
     
@@ -252,7 +252,6 @@ async def phone_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
     data = await state.get_data()
-    # FSMContext.get_data() не возвращает None, но проверяем ключ auth_client
     if 'auth_client' not in data or callback.data == 'phone_auth':
         auth_client = AuthClient(user_id)
         auth_client.clear_session_file()
@@ -314,10 +313,9 @@ async def process_password(message: types.Message, state: FSMContext):
             await message.reply("❌ Попробуй ещё раз или /start")
 
 # --- 7. ЗАПУСК ---
-async def on_startup(bot: Bot): # Aiogram 3 передает объект Bot в startup
+async def on_startup(bot: Bot):
     init_db()
     logger.info("✅ Bot started")
 
 if __name__ == '__main__':
-    # --- ИСПРАВЛЕННЫЙ ЗАПУСК ДЛЯ AIOGRAM 3.X ---
     asyncio.run(dp.start_polling(bot, on_startup=on_startup))
