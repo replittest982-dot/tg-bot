@@ -3,23 +3,23 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-# --- ИМПОРТЫ AIOGRAM 3.X (Исправлены псевдонимы для типов) ---
+# --- ИМПОРТЫ AIOGRAM 3.X (Исправлены псевдонимы для типов и добавлен фильтр Command) ---
 from aiogram import Bot
 from aiogram import Dispatcher
-from aiogram import types as aio_types # <-- ИЗМЕНЕНО: Используем псевдоним
+from aiogram import types as aio_types 
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
 from aiogram.fsm.state import StatesGroup
-from aiogram.types import FSInputFile # Точное местоположение для FSInputFile
+from aiogram.types import FSInputFile 
+from aiogram.filters import Command # <-- ИМПОРТ ФИЛЬТРА COMMAND
 
 # --- ИМПОРТЫ TELETHON ---
 from telethon import TelegramClient
 from telethon import functions
 from telethon import errors
-from telethon.tl import types # <--- Теперь это types Telethon, не конфликтует
+from telethon.tl import types 
 from telethon.tl.types import User 
-# Обратите внимание: LoginToken и LoginTokenMigrateTo теперь будут types.LoginToken и types.LoginTokenMigrateTo
 
 # 🎨 Библиотеки для QR-кода
 import qrcode
@@ -193,7 +193,6 @@ class AuthClient:
             return False, f"❌ Ошибка: {str(e)}. Нажми /start."
 
 # --- 5. КЛАВИАТУРЫ ---
-# ИСПОЛЬЗУЕМ aio_types
 AUTH_KEYBOARD = aio_types.InlineKeyboardMarkup(inline_keyboard=[
     [aio_types.InlineKeyboardButton(text="🔑 QR авторизация", callback_data="qr_auth")],
     [aio_types.InlineKeyboardButton(text="📞 По номеру", callback_data="phone_auth")]
@@ -204,8 +203,8 @@ RESEND_KEYBOARD = aio_types.InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 # --- 6. ХЕНДЛЕРЫ ---
-# ИСПОЛЬЗУЕМ aio_types
-@dp.message(commands=['start'])
+# ИСПРАВЛЕНО: Используем Command('start')
+@dp.message(Command('start')) 
 async def start_cmd(message: aio_types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return await message.reply("🚫 Доступ только для админа")
