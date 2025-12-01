@@ -797,6 +797,23 @@ async def cb_auth_qr_init(callback: CallbackQuery, state: FSMContext):
         # Получаем объект для QR-логина
         qr_login = await client(functions.auth.ExportLoginTokenRequest(api_id=API_ID, api_hash=API_HASH, except_ids=[user_id]))
         
+        # --- ИСПРАВЛЕНИЕ ОШИБКИ AttributeError: 'LoginToken' object has no attribute 'url' ---
+        if not hasattr(qr_login, 'url') or not qr_login.url:
+            logger.error(f"QR Auth Error for {user_id}: Returned object {type(qr_login).__name__} has no usable 'url'. Falling back to phone auth suggestion.")
+            await manager._send_to_bot_user(user_id, 
+                "⚠️ **Ошибка QR-авторизации:** Не удалось получить ссылку для QR-кода (возможно, из-за миграции DC или настроек сессии).\n"
+                "Пожалуйста, воспользуйтесь **входом по номеру телефона**.", 
+                InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📞 Войти по номеру", callback_data="auth_phone_init")],
+                    [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+                ])
+            )
+            await callback.message.delete()
+            await manager._cleanup_temp_session(user_id)
+            await callback.answer()
+            return # Выход после обработки ошибки
+        # ----------------------------------------------------------------------------------
+        
         # Генерируем QR-код
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(qr_login.url)
@@ -831,8 +848,8 @@ async def cb_auth_qr_init(callback: CallbackQuery, state: FSMContext):
         await callback.message.delete()
         
     except Exception as e:
-        logger.error(f"QR Auth Error for {user_id}: {e}")
-        await manager._send_to_bot_user(user_id, f"❌ Не удалось сгенерировать QR-код. Ошибка: {type(e).__name__}", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]]))
+        logger.error(f"QR Auth Unhandled Error for {user_id}: {type(e).__name__} - {e}")
+        await manager._send_to_bot_user(user_id, f"❌ Не удалось сгенерировать QR-код. Произошла неизвестная ошибка: {type(e).__name__}", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]]))
         await manager._cleanup_temp_session(user_id)
     
     await callback.answer()
@@ -906,7 +923,6 @@ async def cb_stop_worker(callback: CallbackQuery):
 # VI. ЗАПУСК БОТА
 # =========================================================================
 
-# ИСПРАВЛЕНА: Удален аргумент 'dp', который вызывал ошибку Aiogram
 async def on_startup():
     """Выполняется при запуске бота."""
     await db.init()
