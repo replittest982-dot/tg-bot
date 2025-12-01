@@ -359,7 +359,7 @@ class TelethonManager:
     async def start_worker_session(self, user_id: int, client_temp: TelegramClient):
         """
         Сохраняет сессию в постоянный файл, удаляет временный и запускает Worker.
-        ИСПРАВЛЕНИЕ: Копируем данные из temp-сессии в новую, постоянную сессию.
+        ИСПРАВЛЕНИЕ: Убрали 'await' перед _copy_session_from для предотвращения TypeError.
         """
         path_perm = get_session_path(user_id)
         
@@ -379,8 +379,8 @@ class TelethonManager:
             client_perm = await _new_telethon_client(user_id, is_temp=False) 
             
             # Копируем авторизационные данные из временного клиента в постоянный
-            # Это самый надежный способ передать авторизационную информацию
-            await client_perm._copy_session_from(client_temp)
+            # *** ИСПРАВЛЕНО: УБРАН 'await' ***
+            client_perm._copy_session_from(client_temp) 
             
             # Принудительное сохранение сессии в постоянный файл
             # При копировании сессия клиента_perm уже имеет постоянный путь
@@ -1006,7 +1006,8 @@ async def msg_auth_password(message: Message, state: FSMContext):
         await manager.start_worker_session(user_id, client) 
         
     except PasswordHashInvalidError:
-        await manager._send_to_bot_user(user_id, "❌ Неверный 2FA пароль. Попробуйте еще раз.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]]))
+        await manager._send_to_bot_user(user_id, "❌ Неверный 2FA пароль. Попробуйте еще раз.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_auth")]])
+        )
     except Exception as e:
         logger.error(f"Auth error (password step) for {user_id}: {type(e).__name__} - {e}")
         await manager._cleanup_temp_session(user_id)
