@@ -11,14 +11,16 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
 from aiogram.fsm.state import StatesGroup
+from aiogram.types import FSInputFile # Точное местоположение для FSInputFile
 
-# --- ИМПОРТЫ TELETHON (Исправлены и разделены) ---
+# --- ИМПОРТЫ TELETHON (ИСПРАВЛЕНО ДЛЯ СТАРЫХ ВЕРСИЙ) ---
 from telethon import TelegramClient
 from telethon import functions
 from telethon import errors
-from telethon.tl.types import User
-from telethon.tl.functions.auth import LoginToken
-from telethon.tl.functions.auth import LoginTokenMigrateTo
+# Импортируем базовые модули, а типы вызываем через них
+from telethon.tl import types
+from telethon.tl.types import User 
+# Обратите внимание: LoginToken и LoginTokenMigrateTo теперь будут types.LoginToken и types.LoginTokenMigrateTo
 
 # 🎨 Библиотеки для QR-кода
 import qrcode
@@ -94,13 +96,15 @@ class AuthClient:
             ))
             
             # 2. Обработка миграции DC
-            if isinstance(result, LoginTokenMigrateTo):
+            # ИСПОЛЬЗУЕМ types.LoginTokenMigrateTo
+            if isinstance(result, types.LoginTokenMigrateTo):
                 await client.disconnect() 
                 self.client._sender._dc_id = result.dc_id 
                 await self.client.connect()
                 result = await self.client(functions.auth.ImportLoginTokenRequest(result.token))
             
-            if isinstance(result, LoginToken) and result.url:
+            # ИСПОЛЬЗУЕМ types.LoginToken
+            if isinstance(result, types.LoginToken) and result.url:
                 logger.info(f"QR URL получен: {result.url[:50]}...")
                 
                 # 3. ✅ ГЕНЕРАЦИЯ QR-КОДА
@@ -227,9 +231,10 @@ async def qr_start(callback: types.CallbackQuery, state: FSMContext):
         qr_path = result_path
         # ✅ ОТПРАВКА QR-КОДА
         try:
+            # ИСПОЛЬЗУЕМ FSInputFile
             await bot.send_photo(
                 user_id,
-                photo=types.FSInputFile(qr_path),
+                photo=FSInputFile(qr_path),
                 caption="✅ **QR-код для авторизации готов!** Отсканируйте его официальным клиентом Telegram. (Действителен ~5 минут)"
             )
             await state.set_state(AuthStates.waiting_for_qr_scan)
