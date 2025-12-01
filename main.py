@@ -24,7 +24,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, 
-    BufferedInputFile # <--- ИСПРАВЛЕНИЕ: Добавлен импорт для корректной работы с QR-кодом
+    BufferedInputFile
 )
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
@@ -143,6 +143,11 @@ async def safe_edit_or_send(
     Использует delete+send для избежания Bad Request ошибок Aiogram.
     """
     
+    # 💥 ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Предотвращение ошибки Pydantic
+    if isinstance(reply_markup, int):
+        logger.error(f"CORRECTION: Received int {reply_markup} as reply_markup for {chat_id}. Setting to None.")
+        reply_markup = None
+        
     # 1. Если передан message_id, пытаемся удалить старое сообщение.
     if message_id:
         try:
@@ -361,10 +366,6 @@ class TelethonManager:
         await self._cleanup_temp_session(user_id) 
 
         # Переименование temp-файла в perm-файл (если авторизация прошла в temp)
-        
-        # NOTE: Telethon сохраняет сессию в файл при sign_in/qr_login.wait().
-        # Если авторизация была через QR или sign_in, temp-файл должен существовать.
-        
         if os.path.exists(path_temp):
             logger.info(f"Worker {user_id}: Found temp session. Moving to permanent.")
             
@@ -397,7 +398,6 @@ class TelethonManager:
                 try: os.remove(path_temp)
                 except OSError as e: logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}") 
         else:
-            # Если sign_in/qr_login прошел, но файл не создан - это странно.
             logger.error(f"Worker {user_id}: Temp session file not found during session finish. Auth failed.")
             await self._send_to_bot_user(user_id, "❌ Файл сессии не найден. Авторизация не завершена.")
 
@@ -555,7 +555,6 @@ class TelethonManager:
             # =================================================================
             
             # Хендлер для команды .лс
-            # NOTE: chats=[user_id] гарантирует, что команда сработает только в ЛС с ботом
             client.add_event_handler(
                 self._handle_ls_command, 
                 events.NewMessage(pattern=r'^\.лс\s', incoming=True, chats=[user_id]) 
@@ -625,33 +624,46 @@ class TelethonManager:
                 if await client.is_user_authorized():
                     logger.info(f"Worker {user_id}: QR login successful. Starting session.")
                     await self.start_worker_session(user_id, client)
-                else:
-                    # Если авторизация прошла, но is_user_authorized() - False, это почти всегда 2FA.
-                    raise SessionPasswordNeededError('2FA is required')
-                    
+                    return # Успешный выход
+
             except SessionPasswordNeededError:
-                # Если требуется 2FA (QR-код не пропускает этот шаг)
-                await self._send_to_bot_user(user_id, 
-                    "🔒 <b>ТРЕБУЕТСЯ ПАРОЛЬ</b>. Ваш аккаунт защищен двухфакторной аутентификацией. \nПожалуйста, воспользуйтесь 'Входом по номеру телефона' для ввода пароля, так как QR-код не позволяет его ввести.", 
-                    InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
-                )
-                
+                # Если авторизация прошла, но is_user_authorized() - False ИЛИ qr_login.wait() вернул 2FA
+                # В этом случае, нужно перейти к вводу по номеру
+                pass # Обработка будет ниже, чтобы избежать дублирования кода
+            
         except TimeoutError:
             if not qr_future.done():
                 qr_future.set_result(False)
             await self._send_to_bot_user(user_id, "❌ Время ожидания QR-кода истекло (60 сек). Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
-        
+            return
+
         except asyncio.CancelledError:
              logger.info(f"QR wait task for {user_id} was cancelled.")
+             return
              
         except Exception as e:
             logger.error(f"QR wait error for {user_id}: {type(e).__name__} - {e}")
             if not qr_future.done():
                 qr_future.set_result(False)
-            await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
-        finally:
-            # Очистка
-            await self._cleanup_temp_session(user_id) # Очищает и temp_auth_clients, и qr_login_future
+            # await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+            # Мы попадем в блок 2FA ниже, если это была SessionPasswordNeededError
+            if not isinstance(e, SessionPasswordNeededError):
+                 await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+                 return
+        
+        # ЕСЛИ ДОШЛИ СЮДА, ЗНАЧИТ: либо была SessionPasswordNeededError (в логе как error, но ожидаема), 
+        # либо мы не смогли завершить вход.
+        
+        # Отправляем сообщение о необходимости ввода пароля через номер
+        await self._send_to_bot_user(user_id, 
+            "🔒 <b>ТРЕБУЕТСЯ ПАРОЛЬ (2FA)</b>\n"
+            "Ваш аккаунт защищен двухфакторной аутентификацией. QR-код не может завершить вход. \n"
+            "Пожалуйста, используйте кнопку **'Вход по номеру телефона'** для ввода пароля.", 
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📞 Войти по номеру", callback_data="cb_auth_phone")],[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
+        )
+        
+        # Очистка в любом случае, кроме успешного запуска worker'а
+        await self._cleanup_temp_session(user_id) 
 
 
 manager = TelethonManager(bot, db)
@@ -1059,7 +1071,7 @@ async def cb_worker_status(call: CallbackQuery, state: FSMContext):
     elif is_active:
         text = f"🟢 Worker активен и работает.\nАккаунт подключен.\nПодписка до: <b>{sub_end.strftime('%d.%m.%Y %H:%M')}</b>"
     else:
-        text = "🟡 Аккаунт подключен, подписка активна, но Worker не запущен (возможно, был остановлен вручную).\nНажмите 'Сменить Аккаунт', чтобы перезапустить его."
+        text = "🟡 Аккаунт подключен, подписка активна, но Worker не запущен (возможно, был остановлен вручную).\nНажмите '🔑 Сменить Аккаунт', чтобы перезапустить его."
 
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
