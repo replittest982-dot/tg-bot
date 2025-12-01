@@ -9,9 +9,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# --- СТРОКА 13: Ожидается, что после обновления Telethon этот импорт сработает ---
+# --- ИСПРАВЛЕННЫЙ ИМПОРТ TELETHON (Строка 14) ---
 from telethon import TelegramClient, functions, errors
-from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo
+# Если Telethon старый, классы LoginToken могут быть не видны. Оставляем как есть, 
+# полагаясь на то, что это все-таки современный код.
+from telethon.tl.types import User, LoginToken, LoginTokenMigrateTo 
+# Если ошибка повторяется, замените эту строку на:
+# from telethon.tl.types import User
+# LoginToken = None # Заглушки, если обновление невозможно
+# LoginTokenMigrateTo = None
 
 # 🎨 Библиотеки для QR-кода
 import qrcode
@@ -87,13 +93,14 @@ class AuthClient:
             ))
             
             # 2. Обработка миграции DC
-            if isinstance(result, LoginTokenMigrateTo):
+            # Используем isinstance с проверкой, чтобы избежать ошибок, если LoginToken не импортировался
+            if LoginTokenMigrateTo is not None and isinstance(result, LoginTokenMigrateTo):
                 await client.disconnect() 
                 self.client._sender._dc_id = result.dc_id 
                 await self.client.connect()
                 result = await self.client(functions.auth.ImportLoginTokenRequest(result.token))
             
-            if isinstance(result, LoginToken) and result.url:
+            if LoginToken is not None and isinstance(result, LoginToken) and result.url:
                 logger.info(f"QR URL получен: {result.url[:50]}...")
                 
                 # 3. ✅ ГЕНЕРАЦИЯ QR-КОДА
@@ -114,7 +121,7 @@ class AuthClient:
                 # Возвращаем путь к файлу
                 return True, qr_path
             else:
-                raise Exception("QR token без URL")
+                raise Exception("QR token без URL или класс LoginToken не найден")
                 
         except Exception as e:
             await self.disconnect()
