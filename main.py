@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-🚀 STATPRO ULTIMATE v3.8 - MIDDLEWARE STUB FIX
-✅ Полностью устранен ModuleNotFoundError: No module named 'aiogram.middleware'
-✅ Проблемный импорт заменен заглушкой (stub) для обхода ошибок окружения.
-✅ КОД ГОТОВ К ЗАПУСКУ.
+🚀 STATPRO ULTIMATE v4.0 - FINAL CONFIG CHECK
+✅ Убрана отладочная печать токена.
+✅ Код чистый и готов к запуску при условии, что все 4 переменные (включая API_ID)
+   корректно установлены в панели bothost.ru.
 """
 
 import asyncio
@@ -47,10 +47,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.filters import Command, BaseFilter
 from aiogram.client.default import DefaultBotProperties
 
-# 💡 ИСПРАВЛЕНИЕ 1: Удаляем проблемный импорт и заменяем его заглушкой
-# from aiogram.middleware.base import BaseMiddleware # <-- УДАЛЕНО
-
-# Создаем заглушку класса, чтобы избежать ModuleNotFoundError:
+# Заглушка для BaseMiddleware (должна быть заменена настоящей, если обновишь Aiogram)
 class BaseMiddlewareStub:
     """Заглушка для BaseMiddleware на случай проблем с импортом."""
     def __init__(self, *args, **kwargs):
@@ -58,7 +55,11 @@ class BaseMiddlewareStub:
     async def __call__(self, handler, event: Message, data):
         return await handler(event, data)
 
-BaseMiddleware = BaseMiddlewareStub # Назначаем заглушку как BaseMiddleware
+# Проверяем, существует ли настоящий класс (для совместимости)
+try:
+    from aiogram.middleware.base import BaseMiddleware
+except ImportError:
+    BaseMiddleware = BaseMiddlewareStub
 
 # Telethon
 from telethon import TelegramClient, events
@@ -72,22 +73,30 @@ from telethon.errors import (
 # 1. КОНФИГУРАЦИЯ
 # =========================================================================
 
+# Загружаем переменные, если они есть (в твоем случае, они идут с хостинга)
 load_dotenv(override=True)
 
 # Проверка переменных окружения
 REQUIRED_ENV = ["BOT_TOKEN", "ADMIN_ID", "API_ID", "API_HASH"]
 MISSING_ENV = [key for key in REQUIRED_ENV if not os.getenv(key)]
 if MISSING_ENV:
-    print(f"❌ ОШИБКА: В .env не хватает: {', '.join(MISSING_ENV)}")
+    # 💥 Это сообщение выводится, если не хватает критической переменной
+    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: В настройках не хватает переменных: {', '.join(MISSING_ENV)}. Проверьте панель хостинга.")
     sys.exit(1)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 50))
-RATE_LIMIT = float(os.getenv("RATE_LIMIT", "1.0"))
-QR_TIMEOUT = int(os.getenv("QR_TIMEOUT", "60"))
+# Приводим типы к нужному виду
+try:
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    ADMIN_ID = int(os.getenv("ADMIN_ID"))
+    API_ID = int(os.getenv("API_ID"))
+    API_HASH = os.getenv("API_HASH")
+    MAX_WORKERS = int(os.getenv("MAX_WORKERS", 50))
+    RATE_LIMIT = float(os.getenv("RATE_LIMIT", "1.0"))
+    QR_TIMEOUT = int(os.getenv("QR_TIMEOUT", "60"))
+except ValueError as e:
+    print(f"❌ ОШИБКА КОНФИГУРАЦИИ: Неверный формат числовой переменной: {e}. Проверьте ADMIN_ID или API_ID.")
+    sys.exit(1)
+
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -461,12 +470,9 @@ dp.include_router(user_router)
 dp.include_router(admin_router)
 
 class ThrottlingMiddleware(BaseMiddleware):
-    # ВНИМАНИЕ: Если ты не выполнил 'pip install -U aiogram', этот класс 
-    # будет использовать заглушку BaseMiddlewareStub и не будет работать
-    # как настоящий ThrottlingMiddleware.
     async def __call__(self, handler, event: Message, data):
+        # Если используется заглушка, просто пропускаем обработку
         if isinstance(self, BaseMiddlewareStub):
-             # Если используется заглушка, просто пропускаем обработку
              return await handler(event, data)
 
         user_id = event.from_user.id
@@ -723,9 +729,12 @@ async def main():
     asyncio.create_task(heartbeat())
     
     try:
+        # dp.start_polling начнет опрашивать Telegram, используя BOT_TOKEN
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         logger.error(f"Критический сбой в Aiogram: {e}")
+        if "Unauthorized" in str(e):
+            logger.error("🚨 ПРЕДУПРЕЖДЕНИЕ: Ошибка Unauthorized. Проверьте BOT_TOKEN и убедитесь, что он свежий и полный.")
     finally:
         logger.info("🛑 SYSTEM SHUTDOWN")
         tasks = []
