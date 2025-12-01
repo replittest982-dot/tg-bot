@@ -24,8 +24,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, 
-    BufferedInputFile
+    InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, 
+    BufferedInputFile
 )
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
