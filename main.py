@@ -143,7 +143,7 @@ async def safe_edit_or_send(
     Использует delete+send для избежания Bad Request ошибок Aiogram.
     """
     
-    # 💥 ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Предотвращение ошибки Pydantic
+    # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Предотвращение ошибки Pydantic
     if isinstance(reply_markup, int):
         logger.error(f"CORRECTION: Received int {reply_markup} as reply_markup for {chat_id}. Setting to None.")
         reply_markup = None
@@ -151,17 +151,14 @@ async def safe_edit_or_send(
     # 1. Если передан message_id, пытаемся удалить старое сообщение.
     if message_id:
         try:
-            # ИСПРАВЛЕНИЕ: Передаем message_id в delete_message
             await bot_instance.delete_message(chat_id, message_id)
         except TelegramAPIError as e:
-            # Если не можем удалить (например, сообщение слишком старое), просто отправляем новое
             logger.warning(f"Failed to delete old message {message_id} for {chat_id}: {e}. Sending new message.")
         except Exception as e:
             logger.warning(f"Unexpected error during delete for {chat_id}: {e}")
 
     # 2. Отправляем новое сообщение.
     try:
-        # ИСПРАВЛЕНИЕ: reply_markup должен быть либо None, либо объектом InlineKeyboardMarkup
         await bot_instance.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e_send:
         logger.error(f"FATAL: Failed to send message to {chat_id}: {e_send}")
@@ -341,10 +338,12 @@ class TelethonManager:
         
         if client:
             try:
-                if hasattr(client, "is_connected") and await client.is_connected(): await client.disconnect()
+                # Отключать не обязательно, так как он будет запущен снова или просто очищен
+                if hasattr(client, "is_connected") and await client.is_connected(): await client.disconnect() 
             except Exception:
                 pass
                 
+        # Удаляем ТОЛЬКО временный файл, если он существует. 
         path_temp = get_session_path(user_id, is_temp=True) + '.session'
         if os.path.exists(path_temp):
             try: 
@@ -354,52 +353,42 @@ class TelethonManager:
                 logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}")
 
     async def start_worker_session(self, user_id: int, client: TelegramClient):
-        """Сохраняет сессию, удаляет временный файл и запускает Worker."""
-        path_perm_base = get_session_path(user_id)
-        path_temp_base = get_session_path(user_id, is_temp=True)
-        path_perm = path_perm_base + '.session'
-        path_temp = path_temp_base + '.session'
-
-        # Очистка предыдущего temp-состояния и остановка старого worker'а
+        """
+        Сохраняет сессию в постоянный файл, удаляет временный и запускает Worker.
+        Используем client.session.save() для надежного сохранения.
+        """
+        path_perm = get_session_path(user_id)
+        
+        # 1. Очистка старого состояния и остановка worker'а
         await self.stop_worker(user_id, silent=True)
-        # Очистка QR future и временного клиента (саму сессию чистим ниже, если она temp)
+
+        # 2. **КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:** Принудительное сохранение сессии в постоянный файл.
+        try:
+            # Принудительно меняем путь сессии клиента на постоянный путь
+            if client.session.filename != path_perm:
+                 client.session.set_file(path_perm)
+
+            # Принудительное сохранение сессии в постоянный файл
+            client.session.save()
+            logger.info(f"Worker {user_id}: Session successfully saved to permanent path.")
+
+        except Exception as e:
+            logger.error(f"Worker {user_id}: Failed to save permanent session file: {e}")
+            await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
+            await self._cleanup_temp_session(user_id) 
+            return
+
+        # 3. Очистка временного клиента и временного файла сессии (если был создан)
+        # Временный клиент уже не нужен, так как мы сохранили сессию.
         await self._cleanup_temp_session(user_id) 
-
-        # Переименование temp-файла в perm-файл (если авторизация прошла в temp)
-        if os.path.exists(path_temp):
-            logger.info(f"Worker {user_id}: Found temp session. Moving to permanent.")
-            
-            # Сначала закрываем клиент, чтобы освободить файл
-            try:
-                if hasattr(client, "is_connected") and await client.is_connected(): await client.disconnect()
-            except Exception:
-                pass
-                
-            if os.path.exists(path_perm): 
-                os.remove(path_perm)
-                logger.warning(f"Worker {user_id}: Overwrote existing permanent session.")
-            
-            try:
-                os.rename(path_temp, path_perm)
-            except OSError as e:
-                logger.error(f"Worker {user_id}: Failed to rename session file from temp to perm: {e}")
-                await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
-                return 
-
-            if os.path.exists(path_perm): 
-                logger.info(f"Worker {user_id}: Session moved successfully. Starting task.")
-                await self.start_client_task(user_id) 
-            else:
-                 logger.error(f"Worker {user_id}: Failed to find permanent session after rename operation.")
-                 await self._send_to_bot_user(user_id, "❌ Критическая ошибка при сохранении сессии. Повторите вход.")
-                 
-            # Удаление temp-файла, если по какой-то причине он остался
-            if os.path.exists(path_temp): 
-                try: os.remove(path_temp)
-                except OSError as e: logger.error(f"Worker {user_id}: Failed to delete temporary session file: {e}") 
+        
+        # 4. Запуск Worker'а
+        if os.path.exists(path_perm + '.session'): 
+            logger.info(f"Worker {user_id}: Permanent session found. Starting task.")
+            await self.start_client_task(user_id) 
         else:
-            logger.error(f"Worker {user_id}: Temp session file not found during session finish. Auth failed.")
-            await self._send_to_bot_user(user_id, "❌ Файл сессии не найден. Авторизация не завершена.")
+             logger.error(f"Worker {user_id}: Failed to find permanent session after save operation.")
+             await self._send_to_bot_user(user_id, "❌ Критическая ошибка: Файл постоянной сессии не найден. Повторите вход.")
 
 
     async def start_client_task(self, user_id: int):
@@ -615,44 +604,44 @@ class TelethonManager:
             # Ждем сканирования
             await qr_login.wait(timeout=65) 
             
-            # --- АВТОРИЗАЦИЯ УСПЕШНА ---
+            # --- АВТОРИЗАЦИЯ УСПЕШНА (QR-код СКАНИРОВАН) ---
             if not qr_future.done():
                 qr_future.set_result(True)
                 
-            try:
-                # Проверяем, авторизован ли пользователь (пропуск 2FA)
-                if await client.is_user_authorized():
-                    logger.info(f"Worker {user_id}: QR login successful. Starting session.")
-                    await self.start_worker_session(user_id, client)
-                    return # Успешный выход
+            # Проверяем, авторизован ли пользователь (пропуск 2FA)
+            if await client.is_user_authorized():
+                # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+                await self._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
+                logger.info(f"Worker {user_id}: QR login successful. Starting session.")
+                await self.start_worker_session(user_id, client)
+                return # Успешный выход
 
-            except SessionPasswordNeededError:
-                # Если авторизация прошла, но is_user_authorized() - False ИЛИ qr_login.wait() вернул 2FA
-                # В этом случае, нужно перейти к вводу по номеру
-                pass # Обработка будет ниже, чтобы избежать дублирования кода
-            
         except TimeoutError:
             if not qr_future.done():
                 qr_future.set_result(False)
             await self._send_to_bot_user(user_id, "❌ Время ожидания QR-кода истекло (60 сек). Повторите попытку.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+            await self._cleanup_temp_session(user_id) 
             return
 
         except asyncio.CancelledError:
              logger.info(f"QR wait task for {user_id} was cancelled.")
+             await self._cleanup_temp_session(user_id) 
              return
              
+        except SessionPasswordNeededError:
+            # Обработка 2FA - это ожидаемое поведение, если аккаунт защищен.
+            logger.info(f"Worker {user_id}: QR login successful, but 2FA password required.")
+            pass # Продолжаем к блоку 2FA ниже
+            
         except Exception as e:
             logger.error(f"QR wait error for {user_id}: {type(e).__name__} - {e}")
             if not qr_future.done():
                 qr_future.set_result(False)
-            # await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
-            # Мы попадем в блок 2FA ниже, если это была SessionPasswordNeededError
-            if not isinstance(e, SessionPasswordNeededError):
-                 await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
-                 return
+            await self._send_to_bot_user(user_id, "❌ Произошла ошибка. Попробуйте войти по номеру телефона.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]]))
+            await self._cleanup_temp_session(user_id) 
+            return
         
-        # ЕСЛИ ДОШЛИ СЮДА, ЗНАЧИТ: либо была SessionPasswordNeededError (в логе как error, но ожидаема), 
-        # либо мы не смогли завершить вход.
+        # ЕСЛИ ДОШЛИ СЮДА, ЗНАЧИТ SessionPasswordNeededError ИЛИ НЕУДАЧНЫЙ QR
         
         # Отправляем сообщение о необходимости ввода пароля через номер
         await self._send_to_bot_user(user_id, 
@@ -662,7 +651,7 @@ class TelethonManager:
             InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📞 Войти по номеру", callback_data="cb_auth_phone")],[InlineKeyboardButton(text="⬅️ В меню", callback_data="cancel_auth")]])
         )
         
-        # Очистка в любом случае, кроме успешного запуска worker'а
+        # Очистка временной сессии после неудачного входа/перехода на 2FA
         await self._cleanup_temp_session(user_id) 
 
 
@@ -935,6 +924,8 @@ async def msg_auth_code(message: Message, state: FSMContext):
         
         # --- АВТОРИЗАЦИЯ УСПЕШНА (БЕЗ 2FA) ---
         await state.clear()
+        # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+        await manager._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
         await manager.start_worker_session(user_id, client)
         
     except SessionPasswordNeededError:
@@ -987,6 +978,8 @@ async def msg_auth_password(message: Message, state: FSMContext):
         
         # --- АВТОРИЗАЦИЯ УСПЕШНА (С 2FA) ---
         await state.clear()
+        # **НОВОЕ** Явное сообщение об успешном входе перед запуском Worker
+        await manager._send_to_bot_user(user_id, "✅ **Успешный вход!** Инициализирую Worker...")
         await manager.start_worker_session(user_id, client) 
         
     except PasswordHashInvalidError:
