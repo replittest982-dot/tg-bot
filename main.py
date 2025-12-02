@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Ultimate v8.0 - FINAL STABLE
-✅ Таймауты увеличены до 500 сек.
-✅ Исправлены импорты.
-✅ Полная интеграция Aiogram + Telethon Worker.
+🚀 StatPro Ultimate v8.1 - FIX IMPORT ERROR
+✅ ИСПРАВЛЕНО: Импорт ChatMemberStatus из aiogram.enums
+✅ ИСПРАВЛЕНО: Логика Middleware (убран CancelHandler)
+✅ Таймауты 500 сек.
 """
 
 import asyncio
@@ -18,28 +18,29 @@ from typing import Dict, Optional, Union
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# --- AIOGRAM ---
+# --- AIOGRAM IMPORTS ---
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message,
-    BufferedInputFile, ChatMemberStatus
+    BufferedInputFile
 )
+# 💥 ФИКС: Импортируем статус из enums
+from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.dispatcher.event.bases import CancelHandler
 
-# --- TELETHON ---
+# --- TELETHON IMPORTS ---
 from telethon import TelegramClient, events
 from telethon.errors import (
     SessionPasswordNeededError, PhoneNumberInvalidError, PhoneCodeInvalidError,
     PasswordHashInvalidError, FloodWaitError
 )
 
-# --- QR ---
+# --- QR IMPORTS ---
 import qrcode
 from PIL import Image
 
@@ -47,26 +48,25 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# Глобальные статусы
 WORKER_STATUSES: Dict[int, str] = {}
 COMMAND_CONFIGS: Dict[int, Dict[str, int]] = {}
 
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
+    # Используем 0 как дефолт, чтобы не падало при str->int
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # 💥 ТАЙМАУТ 500 СЕКУНД (ПО УМОЛЧАНИЮ)
+    # Таймаут 500 секунд
     AUTH_TIMEOUT = int(os.getenv("QR_TIMEOUT", "500"))
     
     SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
     TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL", "https://t.me/STAT_PRO1")
-    # Для проверки подписки нужен ID канала (начинается с -100)
-    TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0")) 
+    TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
     
 except ValueError as e:
-    print(f"❌ ОШИБКА КОНФИГУРАЦИИ: Неверный формат числа: {e}")
+    print(f"❌ ОШИБКА КОНФИГУРАЦИИ: {e}")
     sys.exit(1)
 
 REQUIRED_ENVS = {"BOT_TOKEN": BOT_TOKEN, "API_ID": API_ID, "API_HASH": API_HASH}
@@ -78,11 +78,10 @@ if not all(REQUIRED_ENVS.values()):
 SESSION_DIR = Path(__file__).parent / "sessions"
 SESSION_DIR.mkdir(exist_ok=True)
 
-# Инициализация конфига админа
+# Конфиг для админа
 COMMAND_CONFIGS[ADMIN_ID] = {"check_group_limit": 900000}
 
 def get_session_path(user_id: int) -> Path:
-    """Путь к сессии (session_USERID.session)."""
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
@@ -93,12 +92,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# III. БД ЗАГЛУШКИ (MOCK DB)
+# III. БД ЗАГЛУШКИ
 # =========================================================================
 
 async def is_subscribed(user_id: int) -> bool:
-    """Проверка внутренней подписки бота (не канала)."""
-    return user_id == ADMIN_ID # Админ всегда подписан
+    return user_id == ADMIN_ID
 
 async def get_subscription_end_date(user_id: int) -> Optional[datetime]:
     if user_id == ADMIN_ID:
@@ -107,42 +105,46 @@ async def get_subscription_end_date(user_id: int) -> Optional[datetime]:
 
 async def create_promo_code(days: int, max_activations: int) -> str:
     code = f"STATPRO-{str(uuid.uuid4())[:6].upper()}"
-    logger.info(f"Создан промокод: {code} ({days} дн)")
     return code
 
 async def activate_promo_code(user_id: int, code: str) -> bool:
     return code == "TEST"
 
 # =========================================================================
-# IV. MIDDLEWARE (ПРОВЕРКА ПОДПИСКИ НА КАНАЛ)
+# IV. MIDDLEWARE (ПРОВЕРКА ПОДПИСКИ)
 # =========================================================================
 
 class SubscriptionCheckMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
         user_id = event.from_user.id
         
-        # 1. Админа пропускаем всегда
+        # 1. Пропускаем админа
         if user_id == ADMIN_ID:
             return await handler(event, data)
         
-        # 2. Если ID канала не настроен, пропускаем (чтобы не блокировать бота)
+        # 2. Если ID канала не задан, пропускаем
         if TARGET_CHANNEL_ID == 0:
             return await handler(event, data)
 
-        # 3. Проверка подписки
+        # 3. Проверка
         try:
             member = await bot.get_chat_member(chat_id=TARGET_CHANNEL_ID, user_id=user_id)
-            if member.status in [ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
+            # Используем Enum для статусов
+            allowed_statuses = [
+                ChatMemberStatus.CREATOR,
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.MEMBER
+            ]
+            if member.status in allowed_statuses:
                 return await handler(event, data)
         except Exception:
-            pass # Ошибка проверки (канал не найден или бот не админ)
+            pass 
             
-        # 4. Сообщение о блокировке
+        # 4. Блокировка
         text = (
             f"🚫 **Доступ закрыт!**\n\n"
-            f"Подпишитесь на канал, чтобы использовать бота:\n"
-            f"{TARGET_CHANNEL_URL}\n\n"
-            f"После подписки нажмите /start"
+            f"Подпишитесь на канал: {TARGET_CHANNEL_URL}\n"
+            f"Затем нажмите /start"
         )
         
         if isinstance(event, Message):
@@ -150,7 +152,8 @@ class SubscriptionCheckMiddleware(BaseMiddleware):
         elif isinstance(event, CallbackQuery):
             await event.answer("🚫 Подпишитесь на канал!", show_alert=True)
             
-        return # Прерываем обработку
+        # Просто делаем return None, чтобы остановить выполнение (вместо CancelHandler)
+        return
 
 # =========================================================================
 # V. КЛАВИАТУРЫ
@@ -208,13 +211,14 @@ class AdminStates(StatesGroup):
     PROMO_DAYS = State()
     PROMO_ACTIVATIONS = State()
 
-# Хранилище временных клиентов для авторизации
 TEMP_AUTH_CLIENTS: Dict[int, TelegramClient] = {}
 
 async def clear_temp_client(user_id: int):
     client = TEMP_AUTH_CLIENTS.pop(user_id, None)
     if client:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except: pass
 
 # --- START & MENU ---
 
@@ -223,8 +227,8 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     text = (
         f"👋 Здравствуйте! Я — <b>STATPRO Bot</b>.\n"
-        f"🆔 Ваш ID: <code>{user_id}</code>\n\n"
-        f"Для работы функций (парсинг, рассылка) требуется авторизация."
+        f"🆔 Ваш ID: <code>{user_id}</code>\n"
+        f"Пожалуйста, авторизуйтесь."
     )
     await message.answer(text, reply_markup=get_main_kb(user_id))
 
@@ -234,18 +238,17 @@ async def cb_main_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("Главное меню:", reply_markup=get_main_kb(call.from_user.id))
 
-# --- АВТОРИЗАЦИЯ (QR) ---
+# --- AUTH ---
 
 @router.callback_query(F.data == "auth_menu")
 async def cb_auth_menu(call: CallbackQuery):
-    await call.message.edit_text("Выберите метод входа:", reply_markup=get_auth_menu_kb())
+    await call.message.edit_text("Метод входа:", reply_markup=get_auth_menu_kb())
 
 @router.callback_query(F.data == "auth_qr")
 async def auth_qr_start(call: CallbackQuery):
     user_id = call.from_user.id
     await clear_temp_client(user_id)
     
-    # Создаем клиент
     client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
     TEMP_AUTH_CLIENTS[user_id] = client
     
@@ -253,7 +256,6 @@ async def auth_qr_start(call: CallbackQuery):
         await client.connect()
         qr_login = await client.qr_login()
         
-        # Генерация картинки
         qr = qrcode.QRCode(box_size=4, border=4)
         qr.add_data(qr_login.url)
         qr.make(fit=True)
@@ -264,208 +266,192 @@ async def auth_qr_start(call: CallbackQuery):
         
         sent = await call.message.answer_photo(
             BufferedInputFile(bio.read(), filename="qr.png"),
-            caption=f"📸 <b>Сканируйте QR!</b>\n⏳ Таймаут: {AUTH_TIMEOUT} сек.\nЕсли долго грузит - это нормально."
+            caption=f"📸 <b>QR-код (Таймаут {AUTH_TIMEOUT}с)</b>\nСканируйте через: Настройки -> Устройства -> Подключить"
         )
         await call.message.delete()
         
-        # Ожидание (500 сек)
         try:
             await asyncio.wait_for(qr_login.wait(), timeout=AUTH_TIMEOUT)
             
             if await client.is_user_authorized():
                 me = await client.get_me()
-                fname = f"session_{me.id}.session"
+                fn = f"session_{me.id}.session"
                 await sent.edit_caption(
-                    caption=f"✅ <b>Успешный вход!</b>\n👤 @{me.username or me.id}\n📁 Сессия: <code>{fname}</code>",
+                    caption=f"✅ <b>Вход выполнен!</b>\n@{me.username}\nФайл: <code>{fn}</code>",
                     reply_markup=get_main_kb(user_id)
                 )
             else:
-                await sent.edit_caption(caption="❌ Не удалось авторизоваться.", reply_markup=get_main_kb(user_id))
+                await sent.edit_caption(caption="❌ Не удалось войти.", reply_markup=get_main_kb(user_id))
         except asyncio.TimeoutError:
             await sent.edit_caption(caption="❌ Время вышло.", reply_markup=get_main_kb(user_id))
             
     except Exception as e:
         logger.error(f"QR Error: {e}")
-        await call.message.answer(f"❌ Ошибка QR: {e}")
+        await call.message.answer(f"❌ Ошибка: {e}")
     finally:
         await clear_temp_client(user_id)
 
-# --- АВТОРИЗАЦИЯ (ТЕЛЕФОН) ---
-
 @router.callback_query(F.data == "auth_phone")
-async def auth_phone_start(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("📱 Введите номер (+7...):")
+async def auth_phone(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text("📱 Номер (+7...):")
     await state.set_state(AuthStates.PHONE)
 
 @router.message(AuthStates.PHONE)
-async def auth_phone_input(message: Message, state: FSMContext):
-    phone = message.text.strip().replace(" ", "")
-    user_id = message.from_user.id
+async def auth_phone_in(msg: Message, state: FSMContext):
+    ph = msg.text.strip().replace(" ", "")
+    uid = msg.from_user.id
+    await clear_temp_client(uid)
     
-    await clear_temp_client(user_id)
-    client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
-    TEMP_AUTH_CLIENTS[user_id] = client
+    client = TelegramClient(str(get_session_path(uid)), API_ID, API_HASH)
+    TEMP_AUTH_CLIENTS[uid] = client
     
     try:
         await client.connect()
-        sent = await client.send_code_request(phone)
-        await state.update_data(phone=phone, hash=sent.phone_code_hash)
+        sent = await client.send_code_request(ph)
+        await state.update_data(phone=ph, hash=sent.phone_code_hash)
         await state.set_state(AuthStates.CODE)
-        await message.answer(f"📩 Введите код (Таймаут {AUTH_TIMEOUT}с):")
+        await msg.answer(f"📩 Код (Таймаут {AUTH_TIMEOUT}с):")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-        await clear_temp_client(user_id)
+        await msg.answer(f"❌ Ошибка: {e}")
 
 @router.message(AuthStates.CODE)
-async def auth_code_input(message: Message, state: FSMContext):
-    code = message.text.strip()
+async def auth_code_in(msg: Message, state: FSMContext):
+    code = msg.text.strip()
     data = await state.get_data()
-    user_id = message.from_user.id
-    client = TEMP_AUTH_CLIENTS.get(user_id)
+    uid = msg.from_user.id
+    client = TEMP_AUTH_CLIENTS.get(uid)
     
-    if not client:
-        return await message.answer("❌ Сессия сброшена. Начните заново.")
-        
+    if not client: return await msg.answer("❌ Сессия сброшена.")
+    
     try:
         await client.sign_in(phone=data['phone'], code=code, phone_code_hash=data['hash'])
         me = await client.get_me()
-        await message.answer(f"✅ <b>Успех!</b> Вошли как: @{me.username or me.id}", reply_markup=get_main_kb(user_id))
-        await clear_temp_client(user_id)
+        await msg.answer(f"✅ Вход: @{me.username}", reply_markup=get_main_kb(uid))
+        await clear_temp_client(uid)
         await state.clear()
     except SessionPasswordNeededError:
-        await message.answer("🔒 Введите 2FA пароль:")
+        await msg.answer("🔒 Пароль 2FA:")
         await state.set_state(AuthStates.PASSWORD)
     except Exception as e:
-        await message.answer(f"❌ Ошибка кода: {e}")
+        await msg.answer(f"❌ Ошибка: {e}")
 
 @router.message(AuthStates.PASSWORD)
-async def auth_pass_input(message: Message, state: FSMContext):
-    pwd = message.text.strip()
-    user_id = message.from_user.id
-    client = TEMP_AUTH_CLIENTS.get(user_id)
+async def auth_pass_in(msg: Message, state: FSMContext):
+    pwd = msg.text.strip()
+    uid = msg.from_user.id
+    client = TEMP_AUTH_CLIENTS.get(uid)
     
     try:
         await client.sign_in(password=pwd)
         me = await client.get_me()
-        await message.answer(f"✅ <b>Успех (2FA)!</b> @{me.username}", reply_markup=get_main_kb(user_id))
+        await msg.answer(f"✅ Вход (2FA): @{me.username}", reply_markup=get_main_kb(uid))
     except Exception as e:
-        await message.answer(f"❌ Ошибка пароля: {e}")
+        await msg.answer(f"❌ {e}")
     finally:
-        await clear_temp_client(user_id)
+        await clear_temp_client(uid)
         await state.clear()
 
-# --- ФУНКЦИИ И АДМИНКА ---
+# --- FUNCS & ADMIN ---
 
 @router.callback_query(F.data == "main_functions")
 async def cb_funcs(call: CallbackQuery):
-    status = WORKER_STATUSES.get(ADMIN_ID, "Неизвестно")
+    st = WORKER_STATUSES.get(ADMIN_ID, "⚪️ Ожидание")
     await call.message.edit_text(
-        f"📊 <b>Функции</b>\n\nСтатус Worker: {status}\n\nКоманды чата:\n"
-        f"<code>.чекгруппу</code> - Парсинг\n<code>.лс текст @юзер</code> - Рассылка",
+        f"📊 <b>Функции</b>\nWorker статус: {st}\n\n"
+        f"Команды в чатах:\n<code>.чекгруппу</code>\n<code>.лс текст @юзер</code>",
         reply_markup=get_main_kb(call.from_user.id)
     )
 
 @router.callback_query(F.data == "admin_panel")
-async def cb_admin(call: CallbackQuery):
+async def cb_adm(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
     await call.message.edit_text("👑 Админ Панель", reply_markup=get_admin_panel_kb())
 
 @router.callback_query(F.data == "create_promo")
-async def cb_promo(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("Введите кол-во дней:")
+async def cb_cp(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text("Дней:")
     await state.set_state(AdminStates.PROMO_DAYS)
 
 @router.message(AdminStates.PROMO_DAYS)
-async def promo_days(message: Message, state: FSMContext):
-    await state.update_data(d=message.text)
-    await message.answer("Введите кол-во активаций:")
+async def pd(msg: Message, state: FSMContext):
+    await state.update_data(d=msg.text)
+    await msg.answer("Активаций:")
     await state.set_state(AdminStates.PROMO_ACTIVATIONS)
 
 @router.message(AdminStates.PROMO_ACTIVATIONS)
-async def promo_final(message: Message, state: FSMContext):
+async def pa(msg: Message, state: FSMContext):
     data = await state.get_data()
-    code = await create_promo_code(int(data['d']), int(message.text))
-    await message.answer(f"✅ Код: <code>{code}</code>", reply_markup=get_main_kb(message.from_user.id))
+    c = await create_promo_code(int(data['d']), int(msg.text))
+    await msg.answer(f"✅ Код: <code>{c}</code>", reply_markup=get_main_kb(msg.from_user.id))
     await state.clear()
 
 @router.callback_query(F.data == "config_menu")
-async def cb_conf(call: CallbackQuery):
-    await call.message.edit_text("Настройка лимита .чекгруппу:", reply_markup=get_check_group_limit_kb())
+async def cb_cm(call: CallbackQuery):
+    await call.message.edit_text("Лимит парсинга:", reply_markup=get_check_group_limit_kb())
 
 @router.callback_query(F.data.startswith("set_limit:"))
-async def cb_set_limit(call: CallbackQuery):
+async def cb_sl(call: CallbackQuery):
     lim = int(call.data.split(":")[1])
     COMMAND_CONFIGS[ADMIN_ID]["check_group_limit"] = lim
-    await call.answer(f"Лимит установлен: {lim}", show_alert=True)
-    await call.message.edit_text(f"✅ Лимит: {lim}", reply_markup=get_admin_panel_kb())
+    await call.answer(f"Лимит: {lim}", show_alert=True)
+    await call.message.edit_text(f"✅ Установлен лимит: {lim}", reply_markup=get_admin_panel_kb())
 
 # =========================================================================
 # VII. TELETHON WORKER
 # =========================================================================
 
 async def start_worker_task():
-    """Фоновый процесс Worker, использующий сессию Админа."""
-    # 💥 ВАЖНО: Worker всегда ищет сессию ADMIN_ID
-    sess_path = get_session_path(ADMIN_ID)
-    
-    if not sess_path.exists():
-        WORKER_STATUSES[ADMIN_ID] = "🔴 Сессия не найдена. Авторизуйтесь!"
-        logger.warning("Worker: Сессия админа не найдена.")
+    # Ищем сессию АДМИНА
+    sess = get_session_path(ADMIN_ID)
+    if not sess.exists():
+        WORKER_STATUSES[ADMIN_ID] = "🔴 Нет сессии"
         return
 
-    client = TelegramClient(str(sess_path), API_ID, API_HASH)
+    client = TelegramClient(str(sess), API_ID, API_HASH)
     
     @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
-    async def handler_check(event):
-        if not event.is_group and not event.is_channel:
-            return await event.reply("🚫 Только для групп.")
-            
-        limit = COMMAND_CONFIGS[ADMIN_ID].get("check_group_limit", 1000)
-        msg = await event.reply(f"🔍 Парсинг... Лимит: {limit}")
-        WORKER_STATUSES[ADMIN_ID] = f"🔄 Парсинг {event.chat_id}..."
+    async def h_chk(ev):
+        if not (ev.is_group or ev.is_channel): return await ev.reply("🚫 Только группы.")
+        lim = COMMAND_CONFIGS[ADMIN_ID].get("check_group_limit", 1000)
+        
+        m = await ev.reply(f"🔍 Парсинг (Лимит: {lim})...")
+        WORKER_STATUSES[ADMIN_ID] = f"🔄 Парсинг {ev.chat_id}..."
         
         lines = []
-        count = 0
         try:
-            async for u in client.iter_participants(event.chat_id, limit=limit, aggressive=True):
+            async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
                 lines.append(f"@{u.username or 'None'} | {u.first_name} | {u.id}")
-                count += 1
-                if count % 200 == 0: await msg.edit(f"🔍 Найдено: {count}...")
+                if len(lines) % 200 == 0: await m.edit(f"🔍 Найдено: {len(lines)}...")
         except Exception as e:
-            return await msg.edit(f"❌ Ошибка: {e}")
+            return await m.edit(f"❌ {e}")
             
-        fname = f"users_{event.chat_id}.txt"
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-            
-        await client.send_file(event.chat_id, fname, caption=f"✅ Собрано: {count}")
-        os.remove(fname)
-        WORKER_STATUSES[ADMIN_ID] = "✅ Готов к работе"
+        fn = f"users_{ev.chat_id}.txt"
+        with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(lines))
+        await client.send_file(ev.chat_id, fn, caption=f"✅ Готово: {len(lines)}")
+        os.remove(fn)
+        WORKER_STATUSES[ADMIN_ID] = "🟢 Готов"
 
     @client.on(events.NewMessage(pattern=r'^\.лс (.*?)(?: @(\S+))?$'))
-    async def handler_dm(event):
-        match = re.match(r'^\.лс (.*?)(?: @(\S+))?$', event.text, re.DOTALL)
-        if not match: return await event.reply("❌ .лс текст @юзер1 @юзер2")
+    async def h_dm(ev):
+        match = re.match(r'^\.лс (.*?)(?: @(\S+))?$', ev.text, re.DOTALL)
+        if not match: return await ev.reply("❌ Формат: .лс текст @юзер")
         
         txt = match.group(1)
-        users = [u.strip().lstrip('@') for u in match.group(2).split()] if match.group(2) else []
+        usrs = [u.strip().lstrip('@') for u in match.group(2).split()] if match.group(2) else []
+        if not usrs: return await ev.reply("❌ Нет юзеров.")
         
-        if not users: return await event.reply("❌ Нет юзеров.")
-        
-        await event.reply(f"🚀 Рассылка {len(users)} юзерам...")
+        await ev.reply(f"🚀 Рассылка {len(usrs)} людям...")
         ok = 0
-        for u in users:
+        for u in usrs:
             try:
                 await client.send_message(u, txt)
                 ok += 1
-                await asyncio.sleep(random.uniform(2, 5)) # Задержка 2-5 сек
+                await asyncio.sleep(random.uniform(2, 5))
             except: pass
-            
-        await event.reply(f"✅ Отправлено: {ok}/{len(users)}")
+        await ev.reply(f"✅ Отправлено: {ok}/{len(usrs)}")
 
     await client.start()
     WORKER_STATUSES[ADMIN_ID] = "🟢 Активен"
-    logger.info("Worker Started")
     await client.run_until_disconnected()
 
 # =========================================================================
@@ -474,15 +460,11 @@ async def start_worker_task():
 
 async def main():
     logger.info("🚀 SYSTEM STARTED")
-    
-    # Middleware
     dp.message.middleware(SubscriptionCheckMiddleware())
     dp.callback_query.middleware(SubscriptionCheckMiddleware())
     
-    # Запуск Worker (фоном)
     asyncio.create_task(start_worker_task())
     
-    # Запуск бота
     try:
         await dp.start_polling(bot, skip_updates=True)
     finally:
