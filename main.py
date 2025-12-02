@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Auth Core v5.0 - ФИНАЛЬНАЯ ВЕРСИЯ
+🚀 StatPro Auth Core v5.1 - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+✅ Исправлена ошибка импорта 'Path'.
 ✅ Мультисессионная поддержка (сохранение по User ID).
-✅ Автоматическое уведомление об успехе (кнопка проверки удалена).
+✅ Автоматическое уведомление об успехе.
 """
 
 import asyncio
@@ -10,8 +11,9 @@ import logging
 import os
 import sys
 import io
-from typing import Dict, Path
-from pathlib import Path
+# 💥 ИСПРАВЛЕНИЕ: Path импортируется из pathlib, а не typing.
+from typing import Dict 
+from pathlib import Path 
 
 # --- AIOGRAM v3.x ---
 from aiogram import Bot, Dispatcher, Router, F
@@ -42,11 +44,10 @@ from PIL import Image
 
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
-    ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) # Используется только для админских проверок
+    ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) 
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # Таймаут для сканирования QR
     QR_TIMEOUT = int(os.getenv("QR_TIMEOUT", "180")) 
     
 except ValueError as e:
