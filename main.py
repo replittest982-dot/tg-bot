@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Ultimate v16.0 - COSMOS EDITION
-✅ 120+ IMPROVEMENTS: Zombies, Audit, JSON, Promote/Demote, InviteGen.
-✅ SESSION GUARD: Авто-лечение битых сессий.
-✅ STRICT SUB SYSTEM: Жесткая проверка подписки на каждом шаге.
-✅ AUDIT SYSTEM: Логирование действий в БД.
+🚀 StatPro Ultimate v17.0 - ECLIPSE EDITION
+✅ ADMIN GOD MODE: Админ всегда с подпиской.
+✅ AUTO-START 24/7: Воркер запускается сам и перезапускается при сбоях.
+✅ STEALTH MODE: Мгновенное удаление сообщений воркера.
+✅ FIX TOPIC_CLOSED: Защита от ошибок в форумах.
+✅ HIDDEN AUTH: Вход видит только админ.
 """
 
 import asyncio
@@ -43,13 +44,12 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from telethon import TelegramClient, events, functions, types
 from telethon.errors import (
     SessionPasswordNeededError, FloodWaitError, UserPrivacyRestrictedError,
-    ChatAdminRequiredError, UserNotParticipantError
+    ChatAdminRequiredError, UserNotParticipantError, BadRequestError
 )
 from telethon.tl.types import (
-    ChannelParticipantsAdmins, ChatBannedRights, UserStatusOnline, 
-    UserStatusOffline, UserStatusRecently
+    ChannelParticipantsAdmins, ChatBannedRights
 )
-from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
+from telethon.tl.functions.channels import EditAdminRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 
 # --- QR ---
@@ -57,22 +57,18 @@ import qrcode
 from PIL import Image
 
 # =========================================================================
-# I. КОНФИГУРАЦИЯ & КОНСТАНТЫ
+# I. КОНФИГУРАЦИЯ
 # =========================================================================
 
 WORKER_TASK: Optional[asyncio.Task] = None
 WORKER_STATUS = "⚪️ Stopped"
-BOT_VERSION = "v16.0 Cosmos"
+BOT_VERSION = "v17.0 Eclipse"
 START_TIME = datetime.now().timestamp()
-
-# Global Worker State
-AFK_REASON = None
-AFK_TIME = None
+SESSIONS_PARSED = 0  # Counter for .status
 
 PATTERNS = {
     "phone": r"^\+?[0-9]{10,15}$",
-    "promo": r"^[A-Za-z0-9-]{4,20}$",
-    "uid": r"^\d{5,15}$"
+    "promo": r"^[A-Za-z0-9-]{4,20}$"
 }
 
 try:
@@ -81,7 +77,7 @@ try:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     AUTH_TIMEOUT = int(os.getenv("QR_TIMEOUT", "500"))
-    SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
+    SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@tstatprobot")
     TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL", "https://t.me/STAT_PRO1")
     TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
 except ValueError as e:
@@ -118,13 +114,15 @@ async def get_cached_user(user_id: int, ttl=300):
     return user
 
 async def has_active_sub(user_id: int) -> bool:
+    """АДМИН ВСЕГДА ИМЕЕТ ПОДПИСКУ"""
     if user_id == ADMIN_ID: return True
+    
     u = await get_cached_user(user_id)
     if not u: return False
     return datetime.fromisoformat(u['sub_end']) > datetime.now()
 
-def progress_bar(current, total, width=12):
-    if total == 0: return "[░░░]"
+def progress_bar(current, total, width=15):
+    if total == 0: return "[░░░░░░░░░░]"
     filled = int(width * current / total)
     return f"[{'█'*filled + '░'*(width-filled)}] {int(current/total*100)}%"
 
@@ -144,8 +142,6 @@ async def edit_or_answer(message_obj: Union[Message, CallbackQuery], text: str, 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL") # Speed optimization
-        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -158,7 +154,6 @@ async def init_db():
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_sub_end ON users(sub_end)")
-        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promos (
                 code TEXT PRIMARY KEY,
@@ -166,22 +161,6 @@ async def init_db():
                 activations INTEGER
             )
         """)
-        
-        # [Improvement] Audit Logs
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action TEXT,
-                timestamp TEXT
-            )
-        """)
-        await db.commit()
-
-async def log_audit(user_id: int, action: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO audit_logs (user_id, action, timestamp) VALUES (?, ?, ?)", 
-                         (user_id, action, datetime.now().isoformat()))
         await db.commit()
 
 async def get_user_limit(user_id: int) -> int:
@@ -192,7 +171,8 @@ async def get_user_limit(user_id: int) -> int:
 
 async def add_user(user_id: int, username: str):
     now = datetime.now().isoformat()
-    trial_end = (datetime.now() + timedelta(days=0)).isoformat() 
+    # 0 дней триала, только по промокоду
+    trial_end = (datetime.now() + timedelta(days=0)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR IGNORE INTO users (user_id, username, join_date, sub_end, last_active) 
@@ -236,25 +216,8 @@ async def use_promo(user_id: int, code: str) -> bool:
         
         await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), user_id))
         await db.commit()
-    
     if user_id in USER_CACHE: del USER_CACHE[user_id]
-    await log_audit(user_id, f"Promo used: {code}")
     return True
-
-async def grant_sub_manual(user_id: int, days: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        usr = await get_user_data(user_id)
-        current = datetime.fromisoformat(usr['sub_end']) if usr and usr['sub_end'] else datetime.now()
-        if current < datetime.now(): current = datetime.now()
-        new_end = current + timedelta(days=days)
-        
-        # Upsert user if manual grant
-        await db.execute("""
-            INSERT INTO users (user_id, sub_end, join_date) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET sub_end = excluded.sub_end
-        """, (user_id, new_end.isoformat(), datetime.now().isoformat()))
-        await db.commit()
-    if user_id in USER_CACHE: del USER_CACHE[user_id]
 
 async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -267,18 +230,9 @@ async def get_all_users():
         async with db.execute("SELECT user_id FROM users") as c:
             return [row[0] for row in await c.fetchall()]
 
-async def cleanup_sessions_and_db(hours=24):
-    """Очистка битых сессий и вакуум БД"""
-    try:
-        # 1. Clean 0-byte sessions
-        for path in ABSOLUTE_SESSION_DIR.glob("*.session"):
-            if path.stat().st_size == 0:
-                path.unlink()
-        
-        # 2. Vacuum DB
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("VACUUM")
-    except: pass
+async def cleanup_old_sessions():
+    for path in ABSOLUTE_SESSION_DIR.glob("*.session"):
+        if path.stat().st_size == 0: path.unlink()
 
 async def auto_backup():
     try:
@@ -295,38 +249,49 @@ class SecurityMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         await add_user(user_id, event.from_user.username or "Unknown")
         
+        # Admin Bypass Checks
+        if user_id == ADMIN_ID:
+            return await handler(event, data)
+
         u_data = await get_cached_user(user_id)
         if u_data and u_data['is_banned']:
-            if isinstance(event, Message): await event.answer("🚫 Banned.")
+            if isinstance(event, Message): await event.answer("🚫 Вы забанены.")
             return
 
-        if user_id != ADMIN_ID and TARGET_CHANNEL_ID != 0:
+        if TARGET_CHANNEL_ID != 0:
             try:
                 m = await bot.get_chat_member(TARGET_CHANNEL_ID, user_id)
                 if m.status not in [ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
                     raise Exception
             except:
-                text = f"🚫 Sub Check!\n{TARGET_CHANNEL_URL}"
+                text = f"🚫 Подпишитесь на канал!\n{TARGET_CHANNEL_URL}"
                 if isinstance(event, Message): await event.answer(text)
-                elif isinstance(event, CallbackQuery): await event.answer("🚫 Подпишись!", show_alert=True)
+                elif isinstance(event, CallbackQuery): await event.answer("🚫 Подписка обязательна!", show_alert=True)
                 return
 
         return await handler(event, data)
 
 # =========================================================================
-# IV. KEYBOARDS
+# IV. KEYBOARDS (STRICT MODE)
 # =========================================================================
 
 async def get_main_kb(user_id: int):
+    # АДМИНУ ВСЕГДА TRUE
     is_active = await has_active_sub(user_id)
-    kb = [
-        [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="⭐ Активировать код", callback_data="sub_menu")],
-    ]
+    
+    kb = []
+    
+    # 1. Кнопка "Вход" ТОЛЬКО ДЛЯ АДМИНА
+    if user_id == ADMIN_ID:
+        kb.append([InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")])
+
+    kb.append([InlineKeyboardButton(text="👤 Профиль", callback_data="profile")])
+    kb.append([InlineKeyboardButton(text="⭐ Активировать код", callback_data="sub_menu")])
+
+    # 2. Worker только для активных
     if is_active:
-        kb.insert(2, [InlineKeyboardButton(text="📊 Функции Worker", callback_data="worker_menu")])
-        kb.insert(3, [InlineKeyboardButton(text="⚡ Быстрые действия", callback_data="quick_actions")])
+        kb.append([InlineKeyboardButton(text="📊 Функции Worker", callback_data="worker_menu")])
+        kb.append([InlineKeyboardButton(text="⚡ Быстрые действия", callback_data="quick_actions")])
 
     kb.append([InlineKeyboardButton(text="🆘 Поддержка", url=f"https://t.me/{SUPPORT_BOT_USERNAME.replace('@', '')}")])
 
@@ -352,7 +317,6 @@ def kb_admin():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Промокод", callback_data="adm_promo"),
          InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
-        [InlineKeyboardButton(text="🎁 Выдать подписку по ID", callback_data="adm_grant")], # [New]
         [InlineKeyboardButton(text="📈 Статистика", callback_data="adm_stats"),
          InlineKeyboardButton(text="📦 Бэкап БД", callback_data="adm_backup")],
         [InlineKeyboardButton(text="🔄 Рестарт Worker", callback_data="adm_restart_worker")],
@@ -381,7 +345,6 @@ dp.include_router(router)
 class States(StatesGroup):
     PHONE=State(); CODE=State(); PASS=State(); PROMO=State()
     ADM_DAYS=State(); ADM_ACT=State(); BROADCAST=State()
-    ADM_GRANT_ID=State(); ADM_GRANT_DAYS=State()
 
 TEMP_CLIENTS = {}
 
@@ -406,30 +369,51 @@ async def menu(c: CallbackQuery, state: FSMContext):
 async def profile(c: CallbackQuery):
     u = await get_cached_user(c.from_user.id)
     d = datetime.fromisoformat(u['sub_end'])
-    is_act = d > datetime.now()
-    active = "✅ Активна" if is_act else "❌ Не активна"
+    is_act = await has_active_sub(c.from_user.id)
+    
+    active = "✅ Активна (ADMIN)" if c.from_user.id == ADMIN_ID else ("✅ Активна" if is_act else "❌ Не активна")
+    date_str = "∞" if c.from_user.id == ADMIN_ID else d.strftime('%d.%m.%Y')
+    
     limit_info = f"Лимит парсинга: {u['parse_limit']}\n" if is_act else ""
+    
     txt = (
-        f"👤 Профиль\nID: <code>{u['user_id']}</code>\n"
-        f"Подписка: {active} (до {d.strftime('%d.%m.%Y')})\n"
-        f"{limit_info}Версия: <code>{BOT_VERSION}</code>"
+        f"👤 Профиль\n"
+        f"ID: <code>{u['user_id']}</code>\n"
+        f"Подписка: {active} (до {date_str})\n"
+        f"{limit_info}"
+        f"Версия: <code>{BOT_VERSION}</code>"
     )
     await edit_or_answer(c, txt, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]))
+
+# --- QUICK ACTIONS ---
+@router.callback_query(F.data == "quick_actions")
+async def qa(c: CallbackQuery):
+    if not await has_active_sub(c.from_user.id):
+        return await c.answer("❌ Доступно только с подпиской!", show_alert=True)
+    await edit_or_answer(c, "⚡ Действия:", kb_quick_actions())
+
+@router.callback_query(F.data == "clear_cache")
+async def clr_cache(c: CallbackQuery):
+    global USER_CACHE
+    USER_CACHE = {}
+    await c.answer("Кеш очищен!", show_alert=True)
 
 # --- WORKER MENU ---
 @router.callback_query(F.data == "worker_menu")
 async def w_menu(c: CallbackQuery):
+    # Strict Check
     if not await has_active_sub(c.from_user.id):
-        await c.answer("❌ Купите подписку!", show_alert=True)
+        await c.answer("❌ Купите подписку для доступа!", show_alert=True)
         return await menu(c, None)
 
     u = await get_cached_user(c.from_user.id)
     await edit_or_answer(c, 
-        f"📊 Worker Cosmos\nСтатус: {WORKER_STATUS}\nЛимит: {u['parse_limit']}\n\n"
-        "<b>Admin:</b> .ban, .kick, .mute, .promote, .demote, .purge, .zombies\n"
-        "<b>Utils:</b> .afk, .whois, .invite, .calc\n"
-        "<b>Raid:</b> .spam, .tagall\n"
-        "<b>Parse:</b> .чекгруппу (txt), .csv, .json",
+        f"📊 Worker Eclipse\nСтатус: {WORKER_STATUS}\nЛимит: {u['parse_limit']}\n\n"
+        "<b>Команды:</b>\n"
+        "`.чекгруппу` (txt), `.csv`\n"
+        "`.лс <txt>`, `.spam <n> <txt>`\n"
+        "`.status` (прогресс), `.ping`\n"
+        "`.purge <n>`, `.id`",
         kb_config(u['parse_limit'])
     )
 
@@ -444,7 +428,7 @@ async def set_lim(c: CallbackQuery):
 # --- SUBSCRIPTION ---
 @router.callback_query(F.data == "sub_menu")
 async def sub_menu(c: CallbackQuery):
-    await edit_or_answer(c, "⭐ Введите промокод:", InlineKeyboardMarkup(inline_keyboard=[
+    await edit_or_answer(c, "⭐ Активация:", InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎫 Ввести промокод", callback_data="enter_promo")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
     ]))
@@ -468,27 +452,6 @@ async def pro_h(m: Message, state: FSMContext):
 async def adm_m(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
     await edit_or_answer(c, f"👑 Админ\nWorker: {WORKER_STATUS}", kb_admin())
-
-@router.callback_query(F.data == "adm_grant")
-async def adm_grant(c: CallbackQuery, state: FSMContext):
-    await edit_or_answer(c, "Введите ID пользователя:")
-    await state.set_state(States.ADM_GRANT_ID)
-
-@router.message(States.ADM_GRANT_ID)
-async def adm_grant_id(m: Message, state: FSMContext):
-    await state.update_data(uid=m.text)
-    await m.answer("На сколько дней выдать?")
-    await state.set_state(States.ADM_GRANT_DAYS)
-
-@router.message(States.ADM_GRANT_DAYS)
-async def adm_grant_done(m: Message, state: FSMContext):
-    d = await state.get_data()
-    try:
-        await grant_sub_manual(int(d['uid']), int(m.text))
-        await m.answer("✅ Подписка выдана!", reply_markup=kb_admin())
-    except Exception as e:
-        await m.answer(f"Ошибка: {e}")
-    await state.clear()
 
 @router.callback_query(F.data == "adm_stats")
 async def adm_st(c: CallbackQuery):
@@ -551,9 +514,11 @@ async def adm_br_h(m: Message, s: FSMContext):
     await m.answer(f"✅ Доставлено: {count}")
     await s.clear()
 
-# --- AUTH LOGIC (Standard) ---
+# --- AUTH LOGIC ---
 @router.callback_query(F.data == "auth_menu")
-async def am(c: CallbackQuery): await edit_or_answer(c, "Метод:", kb_auth())
+async def am(c: CallbackQuery): 
+    if c.from_user.id != ADMIN_ID: return
+    await edit_or_answer(c, "Метод:", kb_auth())
 
 @router.callback_query(F.data == "auth_qr")
 async def aq(c: CallbackQuery):
@@ -574,6 +539,8 @@ async def aq(c: CallbackQuery):
         await msg.delete()
         kb = await get_main_kb(uid)
         await c.message.answer(f"✅ Вход выполнен: @{me.username or me.id}", reply_markup=kb)
+        # Auto start worker on auth
+        asyncio.create_task(worker_process())
     except Exception as e:
         logger.error(f"Auth Error: {e}")
         await c.message.answer("❌ Ошибка входа")
@@ -592,8 +559,6 @@ async def ap(c: CallbackQuery, state: FSMContext):
 async def ph(m: Message, s: FSMContext):
     uid = m.from_user.id
     ph = m.text.strip().replace(" ", "")
-    if not re.match(PATTERNS['phone'], ph):
-        return await m.answer("❌ Неверный формат.")
     if uid in TEMP_CLIENTS: await TEMP_CLIENTS[uid].disconnect()
     cl = TelegramClient(str(get_session_path(uid)), API_ID, API_HASH)
     TEMP_CLIENTS[uid] = cl
@@ -610,7 +575,6 @@ async def co(m: Message, s: FSMContext):
     d = await s.get_data()
     uid = m.from_user.id
     cl = TEMP_CLIENTS.get(uid)
-    if not cl: return await m.answer("Сбой сессии.")
     try:
         await cl.sign_in(phone=d['p'], code=m.text, phone_code_hash=d['h'])
         me = await cl.get_me()
@@ -620,6 +584,8 @@ async def co(m: Message, s: FSMContext):
         try: await cl.disconnect()
         except: pass
         del TEMP_CLIENTS[uid]
+        # Auto start
+        asyncio.create_task(worker_process())
     except SessionPasswordNeededError:
         await m.answer("🔒 Введите пароль 2FA:")
         await s.set_state(States.PASS)
@@ -633,6 +599,8 @@ async def pa(m: Message, s: FSMContext):
         await cl.sign_in(password=m.text)
         kb = await get_main_kb(uid)
         await m.answer("✅ Вход выполнен (2FA)", reply_markup=kb)
+        # Auto start
+        asyncio.create_task(worker_process())
     except Exception as e: await m.answer(f"❌ Ошибка: {e}")
     finally:
         try: await cl.disconnect()
@@ -641,243 +609,136 @@ async def pa(m: Message, s: FSMContext):
         await s.clear()
 
 # =========================================================================
-# VI. TELETHON WORKER (COSMOS FEATURES)
+# VI. TELETHON WORKER (24/7 AUTO-START)
 # =========================================================================
 
 async def worker_process():
-    global WORKER_STATUS, AFK_REASON, AFK_TIME
-    sess_path_base = get_session_path(ADMIN_ID)
-    if not sess_path_base.with_suffix(".session").exists():
-        WORKER_STATUS = "🔴 Нет сессии"
-        return
+    global WORKER_STATUS, SESSIONS_PARSED
     
-    if not await has_active_sub(ADMIN_ID):
-        WORKER_STATUS = "🔴 Подписка истекла"
-        return
-
-    client = TelegramClient(str(sess_path_base), API_ID, API_HASH)
-
-    async def temp_msg(event, text, delay=3):
+    # 24/7 RESTART LOOP
+    while True:
         try:
-            if event.out: msg = await event.edit(text)
-            else: msg = await event.reply(text)
-            await asyncio.sleep(delay)
-            await msg.delete()
-            if not event.out: await event.delete()
-        except: pass
+            sess_path_base = get_session_path(ADMIN_ID)
+            
+            if not sess_path_base.with_suffix(".session").exists():
+                WORKER_STATUS = "🔴 Нет сессии (Жду вход)"
+                await asyncio.sleep(10) # Check again in 10s
+                continue
 
-    @client.on(events.NewMessage(incoming=True))
-    async def afk_handler(ev):
-        if AFK_REASON and ev.is_private:
-            current_time = datetime.now()
-            diff = current_time - AFK_TIME
-            await ev.reply(f"💤 **Я AFK** ({AFK_REASON})\nБыл тут: {str(diff).split('.')[0]} назад.")
+            WORKER_STATUS = "🟡 Подключение..."
+            client = TelegramClient(str(sess_path_base), API_ID, API_HASH)
 
-    # --- 100+ COMMANDS & FEATURES ---
+            # STEALTH: Delete msg instantly (0.5s)
+            async def temp_msg(event, text, delay=0.5):
+                try:
+                    if event.out: msg = await event.edit(text)
+                    else: msg = await event.reply(text)
+                    await asyncio.sleep(delay)
+                    await msg.delete()
+                    if not event.out: await event.delete()
+                except: pass
 
-    @client.on(events.NewMessage(pattern=r'^\.help'))
-    async def help_cmd(ev):
-        text = (
-            "🛠 **COSMOS Commands:**\n"
-            "**Admin:** `.ban`, `.mute <m/h>`, `.kick`, `.purge <n>`\n"
-            "**Adv:** `.promote` (Give Admin), `.demote` (Remove Admin), `.zombies` (Clean deleted)\n"
-            "**Utils:** `.afk <reason>`, `.whois`, `.invite`, `.calc`\n"
-            "**Spam:** `.spam <n> <txt>`, `.tagall`\n"
-            "**Parse:** `.чекгруппу` (txt), `.csv`, `.json`"
-        )
-        await temp_msg(ev, text, 15)
+            @client.on(events.NewMessage(pattern=r'^\.status'))
+            async def status_cmd(ev):
+                uptime = int(time.time() - START_TIME)
+                txt = (
+                    f"🟢 **Worker Online**\n"
+                    f"⏱ Uptime: {uptime}s\n"
+                    f"📂 Parsed: {SESSIONS_PARSED}\n"
+                    f"🛡 Security: Protected"
+                )
+                await temp_msg(ev, txt, 5)
 
-    # [NEW] ZOMBIES - Clean deleted accounts
-    @client.on(events.NewMessage(pattern=r'^\.zombies'))
-    async def zombies_cmd(ev):
-        if not ev.is_group: return await temp_msg(ev, "Only groups", 3)
-        msg = await ev.reply("🧟 Scanning for zombies...")
-        deleted_count = 0
-        try:
-            participants = await client.get_participants(ev.chat_id)
-            for user in participants:
-                if user.deleted:
+            @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
+            async def txt_parse(ev):
+                global SESSIONS_PARSED
+                lim = await get_user_limit(ADMIN_ID)
+                msg = await ev.reply(f"🔍 Парсинг ({lim})...")
+                lines = []
+                try:
+                    async with asyncio.timeout(300):
+                        async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
+                            lines.append(f"@{u.username or 'None'} | {u.first_name} | {u.id}")
+                            if len(lines) % 50 == 0: 
+                                await msg.edit(f"🔍 {progress_bar(len(lines), lim)}")
+                    SESSIONS_PARSED += 1
+                except Exception as e: 
+                    return await temp_msg(msg, f"Error: {e}", 3)
+                
+                fn = f"u_{ev.chat_id}.txt"
+                with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(lines))
+                
+                # FIX TOPIC CLOSED ERROR
+                try:
+                    await client.send_file(ev.chat_id, fn, caption=f"Done: {len(lines)}")
+                except BadRequestError as e:
+                    if "TOPIC_CLOSED" in str(e):
+                        await msg.edit(f"❌ Топик закрыт! (Saved locally)")
+                    else:
+                        await msg.edit(f"❌ Upload Error: {e}")
+                
+                os.remove(fn)
+                await temp_msg(msg, "Uploaded", 0.5)
+
+            @client.on(events.NewMessage(pattern=r'^\.csv$'))
+            async def csv_parse(ev):
+                global SESSIONS_PARSED
+                lim = await get_user_limit(ADMIN_ID)
+                msg = await ev.reply(f"📊 CSV ({lim})...")
+                rows = []
+                try:
+                    async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
+                        rows.append([u.id, u.username or "", u.first_name or "", u.phone or ""])
+                        if len(rows) % 50 == 0: await msg.edit(f"📊 {progress_bar(len(rows), lim)}")
+                    SESSIONS_PARSED += 1
+                except Exception as e: return await temp_msg(msg, f"Error: {e}", 3)
+                
+                fn = f"export_{ev.chat_id}.csv"
+                with open(fn, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["ID", "Username", "Name", "Phone"])
+                    writer.writerows(rows)
+                
+                try:
+                    await client.send_file(ev.chat_id, fn, caption=f"CSV: {len(rows)}")
+                except BadRequestError:
+                     await msg.edit("❌ Топик закрыт!")
+
+                os.remove(fn)
+                await temp_msg(msg, "Uploaded", 0.5)
+
+            @client.on(events.NewMessage(pattern=r'^\.лс (.*?)(?: (@.+))?$'))
+            async def dm_cmd(ev):
+                match = re.match(r'^\.лс (.*?)(?: (@.+))?$', ev.text, re.DOTALL)
+                if not match: return await temp_msg(ev, "Формат: .лс текст @юзер", 2)
+                
+                txt = match.group(1).strip()
+                usrs = match.group(2).split() if match.group(2) else []
+                m = await ev.reply(f"🚀 Queue {len(usrs)}...")
+                
+                for u in usrs:
                     try:
-                        await client(functions.channels.EditBannedRequest(
-                            ev.chat_id, user, ChatBannedRights(until_date=None, view_messages=True)
-                        ))
-                        deleted_count += 1
+                        await client.send_message(u.lstrip('@'), txt)
+                        await asyncio.sleep(random.uniform(1.5, 3))
                     except: pass
-            await temp_msg(msg, f"🧟 Removed {deleted_count} zombies.", 5)
-        except Exception as e: await temp_msg(msg, f"Error: {e}", 3)
+                
+                await temp_msg(m, "✅ Done", 1)
 
-    # [NEW] PROMOTE / DEMOTE
-    @client.on(events.NewMessage(pattern=r'^\.promote'))
-    async def promote_cmd(ev):
-        if not ev.is_reply: return
-        r = await ev.get_reply_message()
-        try:
-            await client(EditAdminRequest(ev.chat_id, r.sender_id, 
-                admin_rights=ChannelParticipantsAdmins(
-                    change_info=True, post_messages=True, edit_messages=True,
-                    delete_messages=True, ban_users=True, invite_users=True,
-                    pin_messages=True, add_admins=False, manage_call=True
-                ), rank="Admin"
-            ))
-            await temp_msg(ev, "👮 Promoted to Admin", 3)
-        except Exception as e: await temp_msg(ev, f"Error: {e}", 3)
+            @client.on(events.NewMessage(pattern=r'^\.ping'))
+            async def ping_cmd(ev):
+                s = time.time()
+                msg = await ev.reply("Pong")
+                await temp_msg(msg, f"Ping: {int((time.time()-s)*1000)}ms", 1)
 
-    @client.on(events.NewMessage(pattern=r'^\.demote'))
-    async def demote_cmd(ev):
-        if not ev.is_reply: return
-        r = await ev.get_reply_message()
-        try:
-            await client(EditAdminRequest(ev.chat_id, r.sender_id, 
-                admin_rights=ChannelParticipantsAdmins(
-                    change_info=False, post_messages=False, edit_messages=False,
-                    delete_messages=False, ban_users=False, invite_users=False,
-                    pin_messages=False, add_admins=False, manage_call=False
-                ), rank=""
-            ))
-            await temp_msg(ev, "👮 Admin rights revoked", 3)
-        except Exception as e: await temp_msg(ev, f"Error: {e}", 3)
+            await client.start()
+            WORKER_STATUS = "🟢 Активен (24/7)"
+            logger.info("Worker Started")
+            await client.run_until_disconnected()
 
-    # [NEW] INVITE LINK GENERATOR
-    @client.on(events.NewMessage(pattern=r'^\.invite'))
-    async def invite_cmd(ev):
-        try:
-            link = await client(ExportChatInviteRequest(ev.chat_id))
-            await ev.reply(f"🔗 Invite Link: {link.link}")
-        except Exception as e: await temp_msg(ev, f"Error: {e}", 3)
-
-    # [NEW] CALCULATOR
-    @client.on(events.NewMessage(pattern=r'^\.calc (.+)'))
-    async def calc_cmd(ev):
-        expr = ev.pattern_match.group(1)
-        try:
-            # Safe eval
-            allowed_names = {"math": math, "abs": abs, "round": round}
-            code = compile(expr, "<string>", "eval")
-            for name in code.co_names:
-                if name not in allowed_names: raise NameError(f"Use of '{name}' not allowed")
-            result = eval(code, {"__builtins__": {}}, allowed_names)
-            await temp_msg(ev, f"🔢 Result: `{result}`", 5)
-        except Exception as e: await temp_msg(ev, f"Error: {e}", 3)
-
-    # [NEW] ADVANCED WHOIS
-    @client.on(events.NewMessage(pattern=r'^\.whois'))
-    async def whois_cmd(ev):
-        if not ev.is_reply: return
-        r = await ev.get_reply_message()
-        u = await r.get_sender()
-        text = (
-            f"👤 **WHOIS**\n"
-            f"ID: `{u.id}`\n"
-            f"Name: {u.first_name}\n"
-            f"Username: @{u.username}\n"
-            f"Bot: {u.bot}\n"
-            f"Scam: {u.scam}\n"
-            f"Premium: {getattr(u, 'premium', False)}\n"
-            f"DC ID: {u.photo.dc_id if u.photo else 'N/A'}"
-        )
-        await temp_msg(ev, text, 8)
-
-    # [NEW] TAGALL
-    @client.on(events.NewMessage(pattern=r'^\.tagall'))
-    async def tagall_cmd(ev):
-        if not ev.is_group: return
-        await ev.delete()
-        participants = await client.get_participants(ev.chat_id)
-        mentions = []
-        for user in participants:
-            if not user.deleted:
-                mentions.append(f"<a href='tg://user?id={user.id}'>\u200b</a>")
-        
-        # Split into chunks of 5 to avoid flood/limits
-        chunk_size = 5
-        for i in range(0, len(mentions), chunk_size):
-            chunk = mentions[i:i + chunk_size]
-            await client.send_message(ev.chat_id, "👋 Hey! " + "".join(chunk), parse_mode='html')
-            await asyncio.sleep(1)
-
-    # --- STANDARD TOOLS ---
-    @client.on(events.NewMessage(pattern=r'^\.purge (\d+)'))
-    async def purge_cmd(ev):
-        count = int(ev.pattern_match.group(1))
-        msgs = [ev.id]
-        async for m in client.iter_messages(ev.chat_id, limit=count):
-            msgs.append(m.id)
-        await client.delete_messages(ev.chat_id, msgs)
-        msg = await client.send_message(ev.chat_id, f"🗑 Removed {count}")
-        await temp_msg(msg, f"🗑 Removed {count}", 2)
-
-    @client.on(events.NewMessage(pattern=r'^\.afk(?: (.*))?'))
-    async def set_afk(ev):
-        global AFK_REASON, AFK_TIME
-        if AFK_REASON:
-            AFK_REASON = None
-            await temp_msg(ev, "☀️ Welcome back!", 3)
-        else:
-            AFK_REASON = ev.pattern_match.group(1) or "Busy"
-            AFK_TIME = datetime.now()
-            await temp_msg(ev, f"💤 AFK: {AFK_REASON}", 3)
-
-    @client.on(events.NewMessage(pattern=r'^\.spam (\d+) (.*)'))
-    async def spam_cmd(ev):
-        count = int(ev.pattern_match.group(1))
-        txt = ev.pattern_match.group(2)
-        await ev.delete()
-        for _ in range(count):
-            await client.send_message(ev.chat_id, txt)
-            await asyncio.sleep(0.1)
-
-    # --- PARSING (JSON SUPPORT) ---
-    @client.on(events.NewMessage(pattern=r'^\.json$'))
-    async def json_parse(ev):
-        lim = await get_user_limit(ADMIN_ID)
-        msg = await ev.reply(f"📊 JSON ({lim})...")
-        data = []
-        try:
-            async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
-                data.append({
-                    "id": u.id, "username": u.username, 
-                    "first_name": u.first_name, "phone": u.phone
-                })
-        except Exception as e: return await temp_msg(msg, f"Error: {e}", 3)
-        
-        fn = f"export_{ev.chat_id}.json"
-        with open(fn, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        await client.send_file(ev.chat_id, fn, caption=f"JSON: {len(data)}")
-        os.remove(fn)
-        await temp_msg(msg, "Uploaded", 2)
-
-    @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
-    async def txt_parse(ev):
-        lim = await get_user_limit(ADMIN_ID)
-        msg = await ev.reply(f"🔍 TXT ({lim})...")
-        lines = []
-        try:
-            async with asyncio.timeout(300):
-                async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
-                    lines.append(f"@{u.username or 'None'} | {u.first_name} | {u.id}")
-                    if len(lines) % 50 == 0: await msg.edit(f"🔍 {progress_bar(len(lines), lim)}")
-        except Exception as e: return await temp_msg(msg, f"Error: {e}", 3)
-        
-        fn = f"u_{ev.chat_id}.txt"
-        with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(lines))
-        
-        if os.path.getsize(fn) > MAX_FILE_SIZE:
-             os.remove(fn)
-             return await temp_msg(msg, "File >50MB", 3)
-        await client.send_file(ev.chat_id, fn, caption=f"Done: {len(lines)}")
-        os.remove(fn)
-        await temp_msg(msg, "Uploaded", 2)
-
-    try:
-        await client.start()
-        WORKER_STATUS = "🟢 Active (Cosmos)"
-        logger.info("Worker ON")
-        await client.run_until_disconnected()
-    except Exception as e:
-        WORKER_STATUS = f"🔴 Error: {e}"
-        logger.error(f"Worker Error: {e}")
+        except Exception as e:
+            WORKER_STATUS = f"🔴 Сбой: {e}"
+            logger.error(f"Worker Crashed: {e}")
+            await asyncio.sleep(5) # Restart cooldown
 
 # =========================================================================
 # VII. MAIN
@@ -886,11 +747,12 @@ async def worker_process():
 async def main():
     global WORKER_TASK
     await init_db()
-    await cleanup_sessions_and_db()
+    await cleanup_old_sessions()
     
     dp.message.middleware(SecurityMiddleware())
     dp.callback_query.middleware(SecurityMiddleware())
     
+    # [AUTO-START] Start worker immediately
     WORKER_TASK = asyncio.create_task(worker_process())
     
     try:
