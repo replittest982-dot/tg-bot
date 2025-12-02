@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
+##!/usr/bin/env python3
 """
-🚀 StatPro Auth Core v4.3 - ЧИСТЫЙ КОД ДЛЯ ВХОДА
+🚀 StatPro Auth Core v4.4 - ЧИСТЫЙ КОД ДЛЯ ВХОДА
 ✅ Оставлена только логика авторизации через Telethon (QR и Номер).
-✅ Убраны Middleware, DB, Workers, и все лишние импорты.
+✅ QR_TIMEOUT установлен на 600 секунд (10 минут) для отладки.
 """
 
 import asyncio
 import logging
-import logging.handlers
 import os
 import sys
 import io
@@ -42,14 +41,16 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# Мы полагаемся на то, что переменные загружены хостингом (bothost.ru)
-
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
-    QR_TIMEOUT = int(os.getenv("QR_TIMEOUT", "60"))
+    
+    # 💥 ИЗМЕНЕНИЕ: Увеличиваем таймаут QR-кода до 600 секунд (10 минут)
+    # Это полностью исключит временной фактор при сканировании QR.
+    QR_TIMEOUT = 600 
+    
 except ValueError as e:
     print(f"❌ ОШИБКА КОНФИГУРАЦИИ: Неверный формат числовой переменной: {e}. Проверьте ADMIN_ID или API_ID.")
     sys.exit(1)
@@ -114,8 +115,10 @@ class AuthStates(StatesGroup):
 
 def get_main_kb() -> InlineKeyboardMarkup:
     """Главная клавиатура."""
+    # Добавлено для лучшего тестирования: кнопка проверки авторизации
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")]
+        [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")],
+        [InlineKeyboardButton(text="✅ Проверить сессию", callback_data="check_session")]
     ])
 
 def get_auth_menu_kb() -> InlineKeyboardMarkup:
@@ -133,7 +136,7 @@ def get_auth_menu_kb() -> InlineKeyboardMarkup:
 @auth_router.message(Command("start"))
 async def cmd_start(message: Message):
     """Начало работы с ботом."""
-    await message.answer("👋 Добро пожаловать в Auth Core! Выберите способ входа:", reply_markup=get_auth_menu_kb())
+    await message.answer("👋 Добро пожаловать в Auth Core! Выберите способ входа:", reply_markup=get_main_kb())
 
 @auth_router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
@@ -155,6 +158,39 @@ async def cb_auth_menu(call: CallbackQuery):
     """Меню выбора типа входа."""
     await call.message.edit_text("Выберите метод входа:", reply_markup=get_auth_menu_kb())
     await call.answer()
+
+# --- ПРОВЕРКА СЕССИИ ---
+
+@auth_router.callback_query(F.data == "check_session")
+async def cb_check_session(call: CallbackQuery):
+    user_id = call.from_user.id
+    path = get_session_path(user_id)
+    
+    if not path.exists():
+        await call.message.answer("❌ Файл сессии не найден. Требуется вход.")
+        return await call.answer()
+
+    client = TelegramClient(str(path), API_ID, API_HASH)
+    status_message = "⏳ Проверяю..."
+    await call.message.answer(status_message)
+    
+    try:
+        await client.connect()
+        
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            status_message = f"✅ **Сессия активна!**\n@{me.username or me.id} (ID: {me.id})"
+        else:
+            status_message = "⚠️ **Сессия недействительна.** Требуется повторный вход."
+            path.unlink() # Удаляем недействительный файл
+            
+    except Exception as e:
+        logger.error(f"Ошибка проверки сессии для {user_id}: {e}")
+        status_message = f"❌ **Ошибка проверки:** {type(e).__name__}"
+    finally:
+        await client.disconnect()
+        await call.message.edit_text(status_message, reply_markup=get_main_kb())
+        await call.answer()
 
 # --- ВХОД ПО QR-КОДУ ---
 
@@ -186,28 +222,22 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
             BufferedInputFile(bio.read(), filename="qr.png"),
             caption=f"📸 **Сканируйте QR-код через Telegram!**\nЖду {QR_TIMEOUT} сек. Отправьте /cancel для отмены."
         )
-        # Удаляем предыдущее сообщение, чтобы не засорять чат
         await call.message.delete()
         
-        # 4. Ждем авторизации
+        # 4. Ждем авторизации (теперь до 10 минут)
         try:
-            # run_until_disconnected() не блокирует, нам нужно ждать результата qr_login.wait()
-            # Нам нужно просто дождаться, пока клиент не будет авторизован
-            auth_task = asyncio.create_task(client.run_until_disconnected())
-            await asyncio.wait_for(auth_task, timeout=QR_TIMEOUT)
+            # Ждем завершения процесса авторизации через QR
+            await asyncio.wait_for(qr_login.wait(), timeout=QR_TIMEOUT)
             
-            # Если auth_task завершился, проверяем статус авторизации
             if await client.is_user_authorized():
                  await sent.edit_caption(caption="✅ **Успешный вход по QR!** Сессия сохранена.", reply_markup=get_main_kb())
             else:
                  await sent.edit_caption(caption="❌ **Авторизация не удалась.** Попробуйте еще раз.", reply_markup=get_main_kb())
                  
         except asyncio.TimeoutError:
-            if client.is_connected():
-                await sent.edit_caption(caption="❌ **Время на сканирование вышло.**", reply_markup=get_main_kb())
-            # Если таск был отменен, он попадет в finally
+            await sent.edit_caption(caption="❌ **Время на сканирование вышло.** Попробуйте еще раз.", reply_markup=get_main_kb())
         except Exception as e:
-            logger.error(f"Ошибка входа по QR: {e}")
+            logger.error(f"Ошибка входа по QR (wait): {e}")
             await sent.edit_caption(caption=f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
 
     except Exception as e:
@@ -318,15 +348,11 @@ async def auth_pass_input(message: Message, state: FSMContext):
 async def main():
     logger.info("🚀 SYSTEM STARTED: Auth Core")
     try:
-        # dp.start_polling начнет опрашивать Telegram
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         logger.error(f"Критический сбой в Aiogram: {e}")
-        if "Unauthorized" in str(e):
-            logger.error("🚨 ПРЕДУПРЕЖДЕНИЕ: Ошибка Unauthorized. Проверьте BOT_TOKEN.")
     finally:
         logger.info("🛑 SYSTEM SHUTDOWN")
-        # Закрываем сессию бота
         await bot.session.close()
 
 if __name__ == "__main__":
