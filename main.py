@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Auth Core v5.1 - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+🚀 StatPro Auth Core v5.2 - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ С УЛУЧШЕННЫМ ДИЗАЙНОМ
 ✅ Исправлена ошибка импорта 'Path'.
 ✅ Мультисессионная поддержка (сохранение по User ID).
-✅ Автоматическое уведомление об успехе.
+✅ Улучшен дизайн приветствия и сообщений.
 """
 
 import asyncio
@@ -11,7 +11,6 @@ import logging
 import os
 import sys
 import io
-# 💥 ИСПРАВЛЕНИЕ: Path импортируется из pathlib, а не typing.
 from typing import Dict 
 from pathlib import Path 
 
@@ -83,6 +82,7 @@ logger = logging.getLogger(__name__)
 # III. ИНИЦИАЛИЗАЦИЯ И ХРАНИЛИЩЕ
 # =========================================================================
 
+# Устанавливаем parse_mode по умолчанию в HTML для красивого форматирования
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher(storage=MemoryStorage())
 auth_router = Router()
@@ -117,7 +117,8 @@ class AuthStates(StatesGroup):
 def get_main_kb() -> InlineKeyboardMarkup:
     """Главная клавиатура. Кнопка проверки сессии удалена."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")],
+        # 💥 Изменение текста кнопки: "🔑 Авторизоваться"
+        [InlineKeyboardButton(text="🔑 Авторизоваться", callback_data="auth_menu")], 
     ])
 
 def get_auth_menu_kb() -> InlineKeyboardMarkup:
@@ -134,8 +135,17 @@ def get_auth_menu_kb() -> InlineKeyboardMarkup:
 
 @auth_router.message(Command("start"))
 async def cmd_start(message: Message):
-    """Начало работы с ботом."""
-    await message.answer("👋 Добро пожаловать в Auth Core! Выберите способ входа:", reply_markup=get_main_kb())
+    """Начало работы с ботом. Улучшенное приветствие."""
+    user_id = message.from_user.id
+    
+    # 💥 Изменение текста приветствия
+    greeting_text = (
+        f"Здравствуйте! Я — STATPRO Bot, инструмент для сбора статистики и управления Telegram API. 📊\n\n"
+        f"Ваш Telegram ID: <code>{user_id}</code>.\n\n"
+        f"Для использования функций бота необходимо авторизовать ваш аккаунт, который будет выполнять все действия."
+    )
+    
+    await message.answer(greeting_text, reply_markup=get_main_kb())
 
 @auth_router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
@@ -155,7 +165,7 @@ async def cb_main_menu(call: CallbackQuery, state: FSMContext):
 @auth_router.callback_query(F.data == "auth_menu")
 async def cb_auth_menu(call: CallbackQuery):
     """Меню выбора типа входа."""
-    await call.message.edit_text("Выберите метод входа:", reply_markup=get_auth_menu_kb())
+    await call.message.edit_text("Выберите метод авторизации:", reply_markup=get_auth_menu_kb())
     await call.answer()
 
 # --- ВХОД ПО QR-КОДУ ---
@@ -165,7 +175,6 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     await clear_auth_client(user_id)
     
-    # 1. Создаем новый клиент Telethon, сессия будет называться session_<user_id>
     client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
     AUTH_CLIENTS[user_id] = client
     
@@ -173,7 +182,6 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         await client.connect()
         qr_login = await client.qr_login()
         
-        # 2. Генерируем QR-код
         qr = qrcode.QRCode(box_size=4, border=4)
         qr.add_data(qr_login.url)
         qr.make(fit=True)
@@ -183,36 +191,41 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         img.save(bio, format='PNG')
         bio.seek(0)
         
-        # 3. Отправляем QR-код и ждем сканирования
         sent = await call.message.answer_photo(
             BufferedInputFile(bio.read(), filename="qr.png"),
             caption=f"📸 **Сканируйте QR-код через Telegram!**\nЖду {QR_TIMEOUT} сек. Отправьте /cancel для отмены."
         )
         await call.message.delete()
         
-        # 4. Ждем авторизации и автоматически выводим результат
         try:
             await asyncio.wait_for(qr_login.wait(), timeout=QR_TIMEOUT)
             
             if await client.is_user_authorized():
                  me = await client.get_me()
-                 # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+                 # 💥 Измененное сообщение об успехе QR
+                 session_file = f"session_{me.id}.session"
+                 success_message = (
+                     f"✅ Успешный вход завершен! 🎉\n\n"
+                     f"Ваш аккаунт (@{me.username or me.id}) успешно авторизован.\n"
+                     f"Сессия сохранена в файл: <code>{session_file}</code>.\n\n"
+                     f"Теперь вы можете использовать полный функционал бота."
+                 )
                  await sent.edit_caption(
-                     caption=f"✅ **Успешный вход!** Сессия сохранена как `session_{me.id}.session`.", 
+                     caption=success_message, 
                      reply_markup=get_main_kb()
                  )
             else:
-                 await sent.edit_caption(caption="❌ **Авторизация не удалась.** Попробуйте еще раз.", reply_markup=get_main_kb())
+                 await sent.edit_caption(caption="❌ Авторизация не удалась. Попробуйте еще раз.", reply_markup=get_main_kb())
                  
         except asyncio.TimeoutError:
-            await sent.edit_caption(caption="❌ **Время на сканирование вышло.**", reply_markup=get_main_kb())
+            await sent.edit_caption(caption="❌ Время на сканирование вышло.", reply_markup=get_main_kb())
         except Exception as e:
             logger.error(f"Ошибка входа по QR (wait): {e}")
-            await sent.edit_caption(caption=f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
+            await sent.edit_caption(caption=f"❌ Ошибка: {type(e).__name__}", reply_markup=get_main_kb())
 
     except Exception as e:
         logger.error(f"Критическая ошибка QR: {e}")
-        await call.message.answer(f"❌ **Критическая ошибка QR:** {type(e).__name__}", reply_markup=get_main_kb())
+        await call.message.answer(f"❌ Критическая ошибка QR: {type(e).__name__}", reply_markup=get_main_kb())
     finally:
         await clear_auth_client(user_id)
     await call.answer()
@@ -235,7 +248,6 @@ async def auth_phone_input(message: Message, state: FSMContext):
          return
     
     await clear_auth_client(user_id)
-    # Сессия будет называться session_<user_id>
     client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
     AUTH_CLIENTS[user_id] = client
         
@@ -253,7 +265,7 @@ async def auth_phone_input(message: Message, state: FSMContext):
          await state.clear()
     except Exception as e:
         logger.error(f"Ошибка отправки кода: {e}")
-        await message.answer(f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
+        await message.answer(f"❌ Ошибка: {type(e).__name__}", reply_markup=get_main_kb())
         await clear_auth_client(user_id)
         await state.clear()
 
@@ -274,9 +286,16 @@ async def auth_code_input(message: Message, state: FSMContext):
         await client.sign_in(phone=data['phone'], code=code, phone_code_hash=data['hash'])
         
         me = await client.get_me()
-        # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+        # 💥 Измененное сообщение об успехе (Код)
+        session_file = f"session_{me.id}.session"
+        success_message = (
+            f"✅ Успешный вход завершен! 🎉\n\n"
+            f"Ваш аккаунт (@{me.username or me.id}) успешно авторизован.\n"
+            f"Сессия сохранена в файл: <code>{session_file}</code>.\n\n"
+            f"Теперь вы можете использовать полный функционал бота."
+        )
         await message.answer(
-            f"✅ **Успешный вход!** Сессия сохранена как `session_{me.id}.session`.", 
+            success_message, 
             reply_markup=get_main_kb()
         )
         await clear_auth_client(user_id)
@@ -289,7 +308,7 @@ async def auth_code_input(message: Message, state: FSMContext):
          await message.answer("❌ Неверный код. Попробуйте еще раз.")
     except Exception as e:
         logger.error(f"Ошибка входа по коду: {e}")
-        await message.answer(f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
+        await message.answer(f"❌ Ошибка: {type(e).__name__}", reply_markup=get_main_kb())
         await clear_auth_client(user_id)
         await state.clear()
 
@@ -305,9 +324,16 @@ async def auth_pass_input(message: Message, state: FSMContext):
         await client.sign_in(password=password)
         
         me = await client.get_me()
-        # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+        # 💥 Измененное сообщение об успехе (Пароль)
+        session_file = f"session_{me.id}.session"
+        success_message = (
+            f"✅ Успешный вход завершен (2FA)! 🎉\n\n"
+            f"Ваш аккаунт (@{me.username or me.id}) успешно авторизован.\n"
+            f"Сессия сохранена в файл: <code>{session_file}</code>.\n\n"
+            f"Теперь вы можете использовать полный функционал бота."
+        )
         await message.answer(
-            f"✅ **Успешный вход (2FA)!** Сессия сохранена как `session_{me.id}.session`.", 
+            success_message, 
             reply_markup=get_main_kb()
         )
     except PasswordHashInvalidError:
@@ -315,7 +341,7 @@ async def auth_pass_input(message: Message, state: FSMContext):
          return
     except Exception as e:
         logger.error(f"Ошибка 2FA: {e}")
-        await message.answer(f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
+        await message.answer(f"❌ Ошибка: {type(e).__name__}", reply_markup=get_main_kb())
     finally:
         await clear_auth_client(user_id)
         await state.clear()
