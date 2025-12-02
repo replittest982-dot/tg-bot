@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-💎 StatPro Ultimate v19.0 - ARCHITECT EDITION
+💎 StatPro Ultimate v19.1 - STABLE HOTFIX
 ---------------------------------------------
+✅ FIX: RuntimeError (threads can only be started once).
 ✅ UI/UX: Премиальный дизайн сообщений и меню.
 ✅ CORE: Защита от EOF, Database Lock и Network Errors.
-✅ FEATURES: Full Pack (.zombies, .promote, .invite, .spam, etc).
 ✅ HYBRID: Парсинг Worker -> Отчет Bot (Файл/Текст).
 """
 
@@ -63,7 +63,7 @@ from PIL import Image
 
 WORKER_TASK: Optional[asyncio.Task] = None
 WORKER_STATUS = "⚪️ Ожидание запуска..."
-BOT_VERSION = "v19.0 Architect"
+BOT_VERSION = "v19.1 Hotfix"
 START_TIME = datetime.now().timestamp()
 SESSIONS_PARSED = 0
 
@@ -111,7 +111,7 @@ def get_session_path(user_id: int) -> Path:
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ (Optimized)
+# 🗄️ БАЗА ДАННЫХ (FIXED)
 # =========================================================================
 
 USER_CACHE = {}
@@ -130,12 +130,12 @@ async def has_active_sub(user_id: int) -> bool:
     if not u: return False
     return datetime.fromisoformat(u['sub_end']) > datetime.now()
 
-async def db_connect():
-    """Создает подключение с правильным таймаутом"""
-    return await aiosqlite.connect(DB_PATH, timeout=30.0)
+def db_connect():
+    """Возвращает контекстный менеджер (без await)"""
+    return aiosqlite.connect(DB_PATH, timeout=30.0)
 
 async def init_db():
-    async with await db_connect() as db:
+    async with db_connect() as db:
         # Оптимизация производительности
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
@@ -164,7 +164,7 @@ async def init_db():
 # --- DB Accessors ---
 
 async def get_user_limit(user_id: int) -> int:
-    async with await db_connect() as db:
+    async with db_connect() as db:
         async with db.execute("SELECT parse_limit FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row and row[0] else 1000
@@ -172,7 +172,7 @@ async def get_user_limit(user_id: int) -> int:
 async def add_user(user_id: int, username: str):
     now = datetime.now().isoformat()
     trial_end = (datetime.now() + timedelta(days=0)).isoformat()
-    async with await db_connect() as db:
+    async with db_connect() as db:
         await db.execute("""
             INSERT OR IGNORE INTO users (user_id, username, join_date, sub_end, last_active) 
             VALUES (?, ?, ?, ?, ?)
@@ -180,27 +180,27 @@ async def add_user(user_id: int, username: str):
         await db.commit()
 
 async def get_user_data(user_id: int):
-    async with await db_connect() as db:
+    async with db_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
             return await cursor.fetchone()
 
 async def set_limit(user_id: int, limit: int):
-    async with await db_connect() as db:
+    async with db_connect() as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         await db.execute("UPDATE users SET parse_limit = ? WHERE user_id = ?", (limit, user_id))
         await db.commit()
 
 async def create_promo(days: int, activations: int) -> str:
     code = f"PRO-{uuid.uuid4().hex[:6].upper()}"
-    async with await db_connect() as db:
+    async with db_connect() as db:
         await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, activations))
         await db.commit()
     return code
 
 async def use_promo(user_id: int, code: str) -> bool:
     if not re.match(PATTERNS['promo'], code): return False
-    async with await db_connect() as db:
+    async with db_connect() as db:
         async with db.execute("SELECT days, activations FROM promos WHERE code = ?", (code,)) as c:
             res = await c.fetchone()
             if not res or res[1] < 1: return False
@@ -220,13 +220,13 @@ async def use_promo(user_id: int, code: str) -> bool:
     return True
 
 async def get_stats():
-    async with await db_connect() as db:
+    async with db_connect() as db:
         async with db.execute("SELECT COUNT(*) FROM users") as c: total = (await c.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM users WHERE sub_end > ?", (datetime.now().isoformat(),)) as c: active = (await c.fetchone())[0]
     return total, active
 
 async def get_all_users():
-    async with await db_connect() as db:
+    async with db_connect() as db:
         async with db.execute("SELECT user_id FROM users") as c:
             return [row[0] for row in await c.fetchall()]
 
@@ -469,7 +469,6 @@ async def parse_res_handler(c: CallbackQuery):
     await c.answer()
 
 # --- OTHER HANDLERS (Auth, Sub, Admin) ---
-# ... (Код авторизации и админки оптимизирован, но логика сохранена)
 
 @router.callback_query(F.data == "sub_menu")
 async def sub_menu(c: CallbackQuery):
