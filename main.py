@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Ultimate v9.0 - DATABASE EDITION
-✅ Личные настройки для каждого юзера (БД).
-✅ Рабочая система подписок и промокодов (БД).
-✅ Кнопка перезапуска Worker'а (Решение проблемы "Неактивен").
-✅ Исправлены все импорты.
+🚀 StatPro Ultimate v9.1 - STABLE & FIXED
+✅ ИСПРАВЛЕНО: Ошибка edit_text (безопасное переключение меню).
+✅ База данных (SQLite) для настроек и подписок.
+✅ Worker с кнопкой перезапуска.
+✅ Таймауты 500 сек.
 """
 
 import asyncio
@@ -29,7 +29,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message,
     BufferedInputFile
 )
-# ФИКС ИМПОРТА
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
@@ -50,7 +49,6 @@ from PIL import Image
 # I. КОНФИГУРАЦИЯ
 # =========================================================================
 
-# Глобальная переменная для задачи Worker'а
 WORKER_TASK: Optional[asyncio.Task] = None
 WORKER_STATUS = "⚪️ Не запущен"
 
@@ -60,7 +58,7 @@ try:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # ТАЙМАУТ 500 СЕКУНД
+    # Таймаут 500 секунд
     AUTH_TIMEOUT = int(os.getenv("QR_TIMEOUT", "500"))
     
     SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
@@ -92,7 +90,6 @@ logger = logging.getLogger(__name__)
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Таблица пользователей (подписка + лимиты)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -100,7 +97,6 @@ async def init_db():
                 parse_limit INTEGER DEFAULT 1000
             )
         """)
-        # Таблица промокодов
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promos (
                 code TEXT PRIMARY KEY,
@@ -109,8 +105,6 @@ async def init_db():
             )
         """)
         await db.commit()
-
-# --- ФУНКЦИИ БД ---
 
 async def get_user_limit(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -128,26 +122,21 @@ async def set_user_limit(user_id: int, limit: int):
 
 async def get_sub_date(user_id: int) -> Optional[datetime]:
     if user_id == ADMIN_ID:
-        return datetime.now() + timedelta(days=3650) # Админ вечный
+        return datetime.now() + timedelta(days=3650)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                try:
-                    return datetime.fromisoformat(row[0])
+                try: return datetime.fromisoformat(row[0])
                 except: return None
     return None
 
 async def add_sub_days(user_id: int, days: int):
-    current_end = await get_sub_date(user_id)
+    curr = await get_sub_date(user_id)
     now = datetime.now()
-    if current_end and current_end > now:
-        new_end = current_end + timedelta(days=days)
-    else:
-        new_end = now + timedelta(days=days)
+    new_end = (curr + timedelta(days=days)) if (curr and curr > now) else (now + timedelta(days=days))
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # Сначала убедимся, что юзер есть, сохраняя его лимит
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), user_id))
         await db.commit()
@@ -163,14 +152,10 @@ async def activate_promo_db(user_id: int, code: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT days, activations FROM promos WHERE code = ?", (code,)) as cursor:
             row = await cursor.fetchone()
-            if not row or row[1] <= 0:
-                return False
+            if not row or row[1] <= 0: return False
             days = row[0]
-            
-        # Уменьшаем активации
         await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ?", (code,))
         await db.commit()
-    
     await add_sub_days(user_id, days)
     return True
 
@@ -188,18 +173,32 @@ class SubscriptionCheckMiddleware(BaseMiddleware):
             member = await bot.get_chat_member(chat_id=TARGET_CHANNEL_ID, user_id=user_id)
             if member.status in [ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
                 return await handler(event, data)
-        except Exception:
-            pass 
+        except: pass
             
         text = f"🚫 <b>Доступ закрыт!</b>\nПодпишитесь: {TARGET_CHANNEL_URL}\nЗатем жмите /start"
-        if isinstance(event, Message):
-            await event.answer(text)
-        elif isinstance(event, CallbackQuery):
-            await event.answer("🚫 Подпишитесь на канал!", show_alert=True)
+        if isinstance(event, Message): await event.answer(text)
+        elif isinstance(event, CallbackQuery): await event.answer("🚫 Подпишитесь на канал!", show_alert=True)
         return
 
 # =========================================================================
-# IV. КЛАВИАТУРЫ
+# IV. УТИЛИТЫ (Safe Edit)
+# =========================================================================
+
+async def safe_edit(call: CallbackQuery, text: str, reply_markup=None):
+    """
+    Безопасное редактирование сообщения.
+    Если нельзя отредактировать (например, это фото), удаляет старое и шлет новое.
+    """
+    try:
+        await call.message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        # Если ошибка (например, там было фото), удаляем и шлем текст
+        try: await call.message.delete()
+        except: pass
+        await call.message.answer(text, reply_markup=reply_markup)
+
+# =========================================================================
+# V. КЛАВИАТУРЫ
 # =========================================================================
 
 def get_main_kb(user_id: int) -> InlineKeyboardMarkup:
@@ -244,7 +243,7 @@ def get_sub_kb() -> InlineKeyboardMarkup:
     ])
 
 # =========================================================================
-# V. HANDLERS
+# VI. HANDLERS
 # =========================================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -278,7 +277,8 @@ async def cmd_start(message: Message):
 async def cb_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await clear_temp_client(call.from_user.id)
-    await call.message.edit_text("Главное меню:", reply_markup=get_main_kb(call.from_user.id))
+    # Используем safe_edit, чтобы не было ошибки при возврате от фото к тексту
+    await safe_edit(call, "Главное меню:", reply_markup=get_main_kb(call.from_user.id))
 
 # --- SUBSCRIPTION ---
 
@@ -289,12 +289,11 @@ async def cb_sub(call: CallbackQuery):
         status = f"✅ Активна до {end_date.strftime('%d.%m.%Y')}"
     else:
         status = "❌ Не активна"
-    
-    await call.message.edit_text(f"⭐ <b>Подписка</b>\nСтатус: {status}", reply_markup=get_sub_kb())
+    await safe_edit(call, f"⭐ <b>Подписка</b>\nСтатус: {status}", reply_markup=get_sub_kb())
 
 @router.callback_query(F.data == "enter_promo")
 async def cb_enter_promo(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("🎫 Введите промокод:")
+    await safe_edit(call, "🎫 Введите промокод:")
     await state.set_state(AuthStates.PROMO_INPUT)
 
 @router.message(AuthStates.PROMO_INPUT)
@@ -310,11 +309,11 @@ async def promo_handler(msg: Message, state: FSMContext):
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
-    await call.message.edit_text(f"👑 Админ\nWorker: {WORKER_STATUS}", reply_markup=get_admin_panel_kb())
+    await safe_edit(call, f"👑 Админ\nWorker: {WORKER_STATUS}", reply_markup=get_admin_panel_kb())
 
 @router.callback_query(F.data == "create_promo")
 async def cb_cp(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("Дней:")
+    await safe_edit(call, "Дней:")
     await state.set_state(AuthStates.ADMIN_PROMO_D)
 
 @router.message(AuthStates.ADMIN_PROMO_D)
@@ -338,18 +337,21 @@ async def cb_restart(call: CallbackQuery):
     if WORKER_TASK: WORKER_TASK.cancel()
     await asyncio.sleep(2)
     WORKER_TASK = asyncio.create_task(start_telethon_worker())
-    await call.message.edit_text("✅ Команда отправлена. Ждите статус 'Активен'.", reply_markup=get_admin_panel_kb())
+    # Ждем чуть-чуть инициализации
+    await asyncio.sleep(1)
+    await safe_edit(call, f"✅ Команда отправлена.\nТекущий статус: {WORKER_STATUS}", reply_markup=get_admin_panel_kb())
 
 # --- CONFIG & FUNCTIONS ---
 
 @router.callback_query(F.data == "main_functions")
 async def cb_funcs(call: CallbackQuery):
     limit = await get_user_limit(call.from_user.id)
-    await call.message.edit_text(
+    text = (
         f"📊 <b>Настройки</b>\nЛимит парсинга: {limit}\n\n"
-        f"Команды в чате:\n<code>.чекгруппу</code>\n<code>.лс текст @юзер</code>",
-        reply_markup=get_config_kb(limit)
+        f"Команды в чате:\n<code>.чекгруппу</code>\n<code>.лс текст @юзер</code>"
     )
+    # Используем безопасное редактирование (ФИКС ОШИБКИ)
+    await safe_edit(call, text, reply_markup=get_config_kb(limit))
 
 @router.callback_query(F.data.startswith("set_limit:"))
 async def cb_set_limit(call: CallbackQuery):
@@ -358,10 +360,11 @@ async def cb_set_limit(call: CallbackQuery):
     await call.answer(f"Лимит установлен: {limit}")
     await cb_funcs(call)
 
-# --- AUTH (QR & PHONE) - Стандартная логика ---
+# --- AUTH (QR & PHONE) ---
 
 @router.callback_query(F.data == "auth_menu")
-async def cb_am(c: CallbackQuery): await c.message.edit_text("Метод:", reply_markup=get_auth_menu_kb())
+async def cb_am(c: CallbackQuery): 
+    await safe_edit(c, "Метод:", reply_markup=get_auth_menu_kb())
 
 @router.callback_query(F.data == "auth_qr")
 async def auth_qr(call: CallbackQuery):
@@ -376,18 +379,34 @@ async def auth_qr(call: CallbackQuery):
         bio = io.BytesIO()
         img.save(bio, format='PNG')
         bio.seek(0)
-        sent = await call.message.answer_photo(BufferedInputFile(bio.read(), filename="qr.png"), caption=f"📸 Сканируйте! (500с)")
-        await call.message.delete()
+        
+        # Удаляем старое (меню) и шлем фото
+        try: await call.message.delete()
+        except: pass
+        
+        sent = await call.message.answer_photo(
+            BufferedInputFile(bio.read(), filename="qr.png"), 
+            caption=f"📸 Сканируйте! (Таймаут {AUTH_TIMEOUT}с)"
+        )
+        
         await asyncio.wait_for(qr.wait(), timeout=AUTH_TIMEOUT)
         me = await client.get_me()
-        await sent.edit_caption(caption=f"✅ Вход: @{me.username}", reply_markup=get_main_kb(uid))
+        
+        # Редактируем подпись фото
+        await sent.edit_caption(
+            caption=f"✅ <b>Вход выполнен!</b>\n@{me.username}\nФайл: <code>session_{me.id}.session</code>",
+            reply_markup=get_main_kb(uid)
+        )
     except Exception as e:
-        await call.message.answer(f"❌ {e}")
+        logger.error(f"Auth Error: {e}")
+        try: await sent.delete()
+        except: pass
+        await call.message.answer(f"❌ Ошибка или таймаут: {e}", reply_markup=get_main_kb(uid))
     finally: await clear_temp_client(uid)
 
 @router.callback_query(F.data == "auth_phone")
 async def auth_ph(c: CallbackQuery, s: FSMContext):
-    await c.message.edit_text("📱 Номер:")
+    await safe_edit(c, "📱 Номер:")
     await s.set_state(AuthStates.PHONE)
 
 @router.message(AuthStates.PHONE)
@@ -402,7 +421,7 @@ async def ph_in(m: Message, s: FSMContext):
         res = await cl.send_code_request(ph)
         await s.update_data(ph=ph, h=res.phone_code_hash)
         await s.set_state(AuthStates.CODE)
-        await m.answer("📩 Код:")
+        await m.answer(f"📩 Код (Таймаут {AUTH_TIMEOUT}с):")
     except Exception as e: await m.answer(f"❌ {e}")
 
 @router.message(AuthStates.CODE)
@@ -435,23 +454,24 @@ async def pa_in(m: Message, s: FSMContext):
         await s.clear()
 
 # =========================================================================
-# VI. WORKER
+# VII. WORKER
 # =========================================================================
 
 async def start_telethon_worker():
     global WORKER_STATUS
     sess = get_session_path(ADMIN_ID)
     if not sess.exists():
-        WORKER_STATUS = "🔴 Нет сессии"
+        WORKER_STATUS = "🔴 Нет сессии (Авторизуйтесь)"
         return
 
     client = TelegramClient(str(sess), API_ID, API_HASH)
     
     @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
     async def h_chk(ev):
-        # Берем лимит ИЗ БАЗЫ ДАННЫХ для админа (владельца воркера)
+        if not (ev.is_group or ev.is_channel): return await ev.reply("🚫 Только группы.")
+        # Берем лимит из базы (личный для админа)
         lim = await get_user_limit(ADMIN_ID)
-        m = await ev.reply(f"🔍 Парсинг (Лимит БД: {lim})...")
+        m = await ev.reply(f"🔍 Парсинг (Лимит: {lim})...")
         lines = []
         try:
             async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
@@ -467,7 +487,7 @@ async def start_telethon_worker():
     @client.on(events.NewMessage(pattern=r'^\.лс (.*?)(?: @(\S+))?$'))
     async def h_dm(ev):
         match = re.match(r'^\.лс (.*?)(?: @(\S+))?$', ev.text, re.DOTALL)
-        if not match: return await ev.reply("❌ .лс текст @юзер")
+        if not match: return await ev.reply("❌ Формат: .лс текст @юзер")
         txt, usrs = match.group(1), match.group(2).split() if match.group(2) else []
         await ev.reply(f"🚀 {len(usrs)} юзерам...")
         for u in usrs:
@@ -477,13 +497,17 @@ async def start_telethon_worker():
             except: pass
         await ev.reply("✅ Готово")
 
-    await client.start()
-    WORKER_STATUS = "🟢 Активен"
-    logger.info("Worker ON")
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        WORKER_STATUS = "🟢 Активен"
+        logger.info("Worker ON")
+        await client.run_until_disconnected()
+    except Exception as e:
+        WORKER_STATUS = f"🔴 Ошибка: {e}"
+        logger.error(f"Worker Error: {e}")
 
 # =========================================================================
-# VII. MAIN
+# VIII. MAIN
 # =========================================================================
 
 async def main():
