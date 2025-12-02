@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-💎 StatPro Ultimate v19.1 - STABLE HOTFIX
+👻 StatPro Ultimate v20.0 - PHANTOM EDITION
 ---------------------------------------------
-✅ FIX: RuntimeError (threads can only be started once).
-✅ UI/UX: Премиальный дизайн сообщений и меню.
+✅ NEW: Smart History Scraper (Парсинг истории вместо списка участников).
+✅ NEW: True Stealth (Мгновенное удаление команд пользователя).
+✅ FIX: Работает в чатах со скрытыми участниками.
 ✅ CORE: Защита от EOF, Database Lock и Network Errors.
-✅ HYBRID: Парсинг Worker -> Отчет Bot (Файл/Текст).
 """
 
 import asyncio
@@ -23,7 +23,7 @@ import json
 import math
 import sqlite3
 import aiosqlite
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional, Union, List, Set
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -48,7 +48,7 @@ from telethon.errors import (
     ChatAdminRequiredError, UserNotParticipantError, BadRequestError
 )
 from telethon.tl.types import (
-    ChannelParticipantsAdmins, ChatBannedRights
+    ChannelParticipantsAdmins, ChatBannedRights, User
 )
 from telethon.tl.functions.channels import EditAdminRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
@@ -63,7 +63,7 @@ from PIL import Image
 
 WORKER_TASK: Optional[asyncio.Task] = None
 WORKER_STATUS = "⚪️ Ожидание запуска..."
-BOT_VERSION = "v19.1 Hotfix"
+BOT_VERSION = "v20.0 Phantom"
 START_TIME = datetime.now().timestamp()
 SESSIONS_PARSED = 0
 
@@ -111,7 +111,7 @@ def get_session_path(user_id: int) -> Path:
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ (FIXED)
+# 🗄️ БАЗА ДАННЫХ
 # =========================================================================
 
 USER_CACHE = {}
@@ -131,15 +131,12 @@ async def has_active_sub(user_id: int) -> bool:
     return datetime.fromisoformat(u['sub_end']) > datetime.now()
 
 def db_connect():
-    """Возвращает контекстный менеджер (без await)"""
     return aiosqlite.connect(DB_PATH, timeout=30.0)
 
 async def init_db():
     async with db_connect() as db:
-        # Оптимизация производительности
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
-        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -231,7 +228,6 @@ async def get_all_users():
             return [row[0] for row in await c.fetchall()]
 
 async def cleanup_files():
-    """Очищает пустые сессии и временные файлы"""
     try:
         for path in SESSION_DIR.glob("*.session"):
             if path.stat().st_size == 0: path.unlink()
@@ -248,7 +244,6 @@ async def auto_backup():
 # =========================================================================
 
 async def edit_or_answer(message_obj: Union[Message, CallbackQuery], text: str, reply_markup=None):
-    """Универсальная функция для ответа"""
     try:
         msg = message_obj.message if isinstance(message_obj, CallbackQuery) else message_obj
         await msg.edit_text(text, reply_markup=reply_markup)
@@ -265,7 +260,6 @@ class SecurityMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         await add_user(user_id, event.from_user.username or "Unknown")
         
-        # Admin God Mode
         if user_id == ADMIN_ID:
             return await handler(event, data)
 
@@ -300,7 +294,6 @@ async def get_main_kb(user_id: int):
     is_active = await has_active_sub(user_id)
     kb = []
     
-    # Секретный вход для Админа
     if user_id == ADMIN_ID:
         kb.append([InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")])
 
@@ -308,7 +301,7 @@ async def get_main_kb(user_id: int):
     kb.append([InlineKeyboardButton(text="🎟 Активация доступа", callback_data="sub_menu")])
 
     if is_active:
-        kb.append([InlineKeyboardButton(text="⚡️ StatPro Infinity", callback_data="worker_menu")])
+        kb.append([InlineKeyboardButton(text="👻 Phantom Worker", callback_data="worker_menu")])
         kb.append([InlineKeyboardButton(text="🛠 Быстрые действия", callback_data="quick_actions")])
 
     kb.append([InlineKeyboardButton(text="💬 Тех. Поддержка", url=f"https://t.me/{SUPPORT_BOT_USERNAME.replace('@', '')}")])
@@ -409,23 +402,21 @@ async def w_menu(c: CallbackQuery):
         return
 
     u = await get_cached_user(c.from_user.id)
-    
-    # Безопасное отображение команд
     text = (
-        f"⚡️ <b>StatPro Infinity</b>\n"
+        f"👻 <b>Phantom Worker</b>\n"
         f"📡 Статус: {WORKER_STATUS}\n"
         f"🎯 Лимит: <b>{u['parse_limit']}</b>\n\n"
-        "🛡 <b>Администрирование:</b>\n"
+        "🛡 <b>Админ:</b>\n"
         "<code>.ban</code>, <code>.kick</code>, <code>.mute &lt;m/h&gt;</code>\n"
         "<code>.promote</code>, <code>.demote</code>, <code>.zombies</code>\n\n"
         "🛠 <b>Утилиты:</b>\n"
         "<code>.afk &lt;text&gt;</code>, <code>.whois</code>, <code>.invite</code>\n"
         "<code>.calc &lt;math&gt;</code>, <code>.ping</code>\n\n"
-        "⚔️ <b>Raid & Spam:</b>\n"
+        "⚔️ <b>Raid:</b>\n"
         "<code>.spam &lt;n&gt; &lt;text&gt;</code>, <code>.tagall</code>\n\n"
-        "📂 <b>Парсинг (Hybrid):</b>\n"
-        "<code>.чекгруппу</code>, <code>.csv</code>\n"
-        "<i>(Бот пришлет результат с выбором формата)</i>"
+        "📂 <b>Умный Парсинг:</b>\n"
+        "<code>.чекгруппу</code> - Сканирует историю переписки.\n"
+        "<code>.csv</code> - Обычный парсинг участников.\n"
     )
     await edit_or_answer(c, text, kb_config(u['parse_limit']))
 
@@ -452,7 +443,7 @@ async def parse_res_handler(c: CallbackQuery):
     if mode == "file":
         fn = f"Result_{title}.txt"
         with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(lines))
-        await c.message.answer_document(FSInputFile(fn), caption=f"📂 <b>Результат парсинга:</b> {len(lines)} строк")
+        await c.message.answer_document(FSInputFile(fn), caption=f"📂 <b>Результат:</b> {len(lines)} уникальных пользователей")
         os.remove(fn)
         
     elif mode == "text":
@@ -468,8 +459,7 @@ async def parse_res_handler(c: CallbackQuery):
     
     await c.answer()
 
-# --- OTHER HANDLERS (Auth, Sub, Admin) ---
-
+# --- OTHER HANDLERS ---
 @router.callback_query(F.data == "sub_menu")
 async def sub_menu(c: CallbackQuery):
     await edit_or_answer(c, "🎟 <b>Активация доступа:</b>", InlineKeyboardMarkup(inline_keyboard=[
@@ -595,7 +585,6 @@ async def aq(c: CallbackQuery):
         await msg.delete()
         kb = await get_main_kb(uid)
         await c.message.answer(f"✅ <b>Вход выполнен:</b> @{me.username or me.id}", reply_markup=kb)
-        # Soft start
         if not WORKER_TASK or WORKER_TASK.done():
              asyncio.create_task(worker_process())
     except Exception as e:
@@ -666,7 +655,7 @@ async def pa(m: Message, s: FSMContext):
         await s.clear()
 
 # =========================================================================
-# 🧠 TELETHON WORKER (CORE)
+# 🧠 TELETHON WORKER (PHANTOM CORE)
 # =========================================================================
 
 async def worker_process():
@@ -682,61 +671,87 @@ async def worker_process():
                 continue
 
             WORKER_STATUS = "🟡 Подключение..."
-            # Увеличенный таймаут соединения
             client = TelegramClient(str(sess_path_base), API_ID, API_HASH, connection_retries=None)
 
-            # --- WORKER FUNCTIONS ---
-            
+            # STEALTH: Удаляем сообщение пользователя
+            async def stealth_delete(event):
+                try: await event.delete()
+                except: pass
+
             async def temp_msg(event, text, delay=0.5):
-                """Стелс-отправка сообщений"""
+                """Отправка временного статуса (удаляется)"""
                 try:
-                    if event.out: msg = await event.edit(text)
-                    else: msg = await event.reply(text)
+                    msg = await event.respond(text)
                     await asyncio.sleep(delay)
                     await msg.delete()
-                    if not event.out: await event.delete()
                 except: pass
 
             @client.on(events.NewMessage(pattern=r'^\.status'))
             async def status_cmd(ev):
+                await stealth_delete(ev)
                 uptime = int(time.time() - START_TIME)
                 txt = f"🟢 <b>Online</b> | ⏱ {uptime}s | 📂 {SESSIONS_PARSED}"
                 await temp_msg(ev, txt, 5)
 
-            # HYBRID PARSING
+            # --- SMART HISTORY SCRAPER ---
             @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
-            async def txt_parse(ev):
+            async def smart_parse(ev):
+                await stealth_delete(ev) # PHANTOM MODE ON
                 global SESSIONS_PARSED
                 lim = await get_user_limit(ADMIN_ID)
-                msg = await ev.reply(f"🔍 Парсинг ({lim})...")
-                lines = []
+                
+                # Мы не парсим список. Мы сканируем историю.
+                # Чтобы не висеть вечно, ставим запас x5 от лимита, 
+                # но останавливаемся, когда найдем нужное кол-во уникальных.
+                scan_limit = 50000 
+                
+                msg = await ev.respond(f"👻 <b>Phantom Scan</b>\nАнализирую историю ({lim} уникальных)...")
+                
+                unique_users: Dict[int, str] = {} # ID: "formatted string"
+                scanned_msgs = 0
+                
                 try:
-                    async with asyncio.timeout(300):
-                        async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
-                            lines.append(f"@{u.username or 'None'} | {u.first_name} | {u.id}")
-                            if len(lines) % 50 == 0: await msg.edit(f"🔍 {progress_bar(len(lines), lim)}")
+                    async with asyncio.timeout(600): # 10 мин макс
+                        async for message in client.iter_messages(ev.chat_id, limit=scan_limit):
+                            scanned_msgs += 1
+                            
+                            if message.sender and isinstance(message.sender, User) and not message.sender.bot:
+                                if message.sender_id not in unique_users:
+                                    u = message.sender
+                                    unique_users[u.id] = f"@{u.username or 'None'} | {u.first_name} | {u.id}"
+                            
+                            # UI Update
+                            if scanned_msgs % 200 == 0:
+                                await msg.edit(f"👻 <b>Phantom Scan</b>\nПроверено: {scanned_msgs}\nНайдено: {len(unique_users)}/{lim}\n{progress_bar(len(unique_users), lim)}")
+                            
+                            # Hard stop condition
+                            if len(unique_users) >= lim:
+                                break
                     
                     SESSIONS_PARSED += 1
-                    # Save to RAM for Bot
-                    TEMP_PARSE_DATA[ADMIN_ID] = {'lines': lines, 'title': str(ev.chat_id)}
+                    TEMP_PARSE_DATA[ADMIN_ID] = {'lines': list(unique_users.values()), 'title': str(ev.chat_id)}
                     
-                    await msg.edit("✅ <b>Готово!</b> Проверьте ЛС бота.")
-                    await asyncio.sleep(1)
+                    await msg.edit("✅ <b>Успех!</b> Проверьте бота.")
+                    await asyncio.sleep(2)
                     await msg.delete()
                     
-                    # Trigger Bot
                     try:
                         await bot.send_message(
                             ADMIN_ID, 
-                            f"📁 <b>Парсинг завершен!</b>\nСобрано: {len(lines)} пользователей.\n\n👇 Выберите формат:",
+                            f"📁 <b>Phantom Parse завершен!</b>\nПросканировано сообщений: {scanned_msgs}\nУникальных авторов: {len(unique_users)}\n\n👇 Выберите формат:",
                             reply_markup=kb_parse_choice()
                         )
                     except: pass
-                except Exception as e: return await temp_msg(msg, f"Err: {e}", 3)
 
-            # ALL UTILS
+                except Exception as e: 
+                    await msg.delete()
+                    logger.error(f"Parse Error: {e}")
+
+            # --- FEATURES WITH STEALTH ---
+            
             @client.on(events.NewMessage(pattern=r'^\.promote'))
             async def promote_cmd(ev):
+                await stealth_delete(ev)
                 if not ev.is_reply: return
                 r = await ev.get_reply_message()
                 try:
@@ -751,6 +766,7 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.demote'))
             async def demote_cmd(ev):
+                await stealth_delete(ev)
                 if not ev.is_reply: return
                 r = await ev.get_reply_message()
                 try:
@@ -765,8 +781,8 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.zombies'))
             async def zombies_cmd(ev):
-                if not ev.is_group: return
-                msg = await ev.reply("🧟 Scanning...")
+                await stealth_delete(ev)
+                msg = await ev.respond("🧟 Scanning...")
                 cnt = 0
                 try:
                     participants = await client.get_participants(ev.chat_id)
@@ -783,6 +799,7 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.invite'))
             async def invite_cmd(ev):
+                await stealth_delete(ev)
                 try:
                     link = await client(ExportChatInviteRequest(ev.chat_id))
                     await temp_msg(ev, f"🔗 {link.link}", 10)
@@ -790,8 +807,7 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.tagall'))
             async def tagall_cmd(ev):
-                if not ev.is_group: return
-                await ev.delete()
+                await stealth_delete(ev)
                 parts = await client.get_participants(ev.chat_id)
                 mentions = [f"<a href='tg://user?id={u.id}'>\u200b</a>" for u in parts if not u.deleted]
                 for i in range(0, len(mentions), 5):
@@ -800,6 +816,7 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.whois'))
             async def whois_cmd(ev):
+                await stealth_delete(ev)
                 if not ev.is_reply: return
                 r = await ev.get_reply_message()
                 u = await r.get_sender()
@@ -807,17 +824,19 @@ async def worker_process():
 
             @client.on(events.NewMessage(pattern=r'^\.spam (\d+) (.*)'))
             async def spam_cmd(ev):
+                await stealth_delete(ev)
                 c = int(ev.pattern_match.group(1))
                 t = ev.pattern_match.group(2)
-                await ev.delete()
                 for _ in range(c):
                     await client.send_message(ev.chat_id, t)
                     await asyncio.sleep(0.1)
 
             @client.on(events.NewMessage(pattern=r'^\.csv$'))
             async def csv_parse(ev):
+                await stealth_delete(ev)
+                # Old method for normal groups
                 lim = await get_user_limit(ADMIN_ID)
-                msg = await ev.reply(f"📊 CSV ({lim})...")
+                msg = await ev.respond(f"📊 CSV ({lim})...")
                 rows = []
                 try:
                     async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
@@ -832,10 +851,12 @@ async def worker_process():
                     except BadRequestError: await msg.edit("❌ Топик закрыт!")
                     os.remove(fn)
                     await temp_msg(msg, "Uploaded", 0.5)
-                except Exception as e: return await temp_msg(msg, f"Error: {e}", 3)
+                except Exception as e: 
+                    await msg.delete()
 
             @client.on(events.NewMessage(pattern=r'^\.calc (.+)'))
             async def calc_cmd(ev):
+                await stealth_delete(ev)
                 try:
                     res = eval(ev.pattern_match.group(1), {"__builtins__": {}}, {"math": math})
                     await temp_msg(ev, f"🔢 {res}", 5)
@@ -844,28 +865,27 @@ async def worker_process():
             @client.on(events.NewMessage(pattern=r'^\.ping'))
             async def ping_cmd(ev):
                 s = time.time()
-                msg = await ev.reply("Pong")
+                await stealth_delete(ev)
+                msg = await ev.respond("Pong")
                 await temp_msg(msg, f"Ping: {int((time.time()-s)*1000)}ms", 1)
 
             # --- STARTUP ---
             await client.start()
-            WORKER_STATUS = "🟢 Активен (24/7)"
+            WORKER_STATUS = "🟢 Активен (Phantom Mode)"
             logger.info("Worker Started Successfully")
             await client.run_until_disconnected()
 
-        # --- EXCEPTION HANDLING (SOFT RESTART) ---
+        # --- EXCEPTION HANDLING ---
         except (EOFError, ConnectionError) as e:
             WORKER_STATUS = "⚠️ Ошибка сети. Переподключение..."
             logger.warning(f"Network Error: {e}. Reconnecting in 5s...")
             if client: await client.disconnect()
             await asyncio.sleep(5)
-            
         except sqlite3.OperationalError as e:
             WORKER_STATUS = "⏳ Ожидание базы данных..."
             logger.warning(f"DB Locked: {e}. Retrying in 5s...")
             if client: await client.disconnect()
             await asyncio.sleep(5)
-            
         except Exception as e:
             WORKER_STATUS = f"🔴 Сбой: {e}"
             logger.error(f"Worker Crash: {e}")
@@ -884,7 +904,6 @@ async def main():
     dp.message.middleware(SecurityMiddleware())
     dp.callback_query.middleware(SecurityMiddleware())
     
-    # Auto-start Worker
     WORKER_TASK = asyncio.create_task(worker_process())
     
     try:
