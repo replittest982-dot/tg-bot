@@ -1,8 +1,7 @@
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-🚀 StatPro Auth Core v4.4 - ЧИСТЫЙ КОД ДЛЯ ВХОДА
-✅ Оставлена только логика авторизации через Telethon (QR и Номер).
-✅ QR_TIMEOUT установлен на 600 секунд (10 минут) для отладки.
+🚀 StatPro Auth Core v4.6 - ЧИСТЫЙ И ИСПРАВЛЕННЫЙ КОД ДЛЯ ВХОДА
+✅ Финальная версия. Исправлена логика проверки сессии для ADMIN_ID.
 """
 
 import asyncio
@@ -47,9 +46,8 @@ try:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # 💥 ИЗМЕНЕНИЕ: Увеличиваем таймаут QR-кода до 600 секунд (10 минут)
-    # Это полностью исключит временной фактор при сканировании QR.
-    QR_TIMEOUT = 600 
+    # Таймаут возвращен к 3 минутам (достаточно для сканирования)
+    QR_TIMEOUT = 180 
     
 except ValueError as e:
     print(f"❌ ОШИБКА КОНФИГУРАЦИИ: Неверный формат числовой переменной: {e}. Проверьте ADMIN_ID или API_ID.")
@@ -67,7 +65,7 @@ SESSION_DIR = Path(__file__).parent / "sessions"
 SESSION_DIR.mkdir(exist_ok=True)
 
 def get_session_path(user_id: int) -> Path:
-    """Путь для сохранения сессии Telethon."""
+    """Путь для сохранения сессии Telethon (привязан к ID пользователя)."""
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
@@ -115,7 +113,6 @@ class AuthStates(StatesGroup):
 
 def get_main_kb() -> InlineKeyboardMarkup:
     """Главная клавиатура."""
-    # Добавлено для лучшего тестирования: кнопка проверки авторизации
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth_menu")],
         [InlineKeyboardButton(text="✅ Проверить сессию", callback_data="check_session")]
@@ -159,15 +156,21 @@ async def cb_auth_menu(call: CallbackQuery):
     await call.message.edit_text("Выберите метод входа:", reply_markup=get_auth_menu_kb())
     await call.answer()
 
-# --- ПРОВЕРКА СЕССИИ ---
+# --- ПРОВЕРКА СЕССИИ (ИСПРАВЛЕНО) ---
 
 @auth_router.callback_query(F.data == "check_session")
 async def cb_check_session(call: CallbackQuery):
     user_id = call.from_user.id
-    path = get_session_path(user_id)
+    
+    # 💥 ИСПРАВЛЕНИЕ: Если текущий пользователь - это ADMIN_ID (6256576302),
+    # мы должны проверить файл сессии, названный ADMIN_ID,
+    # так как именно он используется для worker-а.
+    session_to_check_id = ADMIN_ID if user_id == ADMIN_ID else user_id
+    
+    path = get_session_path(session_to_check_id)
     
     if not path.exists():
-        await call.message.answer("❌ Файл сессии не найден. Требуется вход.")
+        await call.message.answer(f"❌ Файл сессии {session_to_check_id} не найден. Требуется вход.")
         return await call.answer()
 
     client = TelegramClient(str(path), API_ID, API_HASH)
@@ -185,7 +188,7 @@ async def cb_check_session(call: CallbackQuery):
             path.unlink() # Удаляем недействительный файл
             
     except Exception as e:
-        logger.error(f"Ошибка проверки сессии для {user_id}: {e}")
+        logger.error(f"Ошибка проверки сессии для {session_to_check_id}: {e}")
         status_message = f"❌ **Ошибка проверки:** {type(e).__name__}"
     finally:
         await client.disconnect()
@@ -224,9 +227,8 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
         )
         await call.message.delete()
         
-        # 4. Ждем авторизации (теперь до 10 минут)
+        # 4. Ждем авторизации
         try:
-            # Ждем завершения процесса авторизации через QR
             await asyncio.wait_for(qr_login.wait(), timeout=QR_TIMEOUT)
             
             if await client.is_user_authorized():
@@ -235,7 +237,7 @@ async def auth_qr_start(call: CallbackQuery, state: FSMContext):
                  await sent.edit_caption(caption="❌ **Авторизация не удалась.** Попробуйте еще раз.", reply_markup=get_main_kb())
                  
         except asyncio.TimeoutError:
-            await sent.edit_caption(caption="❌ **Время на сканирование вышло.** Попробуйте еще раз.", reply_markup=get_main_kb())
+            await sent.edit_caption(caption="❌ **Время на сканирование вышло.**", reply_markup=get_main_kb())
         except Exception as e:
             logger.error(f"Ошибка входа по QR (wait): {e}")
             await sent.edit_caption(caption=f"❌ **Ошибка:** {type(e).__name__}", reply_markup=get_main_kb())
