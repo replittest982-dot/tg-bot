@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-🚀 StatPro Ultimate v10.0 - THE FINAL CUT
-✅ Fix: Safe Message Editing (No more "There is no text to edit")
-✅ Fix: Full SQLite DB (No Mocks)
-✅ New: CSV Export, Ban System, Broadcast, Backup, Profile
-✅ New: 10+ Telethon Commands
+🚀 StatPro Ultimate v10.1 - FIXED & POLISHED
+✅ Исправлена проверка файла сессии (.session)
+✅ Исправлены импорты Aiogram 3
+✅ Таймауты 500 сек
+✅ База Данных SQLite
 """
 
 import asyncio
@@ -58,6 +58,8 @@ try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
+    
+    # ТАЙМАУТ 500 СЕКУНД
     AUTH_TIMEOUT = int(os.getenv("QR_TIMEOUT", "500"))
     
     SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
@@ -78,6 +80,7 @@ SESSION_DIR.mkdir(exist_ok=True)
 DB_PATH = BASE_DIR / "database.db"
 
 def get_session_path(user_id: int) -> Path:
+    """Возвращает путь к сессии (без расширения для Telethon конструктора)"""
     return SESSION_DIR / f"session_{user_id}"
 
 # =========================================================================
@@ -87,26 +90,23 @@ def get_session_path(user_id: int) -> Path:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
-# 🔥 MAGIC FUNCTION: SAFE EDIT
 async def edit_or_answer(message_obj: Union[Message, CallbackQuery], text: str, reply_markup=None):
-    """Умная функция: пытается редактировать, если нет текста - шлет новое."""
+    """Безопасное редактирование: если нельзя редактировать, шлет новое."""
     try:
-        if isinstance(message_obj, CallbackQuery):
-            msg = message_obj.message
-        else:
-            msg = message_obj
-
-        # Пытаемся редактировать
+        msg = message_obj.message if isinstance(message_obj, CallbackQuery) else message_obj
         await msg.edit_text(text, reply_markup=reply_markup)
     except Exception:
-        # Если не вышло (например, это фото), удаляем старое и шлем новое
-        try: await msg.delete()
+        # Если это фото или старое сообщение, удаляем и шлем новое
+        try: 
+            target = message_obj.message if isinstance(message_obj, CallbackQuery) else message_obj
+            await target.delete()
         except: pass
-        await msg.answer(text, reply_markup=reply_markup)
+        
+        target = message_obj.message if isinstance(message_obj, CallbackQuery) else message_obj
+        await target.answer(text, reply_markup=reply_markup)
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Пользователи
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -117,7 +117,6 @@ async def init_db():
                 is_banned INTEGER DEFAULT 0
             )
         """)
-        # Промокоды
         await db.execute("""
             CREATE TABLE IF NOT EXISTS promos (
                 code TEXT PRIMARY KEY,
@@ -131,7 +130,6 @@ async def init_db():
 
 async def add_user(user_id: int, username: str):
     now = datetime.now().isoformat()
-    # Даем 1 день триал
     trial_end = (datetime.now() + timedelta(days=1)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -167,7 +165,6 @@ async def use_promo(user_id: int, code: str) -> bool:
         
         await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ?", (code,))
         
-        # Extend sub
         usr = await get_user_data(user_id)
         current = datetime.fromisoformat(usr['sub_end']) if usr and usr['sub_end'] else datetime.now()
         if current < datetime.now(): current = datetime.now()
@@ -196,20 +193,17 @@ class SecurityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
         user_id = event.from_user.id
         
-        # 1. Register User
         await add_user(user_id, event.from_user.username or "Unknown")
         
-        # 2. Check Ban
         u_data = await get_user_data(user_id)
         if u_data and u_data['is_banned']:
             if isinstance(event, Message): await event.answer("🚫 Вы забанены.")
             return
 
-        # 3. Check Sub Channel (Skip Admin)
         if user_id != ADMIN_ID and TARGET_CHANNEL_ID != 0:
             try:
                 m = await bot.get_chat_member(TARGET_CHANNEL_ID, user_id)
-                if m.status not in ['creator', 'administrator', 'member']:
+                if m.status not in [ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
                     raise Exception
             except:
                 text = f"🚫 <b>Подпишитесь на канал!</b>\n{TARGET_CHANNEL_URL}"
@@ -238,7 +232,7 @@ def kb_main(user_id: int):
 def kb_auth():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Номер", callback_data="auth_phone"), 
-         InlineKeyboardButton(text="📸 QR-код", callback_data="auth_qr")],
+         InlineKeyboardButton(text="📸 QR-коду", callback_data="auth_qr")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
     ])
 
@@ -285,7 +279,12 @@ async def start(m: Message):
 @router.callback_query(F.data == "main_menu")
 async def menu(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await edit_or_answer(c, "🏠 Главное меню:", kb_main(c.from_user.id))
+    uid = c.from_user.id
+    if uid in TEMP_CLIENTS: 
+        try: await TEMP_CLIENTS[uid].disconnect()
+        except: pass
+        del TEMP_CLIENTS[uid]
+    await edit_or_answer(c, "🏠 Главное меню:", kb_main(uid))
 
 @router.callback_query(F.data == "profile")
 async def profile(c: CallbackQuery):
@@ -427,13 +426,24 @@ async def aq(c: CallbackQuery):
         qr = await cl.qr_login()
         im = qrcode.make(qr.url).convert("RGB")
         b = io.BytesIO(); im.save(b, "PNG"); b.seek(0)
-        # Отправляем новое, удаляя старое (через Safe Edit нельзя фото, поэтому просто шлем)
-        await c.message.delete()
-        msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption=f"QR (500s)")
-        await asyncio.wait_for(qr.wait(), 500)
+        
+        # Удаляем старое фото, если есть
+        try: await c.message.delete()
+        except: pass
+        
+        msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption=f"📸 Сканируйте! (500с)")
+        
+        await asyncio.wait_for(qr.wait(), AUTH_TIMEOUT)
         me = await cl.get_me()
-        await msg.edit_caption(caption=f"✅ {me.username}", reply_markup=kb_main(uid))
-    except Exception as e: await c.message.answer(f"Error: {e}")
+        await msg.edit_caption(caption=f"✅ Вход выполнен: @{me.username or me.id}\nСессия сохранена.", reply_markup=kb_main(uid))
+    except Exception as e:
+        logger.error(f"Auth Error: {e}")
+        await c.message.answer(f"❌ Error: {e}")
+    finally:
+        if uid in TEMP_CLIENTS:
+            try: await TEMP_CLIENTS[uid].disconnect()
+            except: pass
+            del TEMP_CLIENTS[uid]
 
 @router.callback_query(F.data == "auth_phone")
 async def ap(c: CallbackQuery, s: FSMContext):
@@ -443,33 +453,51 @@ async def ap(c: CallbackQuery, s: FSMContext):
 @router.message(States.PHONE)
 async def ph(m: Message, s: FSMContext):
     uid = m.from_user.id
+    ph = m.text.strip().replace(" ", "")
     if uid in TEMP_CLIENTS: await TEMP_CLIENTS[uid].disconnect()
     cl = TelegramClient(str(get_session_path(uid)), API_ID, API_HASH)
     TEMP_CLIENTS[uid] = cl
-    await cl.connect()
-    r = await cl.send_code_request(m.text.strip())
-    await s.update_data(p=m.text, h=r.phone_code_hash)
-    await s.set_state(States.CODE)
-    await m.answer("Код:")
+    try:
+        await cl.connect()
+        r = await cl.send_code_request(ph)
+        await s.update_data(p=ph, h=r.phone_code_hash)
+        await s.set_state(States.CODE)
+        await m.answer("Код (500с):")
+    except Exception as e: await m.answer(f"❌ {e}")
 
 @router.message(States.CODE)
 async def co(m: Message, s: FSMContext):
     d = await s.get_data()
-    cl = TEMP_CLIENTS.get(m.from_user.id)
+    uid = m.from_user.id
+    cl = TEMP_CLIENTS.get(uid)
+    if not cl: return await m.answer("Сбой сессии.")
     try:
         await cl.sign_in(phone=d['p'], code=m.text, phone_code_hash=d['h'])
-        await m.answer("✅ Успех", reply_markup=kb_main(m.from_user.id))
+        me = await cl.get_me()
+        await m.answer(f"✅ Вход: @{me.username or me.id}", reply_markup=kb_main(uid))
         await s.clear()
+        # Disconnect temp client after auth, file is saved
+        try: await cl.disconnect()
+        except: pass
+        del TEMP_CLIENTS[uid]
     except SessionPasswordNeededError:
-        await m.answer("Пароль:")
+        await m.answer("🔒 Пароль:")
         await s.set_state(States.PASS)
+    except Exception as e: await m.answer(f"❌ {e}")
 
 @router.message(States.PASS)
 async def pa(m: Message, s: FSMContext):
-    cl = TEMP_CLIENTS.get(m.from_user.id)
-    await cl.sign_in(password=m.text)
-    await m.answer("✅ Успех", reply_markup=kb_main(m.from_user.id))
-    await s.clear()
+    uid = m.from_user.id
+    cl = TEMP_CLIENTS.get(uid)
+    try:
+        await cl.sign_in(password=m.text)
+        await m.answer("✅ Вход (2FA)", reply_markup=kb_main(uid))
+    except Exception as e: await m.answer(f"❌ {e}")
+    finally:
+        try: await cl.disconnect()
+        except: pass
+        if uid in TEMP_CLIENTS: del TEMP_CLIENTS[uid]
+        await s.clear()
 
 # =========================================================================
 # VI. TELETHON WORKER
@@ -477,19 +505,17 @@ async def pa(m: Message, s: FSMContext):
 
 async def worker_process():
     global WORKER_STATUS
-    sess = get_session_path(ADMIN_ID)
-    if not sess.exists():
-        WORKER_STATUS = "🔴 Нет сессии Админа"
+    
+    # Ищем файл сессии. Важно: Telethon создает файл с .session, но конструктор принимает путь без расширения
+    sess_path_base = get_session_path(ADMIN_ID)
+    
+    # 💥 ИСПРАВЛЕНИЕ: Проверяем наличие файла с .session
+    if not sess_path_base.with_suffix(".session").exists():
+        WORKER_STATUS = "🔴 Нет сессии (файл не найден)"
+        logger.warning(f"Worker: File {sess_path_base}.session not found")
         return
 
-    client = TelegramClient(str(sess), API_ID, API_HASH)
-    
-    # --- HELPER: CHECK SUB ---
-    async def check_access(event):
-        # Allow admin everywhere
-        if event.sender_id == (await client.get_me()).id: return True
-        # Check logic here if needed for others
-        return True
+    client = TelegramClient(str(sess_path_base), API_ID, API_HASH)
 
     @client.on(events.NewMessage(pattern=r'^\.help'))
     async def help_cmd(ev):
@@ -501,58 +527,64 @@ async def worker_process():
             "`.info` - Инфо (реплаем)\n"
             "`.join <link>` - Вход\n"
             "`.leave` - Выход\n"
-            "`.лс текст @юзер` - Рассылка"
+            "`.лс текст @юзер` - Рассылка\n"
+            "`.scan` - Быстрый анализ"
         )
 
     @client.on(events.NewMessage(pattern=r'^\.id'))
     async def id_cmd(ev):
-        await ev.reply(f"Chat ID: `{ev.chat_id}`\nSender ID: `{ev.sender_id}`")
+        await ev.reply(f"Chat: `{ev.chat_id}`\nUser: `{ev.sender_id}`")
 
     @client.on(events.NewMessage(pattern=r'^\.info'))
     async def info_cmd(ev):
-        if not ev.is_reply: return await ev.reply("Ответьте на сообщение!")
+        if not ev.is_reply: return await ev.reply("Reply msg!")
         r = await ev.get_reply_message()
         u = await r.get_sender()
         await ev.reply(f"Name: {u.first_name}\nID: `{u.id}`\nBot: {u.bot}\nUser: @{u.username}")
 
     @client.on(events.NewMessage(pattern=r'^\.join (.*)'))
     async def join_cmd(ev):
-        link = ev.pattern_match.group(1)
         try:
-            await client(functions.channels.JoinChannelRequest(link))
-            await ev.reply("✅ Entered")
+            await client(functions.channels.JoinChannelRequest(ev.pattern_match.group(1)))
+            await ev.reply("✅ Joined")
         except Exception as e: await ev.reply(f"❌ {e}")
 
     @client.on(events.NewMessage(pattern=r'^\.leave'))
     async def leave_cmd(ev):
-        await ev.reply("👋 Bye!")
+        await ev.reply("👋 Bye")
         await client(functions.channels.LeaveChannelRequest(ev.chat_id))
+
+    @client.on(events.NewMessage(pattern=r'^\.scan'))
+    async def scan_cmd(ev):
+        m = await ev.reply("scanning...")
+        cnt = await client.get_participants(ev.chat_id, limit=0)
+        await m.edit(f"👥 Users: {cnt.total}")
 
     @client.on(events.NewMessage(pattern=r'^\.чекгруппу$'))
     async def txt_parse(ev):
-        lim = await get_user_limit(ADMIN_ID) # Limit from DB
-        msg = await ev.reply(f"🔍 TXT Parsing ({lim})...")
+        lim = await get_user_limit(ADMIN_ID) or 1000
+        msg = await ev.reply(f"🔍 Parsing TXT ({lim})...")
         lines = []
         try:
             async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
                 lines.append(f"@{u.username or 'None'} | {u.first_name} | {u.id}")
-                if len(lines) % 300 == 0: await msg.edit(f"🔍 {len(lines)}...")
+                if len(lines) % 200 == 0: await msg.edit(f"🔍 {len(lines)}...")
         except Exception as e: return await msg.edit(f"❌ {e}")
         
         fn = f"u_{ev.chat_id}.txt"
         with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(lines))
-        await client.send_file(ev.chat_id, fn, caption=f"✅ Count: {len(lines)}")
+        await client.send_file(ev.chat_id, fn, caption=f"✅ Done: {len(lines)}")
         os.remove(fn)
 
     @client.on(events.NewMessage(pattern=r'^\.csv$'))
     async def csv_parse(ev):
-        lim = await get_user_limit(ADMIN_ID)
-        msg = await ev.reply(f"📊 CSV Parsing ({lim})...")
+        lim = await get_user_limit(ADMIN_ID) or 1000
+        msg = await ev.reply(f"📊 Parsing CSV ({lim})...")
         rows = []
         try:
             async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
                 rows.append([u.id, u.username or "", u.first_name or "", u.phone or ""])
-                if len(rows) % 300 == 0: await msg.edit(f"📊 {len(rows)}...")
+                if len(rows) % 200 == 0: await msg.edit(f"📊 {len(rows)}...")
         except Exception as e: return await msg.edit(f"❌ {e}")
         
         fn = f"export_{ev.chat_id}.csv"
@@ -561,12 +593,11 @@ async def worker_process():
             writer.writerow(["ID", "Username", "Name", "Phone"])
             writer.writerows(rows)
         
-        await client.send_file(ev.chat_id, fn, caption=f"✅ CSV Ready: {len(rows)}")
+        await client.send_file(ev.chat_id, fn, caption=f"✅ CSV: {len(rows)}")
         os.remove(fn)
 
     @client.on(events.NewMessage(pattern=r'^\.лс (.*?)(?: @(\S+))?$'))
     async def dm_cmd(ev):
-        # (Same logic as before)
         match = re.match(r'^\.лс (.*?)(?: @(\S+))?$', ev.text, re.DOTALL)
         if not match: return await ev.reply("❌ .лс msg @user")
         txt, usrs = match.group(1), match.group(2).split()
@@ -578,10 +609,14 @@ async def worker_process():
             except: pass
         await ev.reply("✅ Done")
 
-    WORKER_STATUS = "🟢 Активен"
-    logger.info("Worker Started")
-    await client.start()
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        WORKER_STATUS = "🟢 Активен"
+        logger.info("Worker ON")
+        await client.run_until_disconnected()
+    except Exception as e:
+        WORKER_STATUS = f"❌ Error: {e}"
+        logger.error(f"Worker Error: {e}")
 
 # =========================================================================
 # VII. MAIN
