@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v21.0
+💎 StatPro v21.1 - SAAS EDITION
 ---------------------------------------------
-✅ FIX: adm_d TypeError fixed (State args renamed).
-✅ NEW: Grant Sub by ID, Ban/Unban System.
-✅ FEAT: 45+ New Commands & Improvements.
+✅ FEAT: Multi-User Workers (Вход доступен всем подписчикам).
+✅ NEW: .чекстоп (Экстренная остановка парсинга).
+✅ UPGRADE: .status показывает реальный прогресс задачи.
+✅ CORE: Поддержка множества сессий одновременно.
 """
 
 import asyncio
@@ -47,11 +48,10 @@ from telethon.errors import (
     ChatAdminRequiredError, UserNotParticipantError, BadRequestError
 )
 from telethon.tl.types import (
-    ChannelParticipantsAdmins, ChatBannedRights, User, Message as TlMessage
+    ChannelParticipantsAdmins, ChatBannedRights, User
 )
 from telethon.tl.functions.channels import EditAdminRequest, JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest, SendReactionRequest
-from telethon.tl.functions.contacts import BlockRequest, UnblockRequest
 
 # --- QR ---
 import qrcode
@@ -61,12 +61,15 @@ from PIL import Image
 # ⚙️ КОНФИГУРАЦИЯ
 # =========================================================================
 
-WORKER_TASK: Optional[asyncio.Task] = None
-WORKER_STATUS = "⚪️ Ожидание..."
-BOT_VERSION = "v21.0 StatPro"
-START_TIME = datetime.now().timestamp()
-SESSIONS_PARSED = 0
+# Словарь для хранения задач воркеров: {user_id: asyncio.Task}
+ACTIVE_WORKERS: Dict[int, asyncio.Task] = {}
+# Флаги остановки: {user_id: bool_stop_signal}
+STOP_SIGNALS: Dict[int, bool] = {}
+# Текущий статус задач: {user_id: "Status Text"}
+TASK_STATUSES: Dict[int, str] = {}
 
+BOT_VERSION = "v21.1 SaaS"
+START_TIME = datetime.now().timestamp()
 TEMP_PARSE_DATA = {} 
 
 PATTERNS = {
@@ -89,7 +92,6 @@ try:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     AUTH_TIMEOUT = int(os.getenv("QR_TIMEOUT", "500"))
-    # UPDATED SUPPORT BOT
     SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
     TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL", "https://t.me/STAT_PRO1")
     TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
@@ -151,8 +153,6 @@ async def init_db():
         """)
         await db.commit()
 
-# --- DB Methods ---
-
 async def add_user(user_id: int, username: str):
     now = datetime.now().isoformat()
     trial_end = (datetime.now() + timedelta(days=0)).isoformat()
@@ -181,8 +181,6 @@ async def set_limit(user_id: int, limit: int):
         await db.commit()
     if user_id in USER_CACHE: del USER_CACHE[user_id]
 
-# --- Promo & Sub Logic ---
-
 async def create_promo(days: int, activations: int) -> str:
     code = f"PRO-{uuid.uuid4().hex[:6].upper()}"
     async with db_connect() as db:
@@ -207,22 +205,17 @@ async def use_promo(user_id: int, code: str) -> bool:
         
         await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), user_id))
         await db.commit()
-    
     if user_id in USER_CACHE: del USER_CACHE[user_id]
     return True
 
 async def grant_sub_by_id(user_id: int, days: int):
-    """Выдача подписки по ID"""
     async with db_connect() as db:
-        # Check if user exists, if not, create temp
         await db.execute("INSERT OR IGNORE INTO users (user_id, username, join_date, sub_end, last_active) VALUES (?, ?, ?, ?, ?)", 
                          (user_id, "Granted", datetime.now().isoformat(), datetime.now().isoformat(), datetime.now().isoformat()))
-        
         usr = await get_user_data(user_id)
         current = datetime.fromisoformat(usr['sub_end']) if usr and usr['sub_end'] else datetime.now()
         if current < datetime.now(): current = datetime.now()
         new_end = current + timedelta(days=days)
-        
         await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), user_id))
         await db.commit()
     if user_id in USER_CACHE: del USER_CACHE[user_id]
@@ -282,21 +275,9 @@ class SecurityMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         u_data = await get_cached_user(user_id)
-        if u_data and u_data['is_banned']:
-            return
-
-        if TARGET_CHANNEL_ID != 0:
-            try:
-                m = await bot.get_chat_member(TARGET_CHANNEL_ID, user_id)
-                if m.status not in [ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
-                    raise Exception
-            except:
-                if isinstance(event, Message): 
-                    await event.answer(f"🔒 <b>Доступ ограничен</b>\nПодпишитесь: {TARGET_CHANNEL_URL}")
-                elif isinstance(event, CallbackQuery): 
-                    await event.answer("🚫 Требуется подписка на канал!", show_alert=True)
-                return
-
+        if u_data and u_data['is_banned']: return
+        
+        # Check sub logic is handled in specific handlers, but we add basic registration here
         return await handler(event, data)
 
 def progress_bar(current, total, width=10):
@@ -312,14 +293,15 @@ async def get_main_kb(user_id: int):
     is_active = await has_active_sub(user_id)
     kb = []
     
-    if user_id == ADMIN_ID:
-        kb.append([InlineKeyboardButton(text="🔑 Авторизация (Admin)", callback_data="auth_menu")])
+    # Кнопка входа теперь доступна всем подписчикам
+    if is_active or user_id == ADMIN_ID:
+        kb.append([InlineKeyboardButton(text="🔑 Подключить Аккаунт", callback_data="auth_menu")])
 
     kb.append([InlineKeyboardButton(text="👤 Профиль", callback_data="profile")])
     kb.append([InlineKeyboardButton(text="🎟 Активация", callback_data="sub_menu")])
 
     if is_active:
-        kb.append([InlineKeyboardButton(text="👻 StatPro Worker", callback_data="worker_menu")])
+        kb.append([InlineKeyboardButton(text="👻 Worker Menu", callback_data="worker_menu")])
         kb.append([InlineKeyboardButton(text="🛠 Настройки", callback_data="quick_actions")])
 
     kb.append([InlineKeyboardButton(text="💬 Поддержка", url=f"https://t.me/{SUPPORT_BOT_USERNAME.replace('@', '')}")])
@@ -331,21 +313,21 @@ async def get_main_kb(user_id: int):
 
 def kb_auth():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 По номеру", callback_data="auth_phone"), 
-         InlineKeyboardButton(text="📸 По QR", callback_data="auth_qr")],
-        [InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="📱 Номер", callback_data="auth_phone"), 
+         InlineKeyboardButton(text="📸 QR-Код", callback_data="auth_qr")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
     ])
 
 def kb_admin():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Выдать подписку", callback_data="adm_grant"),
+        [InlineKeyboardButton(text="🎁 Подписка (ID)", callback_data="adm_grant"),
          InlineKeyboardButton(text="🎫 Создать Промо", callback_data="adm_promo")],
         [InlineKeyboardButton(text="⛔ Бан", callback_data="adm_ban"),
          InlineKeyboardButton(text="🟢 Разбан", callback_data="adm_unban")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"),
          InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
         [InlineKeyboardButton(text="📦 Бэкап", callback_data="adm_backup"),
-         InlineKeyboardButton(text="🔄 Рестарт", callback_data="adm_restart_worker")],
+         InlineKeyboardButton(text="🔄 Рестарт ВСЕХ", callback_data="adm_restart_worker")],
         [InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")]
     ])
 
@@ -387,7 +369,7 @@ TEMP_CLIENTS = {}
 @router.message(Command("start"))
 async def start(m: Message):
     kb = await get_main_kb(m.from_user.id)
-    await m.answer(f"👋 <b>StatPro</b> v21.0\nПрофессиональный инструмент аналитики.", reply_markup=kb)
+    await m.answer(f"👋 <b>StatPro</b> v21.1\nМульти-пользовательская аналитика.", reply_markup=kb)
 
 @router.callback_query(F.data == "main_menu")
 async def menu(c: CallbackQuery, state: FSMContext):
@@ -410,11 +392,15 @@ async def profile(c: CallbackQuery):
     date_str = "∞" if c.from_user.id == ADMIN_ID else d.strftime('%d.%m.%Y')
     limit_info = f"⚡️ Лимит: <b>{u['parse_limit']}</b>\n" if is_act else ""
     
+    # Check worker status for this user
+    w_status = "🟢 Active" if c.from_user.id in ACTIVE_WORKERS else "⚪️ Stopped"
+    
     text = (
         f"👤 <b>Профиль</b>\n"
         f"🆔: <code>{u['user_id']}</code>\n"
         f"💎: <b>{status}</b>\n"
         f"📅: {date_str}\n"
+        f"🤖 Worker: {w_status}\n"
         f"{limit_info}"
     )
     await edit_or_answer(c, text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="main_menu")]]))
@@ -427,9 +413,11 @@ async def w_menu(c: CallbackQuery):
 
     u = await get_cached_user(c.from_user.id)
     text = (
-        f"👻 <b>StatPro Worker</b>\n"
-        f"📡: {WORKER_STATUS}\n"
-        f"🎯: <b>{u['parse_limit']}</b>\n\n"
+        f"👻 <b>Worker Menu</b>\n"
+        f"🎯 Limit: <b>{u['parse_limit']}</b>\n\n"
+        "<b>NEW:</b>\n"
+        "<code>.чекстоп</code> - Экстренная остановка\n"
+        "<code>.status</code> - Прогресс парсинга\n\n"
         "🛠 <b>Tools:</b>\n"
         "<code>.id</code>, <code>.info</code>, <code>.ping</code>\n"
         "<code>.invite</code>, <code>.zombies</code>, <code>.bots</code>\n"
@@ -438,12 +426,8 @@ async def w_menu(c: CallbackQuery):
         "<code>.ban</code>, <code>.kick</code>, <code>.mute</code>\n"
         "<code>.promote</code>, <code>.demote</code>, <code>.purge</code>\n"
         "<code>.pin</code>, <code>.unpin</code>, <code>.lock</code>\n\n"
-        "⚔️ <b>Raid/Fun:</b>\n"
-        "<code>.spam</code>, <code>.tagall</code>, <code>.clown</code>\n"
-        "<code>.react</code>, <code>.ghost</code>\n\n"
         "📂 <b>Parse:</b>\n"
-        "<code>.scan</code> (Phantom), <code>.csv</code>\n"
-        "<code>.json</code>, <code>.html</code>"
+        "<code>.scan</code>, <code>.csv</code>, <code>.json</code>"
     )
     await edit_or_answer(c, text, kb_config(u['parse_limit']))
 
@@ -485,7 +469,6 @@ async def parse_res_handler(c: CallbackQuery):
         
     elif mode == "json":
         fn = f"Users_{title}.json"
-        # Конвертация в простой JSON
         json_data = [{"raw": l} for l in lines]
         with open(fn, "w", encoding="utf-8") as f: json.dump(json_data, f, indent=2)
         await c.message.answer_document(FSInputFile(fn), caption="JSON Export")
@@ -541,13 +524,15 @@ async def clr_cache(c: CallbackQuery):
 @router.callback_query(F.data == "admin_menu")
 async def adm_m(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
-    await edit_or_answer(c, f"👑 <b>Admin</b>\nWorker: {WORKER_STATUS}", kb_admin())
+    # Show status of all workers
+    cnt = len(ACTIVE_WORKERS)
+    await edit_or_answer(c, f"👑 <b>Admin</b>\nWorkers Active: {cnt}", kb_admin())
 
 @router.callback_query(F.data == "adm_stats")
 async def adm_st(c: CallbackQuery):
     t, a = await get_stats()
     uptime = int(time.time() - START_TIME)
-    await c.answer(f"Users: {t}\nActive: {a}\nUptime: {uptime//3600}h", show_alert=True)
+    await c.answer(f"Users: {t}\nActive: {a}\nWorkers: {len(ACTIVE_WORKERS)}\nUptime: {uptime//3600}h", show_alert=True)
 
 @router.callback_query(F.data == "adm_backup")
 async def adm_bk(c: CallbackQuery):
@@ -556,20 +541,22 @@ async def adm_bk(c: CallbackQuery):
 
 @router.callback_query(F.data == "adm_restart_worker")
 async def adm_rw(c: CallbackQuery):
-    global WORKER_TASK
-    if WORKER_TASK: WORKER_TASK.cancel()
-    await asyncio.sleep(1)
-    WORKER_TASK = asyncio.create_task(worker_process())
-    await c.answer("Restarted!", show_alert=True)
-    await edit_or_answer(c, f"👑 <b>Admin</b>\nWorker: {WORKER_STATUS}", kb_admin())
+    # Restarts ALL workers
+    await c.answer("Restarting ALL workers...", show_alert=True)
+    users = list(ACTIVE_WORKERS.keys())
+    for uid in users:
+        if ACTIVE_WORKERS.get(uid): ACTIVE_WORKERS[uid].cancel()
+    await asyncio.sleep(2)
+    
+    # Restart self (Admin) first, then others if logic permits (here we rely on session file presence check)
+    await scan_and_start_workers()
+    await c.message.answer("✅ All sessions restarted.")
 
-# --- ADMIN: PROMO FIX ---
 @router.callback_query(F.data == "adm_promo")
 async def adm_pr(c: CallbackQuery, state: FSMContext):
     await edit_or_answer(c, "📅 <b>Дней:</b>")
     await state.set_state(States.ADM_DAYS)
 
-# FIXED HANDLER SIGNATURE
 @router.message(States.ADM_DAYS)
 async def adm_d(m: Message, state: FSMContext):
     if not m.text.isdigit(): return await m.answer("Цифры!")
@@ -577,7 +564,6 @@ async def adm_d(m: Message, state: FSMContext):
     await m.answer("🔢 <b>Активаций:</b>")
     await state.set_state(States.ADM_ACT)
 
-# FIXED HANDLER SIGNATURE
 @router.message(States.ADM_ACT)
 async def adm_a(m: Message, state: FSMContext):
     if not m.text.isdigit(): return await m.answer("Цифры!")
@@ -586,7 +572,6 @@ async def adm_a(m: Message, state: FSMContext):
     await m.answer(f"✅ <code>{c}</code>", reply_markup=await get_main_kb(ADMIN_ID))
     await state.clear()
 
-# --- ADMIN: GRANT SUB (NEW) ---
 @router.callback_query(F.data == "adm_grant")
 async def adm_grant(c: CallbackQuery, state: FSMContext):
     await edit_or_answer(c, "🆔 <b>User ID:</b>")
@@ -607,7 +592,6 @@ async def grant_d_h(m: Message, state: FSMContext):
     await m.answer("✅ Подписка выдана!", reply_markup=kb_admin())
     await state.clear()
 
-# --- ADMIN: BAN/UNBAN (NEW) ---
 @router.callback_query(F.data == "adm_ban")
 async def adm_ban(c: CallbackQuery, state: FSMContext):
     await edit_or_answer(c, "🆔 <b>ID для Бана:</b>")
@@ -632,7 +616,6 @@ async def unban_h(m: Message, state: FSMContext):
     await m.answer("🟢 Разбанен.", reply_markup=kb_admin())
     await state.clear()
 
-# --- ADMIN: BROADCAST ---
 @router.callback_query(F.data == "adm_broadcast")
 async def adm_br(c: CallbackQuery, state: FSMContext):
     await edit_or_answer(c, "📢 <b>Текст рассылки:</b>\n(/cancel)")
@@ -653,16 +636,20 @@ async def adm_br_h(m: Message, state: FSMContext):
     await m.answer(f"✅ Готово: {count}")
     await state.clear()
 
-# --- AUTH ---
+# --- AUTH (MULTI-USER) ---
 @router.callback_query(F.data == "auth_menu")
 async def am(c: CallbackQuery): 
-    if c.from_user.id != ADMIN_ID: return
+    # ALLOW ALL USERS WITH SUB
+    if not await has_active_sub(c.from_user.id):
+        return await c.answer("🚫 Нужна подписка", show_alert=True)
     await edit_or_answer(c, "🔐 <b>Метод:</b>", kb_auth())
 
 @router.callback_query(F.data == "auth_qr")
 async def aq(c: CallbackQuery):
     uid = c.from_user.id
+    # Clear temp
     if uid in TEMP_CLIENTS: await TEMP_CLIENTS[uid].disconnect()
+    
     cl = TelegramClient(str(get_session_path(uid)), API_ID, API_HASH)
     TEMP_CLIENTS[uid] = cl
     try:
@@ -677,8 +664,11 @@ async def aq(c: CallbackQuery):
         me = await cl.get_me()
         await msg.delete()
         kb = await get_main_kb(uid)
-        await c.message.answer(f"✅ @{me.username or me.id}", reply_markup=kb)
-        if not WORKER_TASK or WORKER_TASK.done(): asyncio.create_task(worker_process())
+        await c.message.answer(f"✅ @{me.username or me.id}\nWorker запускается...", reply_markup=kb)
+        
+        # Start worker specifically for this user
+        start_user_worker(uid)
+        
     except Exception as e:
         logger.error(f"Auth: {e}")
         await c.message.answer("❌ Error")
@@ -722,7 +712,7 @@ async def co(m: Message, state: FSMContext):
         try: await cl.disconnect()
         except: pass
         del TEMP_CLIENTS[uid]
-        if not WORKER_TASK or WORKER_TASK.done(): asyncio.create_task(worker_process())
+        start_user_worker(uid)
     except SessionPasswordNeededError:
         await m.answer("🔒 <b>2FA Пароль:</b>")
         await state.set_state(States.PASS)
@@ -736,7 +726,7 @@ async def pa(m: Message, state: FSMContext):
         await cl.sign_in(password=m.text)
         kb = await get_main_kb(uid)
         await m.answer("✅ Вход выполнен!", reply_markup=kb)
-        if not WORKER_TASK or WORKER_TASK.done(): asyncio.create_task(worker_process())
+        start_user_worker(uid)
     except Exception as e: await m.answer(f"❌ {e}")
     finally:
         try: await cl.disconnect()
@@ -745,24 +735,41 @@ async def pa(m: Message, state: FSMContext):
         await state.clear()
 
 # =========================================================================
-# 🧠 WORKER (USERBOT)
+# 🧠 MULTI-USER WORKER MANAGEMENT
 # =========================================================================
 
-async def worker_process():
-    global WORKER_STATUS, SESSIONS_PARSED
+def start_user_worker(user_id: int):
+    """Launches or restarts a worker for a specific user"""
+    if user_id in ACTIVE_WORKERS:
+        try: ACTIVE_WORKERS[user_id].cancel()
+        except: pass
     
+    # Check if session file exists
+    if get_session_path(user_id).with_suffix(".session").exists():
+        ACTIVE_WORKERS[user_id] = asyncio.create_task(user_worker_loop(user_id))
+        logger.info(f"Started worker for {user_id}")
+
+async def scan_and_start_workers():
+    """Scans session directory and starts all valid workers"""
+    for session_file in SESSION_DIR.glob("session_*.session"):
+        try:
+            # Extract user_id from filename "session_12345.session"
+            uid = int(session_file.stem.split("_")[1])
+            start_user_worker(uid)
+        except: pass
+
+async def user_worker_loop(user_id: int):
+    """Main logic loop for a single user"""
     while True:
         client = None
         try:
-            sess_path_base = get_session_path(ADMIN_ID)
-            if not sess_path_base.with_suffix(".session").exists():
-                WORKER_STATUS = "🔴 Нет сессии"
-                await asyncio.sleep(10)
-                continue
+            sess_path = get_session_path(user_id)
+            if not sess_path.with_suffix(".session").exists():
+                break # Exit loop if session deleted
 
-            WORKER_STATUS = "🟡 Подключение..."
-            client = TelegramClient(str(sess_path_base), API_ID, API_HASH, connection_retries=None)
-
+            client = TelegramClient(str(sess_path), API_ID, API_HASH, connection_retries=None)
+            
+            # --- Stealth & Helper ---
             async def stealth_delete(event):
                 try: await event.delete()
                 except: pass
@@ -774,7 +781,77 @@ async def worker_process():
                     await msg.delete()
                 except: pass
 
-            # --- UTILS ---
+            # --- COMMANDS ---
+            
+            @client.on(events.NewMessage(pattern=r'^\.status$'))
+            async def status_cmd(ev):
+                await stealth_delete(ev)
+                uptime = int(time.time() - START_TIME)
+                current_task = TASK_STATUSES.get(user_id, "Idle")
+                txt = f"🟢 <b>Worker Online</b>\n⏱ Uptime: {uptime}s\n📡 Activity: {current_task}"
+                await temp_msg(ev, txt, 5)
+
+            @client.on(events.NewMessage(pattern=r'^\.чекстоп$'))
+            async def stop_cmd(ev):
+                await stealth_delete(ev)
+                STOP_SIGNALS[user_id] = True # Set stop flag
+                TASK_STATUSES[user_id] = "Stopping..."
+                await temp_msg(ev, "🛑 <b>Остановка парсинга...</b>", 3)
+
+            # --- SMART HISTORY SCRAPER ---
+            @client.on(events.NewMessage(pattern=r'^\.(scan|чекгруппу)$'))
+            async def smart_parse(ev):
+                await stealth_delete(ev)
+                
+                # Reset Flags
+                STOP_SIGNALS[user_id] = False
+                TASK_STATUSES[user_id] = "Scanning..."
+                
+                lim = await get_user_limit(user_id)
+                scan_limit = 50000 
+                
+                msg = await ev.respond(f"👻 <b>Scanning...</b> ({lim})")
+                unique_users: Dict[int, str] = {}
+                scanned_msgs = 0
+                
+                try:
+                    async with asyncio.timeout(900): # 15 min timeout
+                        async for message in client.iter_messages(ev.chat_id, limit=scan_limit):
+                            # STOP CHECK
+                            if STOP_SIGNALS.get(user_id):
+                                await msg.edit("🛑 <b>Парсинг остановлен пользователем.</b>")
+                                break
+                                
+                            scanned_msgs += 1
+                            if message.sender and isinstance(message.sender, User) and not message.sender.bot:
+                                if message.sender_id not in unique_users:
+                                    u = message.sender
+                                    unique_users[u.id] = f"@{u.username or 'None'} | {u.first_name} | {u.id}"
+                            
+                            if scanned_msgs % 200 == 0:
+                                status_text = f"👻 Scan: {scanned_msgs} | Found: {len(unique_users)}/{lim}"
+                                TASK_STATUSES[user_id] = status_text # Update global status
+                                await msg.edit(status_text)
+                            
+                            if len(unique_users) >= lim: break
+                    
+                    # Result handling
+                    if not STOP_SIGNALS.get(user_id):
+                        TEMP_PARSE_DATA[user_id] = {'lines': list(unique_users.values()), 'title': str(ev.chat_id)}
+                        await msg.edit("✅ Done.")
+                        await asyncio.sleep(1)
+                        await msg.delete()
+                        try:
+                            await bot.send_message(user_id, f"📁 <b>Scan Complete!</b>\nMsgs: {scanned_msgs}\nUsers: {len(unique_users)}", reply_markup=kb_parse_choice())
+                        except: pass
+                
+                except Exception as e: 
+                    await msg.delete()
+                finally:
+                    TASK_STATUSES[user_id] = "Idle"
+                    STOP_SIGNALS[user_id] = False
+
+            # --- BASIC FEATURES ---
             @client.on(events.NewMessage(pattern=r'^\.id$'))
             async def id_cmd(ev):
                 await stealth_delete(ev)
@@ -806,9 +883,7 @@ async def worker_process():
             @client.on(events.NewMessage(pattern=r'^\.join (.*)'))
             async def join_cmd(ev):
                 await stealth_delete(ev)
-                try:
-                    await client(JoinChannelRequest(ev.pattern_match.group(1)))
-                    await temp_msg(ev, "✅ Joined", 2)
+                try: await client(JoinChannelRequest(ev.pattern_match.group(1))); await temp_msg(ev, "✅ Joined", 2)
                 except: pass
             
             @client.on(events.NewMessage(pattern=r'^\.kickme$'))
@@ -831,58 +906,6 @@ async def worker_process():
                     r = await ev.get_reply_message()
                     await client.unpin_message(ev.chat_id, r)
 
-            @client.on(events.NewMessage(pattern=r'^\.save$'))
-            async def save_cmd(ev):
-                await stealth_delete(ev)
-                if ev.is_reply:
-                    r = await ev.get_reply_message()
-                    await client.forward_messages('me', r)
-                    await temp_msg(ev, "💾 Saved", 1)
-
-            @client.on(events.NewMessage(pattern=r'^\.del$'))
-            async def del_cmd(ev):
-                await stealth_delete(ev)
-                if ev.is_reply:
-                    r = await ev.get_reply_message()
-                    await r.delete()
-
-            # --- PARSING (PHANTOM) ---
-            @client.on(events.NewMessage(pattern=r'^\.(scan|чекгруппу)$'))
-            async def smart_parse(ev):
-                await stealth_delete(ev)
-                global SESSIONS_PARSED
-                lim = await get_user_limit(ADMIN_ID)
-                scan_limit = 50000 
-                
-                msg = await ev.respond(f"👻 <b>Scanning...</b> ({lim})")
-                unique_users: Dict[int, str] = {}
-                scanned_msgs = 0
-                
-                try:
-                    async with asyncio.timeout(600):
-                        async for message in client.iter_messages(ev.chat_id, limit=scan_limit):
-                            scanned_msgs += 1
-                            if message.sender and isinstance(message.sender, User) and not message.sender.bot:
-                                if message.sender_id not in unique_users:
-                                    u = message.sender
-                                    unique_users[u.id] = f"@{u.username or 'None'} | {u.first_name} | {u.id}"
-                            if scanned_msgs % 200 == 0:
-                                await msg.edit(f"👻 Scan: {scanned_msgs} | Found: {len(unique_users)}/{lim}")
-                            if len(unique_users) >= lim: break
-                    
-                    SESSIONS_PARSED += 1
-                    TEMP_PARSE_DATA[ADMIN_ID] = {'lines': list(unique_users.values()), 'title': str(ev.chat_id)}
-                    await msg.edit("✅ Done.")
-                    await asyncio.sleep(1)
-                    await msg.delete()
-                    
-                    try:
-                        await bot.send_message(ADMIN_ID, f"📁 <b>Scan Complete!</b>\nMsgs: {scanned_msgs}\nUsers: {len(unique_users)}\n\nFormat:", reply_markup=kb_parse_choice())
-                    except: pass
-                except Exception as e: 
-                    await msg.delete()
-
-            # --- RAID ---
             @client.on(events.NewMessage(pattern=r'^\.spam (\d+) (.*)'))
             async def spam_cmd(ev):
                 await stealth_delete(ev)
@@ -892,64 +915,12 @@ async def worker_process():
                     await client.send_message(ev.chat_id, t)
                     await asyncio.sleep(0.5)
 
-            @client.on(events.NewMessage(pattern=r'^\.clown$'))
-            async def clown_cmd(ev):
-                await stealth_delete(ev)
-                if ev.is_reply:
-                     r = await ev.get_reply_message()
-                     try: await client(SendReactionRequest(ev.chat_id, r.id, reaction=[types.ReactionEmoji(emoticon='🤡')]))
-                     except: pass
-
-            @client.on(events.NewMessage(pattern=r'^\.tagall$'))
-            async def tagall_cmd(ev):
-                await stealth_delete(ev)
-                parts = await client.get_participants(ev.chat_id)
-                mentions = [f"<a href='tg://user?id={u.id}'>\u200b</a>" for u in parts if not u.deleted]
-                for i in range(0, len(mentions), 5):
-                    await client.send_message(ev.chat_id, "👋 " + "".join(mentions[i:i+5]), parse_mode='html')
-                    await asyncio.sleep(1)
-
             @client.on(events.NewMessage(pattern=r'^\.purge (\d+)'))
             async def purge_cmd(ev):
                 c = int(ev.pattern_match.group(1))
                 msgs = [ev.id]
                 async for m in client.iter_messages(ev.chat_id, limit=c): msgs.append(m.id)
                 await client.delete_messages(ev.chat_id, msgs)
-
-            # --- ADMIN ---
-            @client.on(events.NewMessage(pattern=r'^\.promote'))
-            async def promote_cmd(ev):
-                await stealth_delete(ev)
-                if not ev.is_reply: return
-                r = await ev.get_reply_message()
-                try:
-                    await client(EditAdminRequest(ev.chat_id, r.sender_id, admin_rights=ChannelParticipantsAdmins(change_info=True, post_messages=True, edit_messages=True, delete_messages=True, ban_users=True, invite_users=True, pin_messages=True, add_admins=False, manage_call=True), rank="Admin"))
-                    await temp_msg(ev, "👮 Promoted", 3)
-                except: pass
-
-            @client.on(events.NewMessage(pattern=r'^\.demote'))
-            async def demote_cmd(ev):
-                await stealth_delete(ev)
-                if not ev.is_reply: return
-                r = await ev.get_reply_message()
-                try:
-                    await client(EditAdminRequest(ev.chat_id, r.sender_id, admin_rights=ChannelParticipantsAdmins(change_info=False, post_messages=False, edit_messages=False, delete_messages=False, ban_users=False, invite_users=False, pin_messages=False, add_admins=False, manage_call=False), rank=""))
-                    await temp_msg(ev, "👮 Demoted", 3)
-                except: pass
-
-            @client.on(events.NewMessage(pattern=r'^\.zombies'))
-            async def zombies_cmd(ev):
-                await stealth_delete(ev)
-                msg = await ev.respond("🧟 Scanning...")
-                cnt = 0
-                try:
-                    participants = await client.get_participants(ev.chat_id)
-                    for user in participants:
-                        if user.deleted:
-                            try: await client(functions.channels.EditBannedRequest(ev.chat_id, user, ChatBannedRights(until_date=None, view_messages=True))); cnt += 1
-                            except: pass
-                    await temp_msg(msg, f"🧟 Kicked {cnt}", 5)
-                except: await msg.delete()
 
             @client.on(events.NewMessage(pattern=r'^\.invite'))
             async def invite_cmd(ev):
@@ -980,13 +951,13 @@ async def worker_process():
             @client.on(events.NewMessage(pattern=r'^\.csv$'))
             async def csv_parse(ev):
                 await stealth_delete(ev)
-                lim = await get_user_limit(ADMIN_ID)
+                lim = await get_user_limit(user_id)
                 msg = await ev.respond(f"📊 CSV ({lim})...")
                 rows = []
                 try:
                     async for u in client.iter_participants(ev.chat_id, limit=lim, aggressive=True):
                         rows.append([u.id, u.username or "", u.first_name or "", u.phone or ""])
-                        if len(rows) % 50 == 0: await msg.edit(f"📊 {progress_bar(len(rows), lim)}")
+                        if len(rows) % 50 == 0: await msg.edit(f"📊 {len(rows)}/{lim}")
                     fn = f"export_{ev.chat_id}.csv"
                     with open(fn, "w", newline="", encoding="utf-8") as f:
                         writer = csv.writer(f)
@@ -997,39 +968,43 @@ async def worker_process():
                     os.remove(fn)
                     await temp_msg(msg, "Uploaded", 0.5)
                 except Exception as e: await msg.delete()
-
+            
+            # --- STARTUP ---
+            try:
+                if client.is_connected(): await client.disconnect() 
+            except: pass
+            
             await client.start()
-            WORKER_STATUS = "🟢 Активен (v21)"
-            logger.info("Worker Started")
+            logger.info(f"Worker started for {user_id}")
             await client.run_until_disconnected()
 
         except (EOFError, ConnectionError):
-            WORKER_STATUS = "⚠️ Сбой сети..."
-            if client: await client.disconnect()
-            await asyncio.sleep(5)
-        except sqlite3.OperationalError:
-            WORKER_STATUS = "⏳ БД занята..."
+            logger.warning(f"Network error for {user_id}")
             if client: await client.disconnect()
             await asyncio.sleep(5)
         except Exception as e:
-            WORKER_STATUS = f"🔴 {e}"
+            logger.error(f"Worker crashed for {user_id}: {e}")
             if client: await client.disconnect()
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
+
+# =========================================================================
+# 🚀 ЗАПУСК
+# =========================================================================
 
 async def main():
-    global WORKER_TASK
     await init_db()
     await cleanup_files()
     
     dp.message.middleware(SecurityMiddleware())
     dp.callback_query.middleware(SecurityMiddleware())
     
-    WORKER_TASK = asyncio.create_task(worker_process())
+    # Start all existing sessions
+    await scan_and_start_workers()
     
     try:
         await dp.start_polling(bot, skip_updates=True)
     finally:
-        if WORKER_TASK: WORKER_TASK.cancel()
+        for task in ACTIVE_WORKERS.values(): task.cancel()
         await bot.session.close()
 
 if __name__ == "__main__":
