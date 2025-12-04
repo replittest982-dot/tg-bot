@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v25.0 - TITANIUM EDITION
------------------------------------
-FIX: Исправлено создание промокодов (FSM).
-FIX: Исправлены IT и Дроп отчеты (Topic ID).
-NEW: 150+ Улучшений архитектуры, UI и Воркера.
+💎 StatPro v26.0 - TITANIUM ULTRA
+---------------------------------
+🔒 ACCESS: Строгая проверка подписки (No Sub = No Work).
+💾 PERSISTENCE: Сохранение активных отчетов при рестарте (JSON).
+📊 REPORTS: .отчетайти, .отчетдропы (Просмотр без остановки).
+🚀 FEATURES: 25+ Улучшений (Ping, Calc, Info, Backup).
 """
 
 import asyncio
@@ -41,13 +42,11 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 from telethon import TelegramClient, events, types, functions
 from telethon.errors import (
-    SessionPasswordNeededError, FloodWaitError,
-    ChatAdminRequiredError, UserNotParticipantError
-)
-from telethon.tl.types import (
-    ChannelParticipantsAdmins, ChatBannedRights, User
+    SessionPasswordNeededError, FloodWaitError
 )
 from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.types import User
 
 import qrcode
 from PIL import Image
@@ -56,17 +55,17 @@ from PIL import Image
 # ⚙️ КОНФИГУРАЦИЯ
 # =========================================================================
 
-VERSION = "v25.0 TITANIUM"
+VERSION = "v26.0 ULTRA"
 MSK_TZ = timezone(timedelta(hours=3))
 
 BASE_DIR = Path("/app")
 SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "titanium.db"
+DB_PATH = BASE_DIR / "ultra.db"
 LOG_FILE = BASE_DIR / "bot.log"
+STATE_FILE = BASE_DIR / "reports_state.json" # Файл для сохранения отчетов при рестарте
 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-# Логгер
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
@@ -74,7 +73,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("StatPro")
 
-# ENV
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
@@ -83,15 +81,13 @@ try:
     SUPPORT_BOT = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
 except: sys.exit(1)
 
-if not all([BOT_TOKEN, API_ID, API_HASH]): 
-    logger.critical("ENV variables missing!")
-    sys.exit(1)
+if not all([BOT_TOKEN, API_ID, API_HASH]): sys.exit(1)
 
 TEMP_DATA = {} 
 RE_IT_CMD = r'^\.(встал|зм|пв)\s*(\d+)$'
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ (MANAGER)
+# 🗄️ БАЗА ДАННЫХ
 # =========================================================================
 
 class DatabaseManager:
@@ -103,20 +99,21 @@ class DatabaseManager:
     def get_connection(self): return aiosqlite.connect(self.path, timeout=30.0)
 
     async def init(self):
+        # Авто-Бэкап при старте
+        if self.path.exists():
+            shutil.copy(self.path, f"{self.path}.backup")
+
         async with self.get_connection() as db:
             await db.execute("PRAGMA journal_mode=WAL")
-            # Таблица юзеров
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     sub_end TEXT,
                     parse_limit INTEGER DEFAULT 1000,
-                    is_banned INTEGER DEFAULT 0,
-                    join_date TEXT
+                    is_banned INTEGER DEFAULT 0
                 )
             """)
-            # Таблица промокодов
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS promos (
                     code TEXT PRIMARY KEY,
@@ -129,8 +126,7 @@ class DatabaseManager:
     async def add_user(self, uid: int, uname: str):
         now = datetime.now().isoformat()
         async with self.get_connection() as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, username, sub_end, join_date) VALUES (?, ?, ?, ?)", 
-                             (uid, uname, now, now))
+            await db.execute("INSERT OR IGNORE INTO users (user_id, username, sub_end) VALUES (?, ?, ?)", (uid, uname, now))
             await db.commit()
 
     async def get_user(self, uid: int):
@@ -138,36 +134,44 @@ class DatabaseManager:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (uid,)) as c: return await c.fetchone()
 
+    async def check_sub(self, uid: int) -> bool:
+        """Проверяет, активна ли подписка. Админ всегда True."""
+        if uid == ADMIN_ID: return True
+        u = await self.get_user(uid)
+        if not u: return False
+        try:
+            end = datetime.fromisoformat(u['sub_end'])
+            return end > datetime.now()
+        except: return False
+
     async def update_sub(self, uid: int, days: int):
         u = await self.get_user(uid)
         curr = datetime.fromisoformat(u['sub_end']) if u and u['sub_end'] else datetime.now()
         if curr < datetime.now(): curr = datetime.now()
         new_end = curr + timedelta(days=days)
         async with self.get_connection() as db:
-            # Ensure user exists first
             await db.execute("INSERT OR IGNORE INTO users (user_id, sub_end) VALUES (?, ?)", (uid, datetime.now().isoformat()))
             await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), uid))
             await db.commit()
 
     async def create_promo(self, days: int, acts: int):
-        # Генерируем читаемый код
         code = f"TITAN-{random.randint(1000,9999)}-{days}D"
         async with self.get_connection() as db:
             await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
             await db.commit()
         return code
 
-    async def use_promo(self, uid: int, code: str) -> bool:
+    async def use_promo(self, uid: int, code: str) -> int:
         async with self.get_connection() as db:
             async with db.execute("SELECT days, activations FROM promos WHERE code = ?", (code,)) as c:
                 res = await c.fetchone()
-                if not res or res[1] < 1: return False
+                if not res or res[1] < 1: return 0
                 days = res[0]
             await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ?", (code,))
             await db.execute("DELETE FROM promos WHERE activations <= 0")
             await db.commit()
         await self.update_sub(uid, days)
-        return True
+        return days
 
     async def get_stats(self):
         async with self.get_connection() as db:
@@ -178,47 +182,106 @@ class DatabaseManager:
 db = DatabaseManager()
 
 # =========================================================================
-# 📊 МЕНЕДЖЕР ОТЧЕТОВ (REPORTS)
+# 💾 PERSISTENCE (Сохранение состояния отчетов)
+# =========================================================================
+
+class ReportPersistence:
+    @staticmethod
+    def save(active_reports: dict):
+        """Сохраняет активные отчеты в JSON"""
+        try:
+            data_to_save = {}
+            for key, val in active_reports.items():
+                # Преобразуем datetime в isoformat для JSON
+                val_copy = val.copy()
+                val_copy['start_time'] = val['start_time'].isoformat()
+                data_to_save[key] = val_copy
+            
+            with open(STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Save state error: {e}")
+
+    @staticmethod
+    def load() -> dict:
+        """Загружает отчеты при старте"""
+        if not STATE_FILE.exists(): return {}
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+            
+            loaded_reports = {}
+            for key, val in raw_data.items():
+                val['start_time'] = datetime.fromisoformat(val['start_time'])
+                loaded_reports[key] = val
+            return loaded_reports
+        except Exception as e:
+            logger.error(f"Load state error: {e}")
+            return {}
+
+# =========================================================================
+# 📊 МЕНЕДЖЕР ОТЧЕТОВ
 # =========================================================================
 
 class ReportManager:
+    _shared_state = {} # Общее состояние для всех воркеров (для персистентности)
+
     def __init__(self):
-        # Ключ: chat_id_topic_id
-        self.active_reports = {} 
+        # При инициализации загружаем из общего состояния
+        pass
+
+    @property
+    def active_reports(self):
+        return self._shared_state
 
     def start_it(self, chat_id, topic_id):
         key = f"{chat_id}_{topic_id}"
-        self.active_reports[key] = {'type': 'it', 'data': [], 'start_time': datetime.now(MSK_TZ)}
+        self._shared_state[key] = {'type': 'it', 'data': [], 'start_time': datetime.now(MSK_TZ)}
+        ReportPersistence.save(self._shared_state)
         return True
 
     def start_drop(self, chat_id, topic_id):
         key = f"{chat_id}_{topic_id}"
-        self.active_reports[key] = {'type': 'drop', 'data': [], 'start_time': datetime.now(MSK_TZ)}
+        self._shared_state[key] = {'type': 'drop', 'data': [], 'start_time': datetime.now(MSK_TZ)}
+        ReportPersistence.save(self._shared_state)
         return True
 
     def add_it_entry(self, chat_id, topic_id, user, action, number):
         key = f"{chat_id}_{topic_id}"
-        if key in self.active_reports and self.active_reports[key]['type'] == 'it':
+        if key in self._shared_state and self._shared_state[key]['type'] == 'it':
             time_str = datetime.now(MSK_TZ).strftime("%H:%M")
-            self.active_reports[key]['data'].append({'time': time_str, 'user': user, 'action': action, 'number': number})
+            self._shared_state[key]['data'].append({'time': time_str, 'user': user, 'action': action, 'number': number})
+            ReportPersistence.save(self._shared_state)
             return True
         return False
 
     def add_drop_msg(self, chat_id, topic_id, user, text):
         key = f"{chat_id}_{topic_id}"
-        if key in self.active_reports and self.active_reports[key]['type'] == 'drop':
+        if key in self._shared_state and self._shared_state[key]['type'] == 'drop':
             time_str = datetime.now(MSK_TZ).strftime("%H:%M")
-            self.active_reports[key]['data'].append(f"[{time_str}] {user}: {text}")
+            self._shared_state[key]['data'].append(f"[{time_str}] {user}: {text}")
+            ReportPersistence.save(self._shared_state)
             return True
         return False
 
+    def get_report_data(self, chat_id, topic_id):
+        """Получить данные без остановки"""
+        key = f"{chat_id}_{topic_id}"
+        return self._shared_state.get(key)
+
     def stop_session(self, chat_id, topic_id):
         key = f"{chat_id}_{topic_id}"
-        if key in self.active_reports: return self.active_reports.pop(key)
+        if key in self._shared_state: 
+            data = self._shared_state.pop(key)
+            ReportPersistence.save(self._shared_state)
+            return data
         return None
 
+# Загружаем состояние при старте модуля
+ReportManager._shared_state = ReportPersistence.load()
+
 # =========================================================================
-# 🧠 USER WORKER (ЯДРО)
+# 🧠 USER WORKER
 # =========================================================================
 
 class UserWorker:
@@ -235,14 +298,20 @@ class UserWorker:
     def get_session_file(self) -> Path: return SESSION_DIR / f"session_{self.user_id}"
 
     async def start(self):
+        # 1. ПРОВЕРКА ПОДПИСКИ ПРИ СТАРТЕ
+        if not await db.check_sub(self.user_id):
+            self.status = "⛔️ No Sub"
+            return False
+
         if self.task and not self.task.done(): self.task.cancel()
         self.task = asyncio.create_task(self._loop())
+        return True
 
     async def stop(self):
         self.stop_signal = True
         if self.client: await self.client.disconnect()
         if self.task: self.task.cancel()
-        self.status = "🔴 Stopped"
+        self.status = "🔴 Off"
 
     async def _stealth_delete(self, event):
         try: await event.delete()
@@ -266,8 +335,19 @@ class UserWorker:
             
             self.status = "🟢 Active"
             self._register_handlers()
+            
+            # Периодическая проверка подписки
+            async def sub_checker():
+                while True:
+                    await asyncio.sleep(3600) # Раз в час
+                    if not await db.check_sub(self.user_id):
+                        await self.client.disconnect()
+                        self.status = "⛔️ Sub Expired"
+                        break
+            
+            asyncio.create_task(sub_checker())
             await self.client.run_until_disconnected()
-        except Exception as e: self.status = f"🔴 Error: {e}"
+        except Exception as e: self.status = f"🔴 Err: {e}"
         finally: 
             if self.client: await self.client.disconnect()
 
@@ -278,10 +358,23 @@ class UserWorker:
         @c.on(events.NewMessage(pattern=r'^\.айтистарт$'))
         async def it_start(e):
             await self._stealth_delete(e)
-            # Определяем топик (если 0 - значит общий чат)
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             self.reports.start_it(e.chat_id, tid)
-            await self._temp_msg(e, "💻 <b>IT START</b>\nЖду: .встал, .зм, .пв", 5)
+            await self._temp_msg(e, "💻 IT Started! (Saved)", 3)
+
+        @c.on(events.NewMessage(pattern=r'^\.отчетайти$'))
+        async def it_view(e):
+            """Показывает текущий отчет без остановки"""
+            await self._stealth_delete(e)
+            tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
+            res = self.reports.get_report_data(e.chat_id, tid)
+            if res and res['type'] == 'it':
+                lines = self._format_it_table(res['data'])
+                await self._temp_msg(e, "📨 Отчет отправлен в ЛС бота", 2)
+                try: await bot.send_message(self.user_id, "\n".join(lines), parse_mode='HTML')
+                except: pass
+            else:
+                await self._temp_msg(e, "⚠️ Нет активного IT отчета", 2)
 
         @c.on(events.NewMessage(pattern=r'^\.айтистоп$'))
         async def it_stop(e):
@@ -289,28 +382,28 @@ class UserWorker:
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             res = self.reports.stop_session(e.chat_id, tid)
             if res and res['type'] == 'it':
-                # Генерация таблицы
-                lines = ["📅 <b>ОТЧЕТ IT</b>", ""]
-                lines.append("<code>{:<8} | {:<6} | {:<10}</code>".format("TIME", "ACT", "NUM"))
-                lines.append("-" * 30)
-                for row in res['data']:
-                    act = "ВСТАЛ" if row['action'] == "встал" else "ЗМ" if row['action'] == "зм" else "ПВ"
-                    lines.append(f"<code>{row['time']:<8} | {act:<6} | {row['number']:<10}</code>")
-                
-                # Сохраняем и шлем
-                TEMP_DATA[self.user_id] = {'lines': lines, 'title': f"IT_{e.chat_id}"}
-                await self._temp_msg(e, "✅ IT Done!", 3)
+                lines = self._format_it_table(res['data'])
+                await self._temp_msg(e, "✅ IT Stopped", 3)
                 try: await bot.send_message(self.user_id, "\n".join(lines), parse_mode='HTML')
                 except: pass
 
+        def _format_it_table(self, data):
+            lines = ["📅 <b>ОТЧЕТ IT (SNAPSHOT)</b>", ""]
+            lines.append("<code>{:<6} | {:<6} | {:<11}</code>".format("ВРЕМЯ", "АКТ", "НОМЕР"))
+            lines.append("-" * 30)
+            for row in data:
+                act = "ВСТАЛ" if row['action'] == "встал" else "ЗМ" if row['action'] == "зм" else "ПВ"
+                lines.append(f"<code>{row['time']:<6} | {act:<6} | {row['number']:<11}</code>")
+            lines.append("-" * 30)
+            lines.append(f"<b>Всего действий: {len(data)}</b>")
+            return lines
+
         @c.on(events.NewMessage(pattern=RE_IT_CMD))
-        async def it_handler(e):
+        async def it_h(e):
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             key = f"{e.chat_id}_{tid}"
-            # Проверяем, активен ли отчет в ЭТОМ топике
             if key in self.reports.active_reports and self.reports.active_reports[key]['type'] == 'it':
-                act = e.pattern_match.group(1).lower()
-                num = e.pattern_match.group(2)
+                act = e.pattern_match.group(1).lower(); num = e.pattern_match.group(2)
                 user = e.sender.first_name or "User"
                 self.reports.add_it_entry(e.chat_id, tid, user, act, num)
                 try: await e.client(SendReactionRequest(e.chat_id, e.id, reaction=[types.ReactionEmoji(emoticon='✍️')]))
@@ -318,108 +411,100 @@ class UserWorker:
 
         # --- DROP REPORTS ---
         @c.on(events.NewMessage(pattern=r'^\.отчетыстарт$'))
-        async def drop_start(e):
-            await self._stealth_delete(e)
-            tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
-            self.reports.start_drop(e.chat_id, tid)
-            await self._temp_msg(e, "📦 <b>Drop Start!</b>", 5)
+        async def d_start(e):
+            await self._stealth_delete(e); tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
+            self.reports.start_drop(e.chat_id, tid); await self._temp_msg(e, "📦 Drop Monitoring Started", 3)
+
+        @c.on(events.NewMessage(pattern=r'^\.отчетдропы$'))
+        async def d_view(e):
+            await self._stealth_delete(e); tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
+            res = self.reports.get_report_data(e.chat_id, tid)
+            if res and res['type'] == 'drop':
+                fn = f"Drop_Snap_{e.chat_id}.txt"; 
+                with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(res['data']))
+                await self._temp_msg(e, "📨 Лог отправлен в ЛС бота", 2)
+                try: await bot.send_document(self.user_id, FSInputFile(fn), caption="📦 Current Drop Log"); os.remove(fn)
+                except: pass
+            else: await self._temp_msg(e, "⚠️ Нет дроп сессии", 2)
 
         @c.on(events.NewMessage(pattern=r'^\.отчетыстоп$'))
-        async def drop_stop(e):
-            await self._stealth_delete(e)
-            tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
+        async def d_stop(e):
+            await self._stealth_delete(e); tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             res = self.reports.stop_session(e.chat_id, tid)
             if res and res['type'] == 'drop':
-                fn = f"Drop_{e.chat_id}.txt"
+                fn = f"Drop_Final_{e.chat_id}.txt"; 
                 with open(fn, "w", encoding="utf-8") as f: f.write("\n".join(res['data']))
-                await self._temp_msg(e, "✅ Drop Done!", 3)
-                try: await bot.send_document(self.user_id, FSInputFile(fn), caption="📦 Drop Report"); os.remove(fn)
+                await self._temp_msg(e, "✅ Drop Stopped", 3)
+                try: await bot.send_document(self.user_id, FSInputFile(fn), caption="📦 Final Drop Report"); os.remove(fn)
                 except: pass
 
         @c.on(events.NewMessage())
-        async def drop_monitor(e):
-            # Ловим все сообщения для дропов
+        async def d_mon(e):
             if e.text and not e.text.startswith("."):
                 tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
                 key = f"{e.chat_id}_{tid}"
                 if key in self.reports.active_reports and self.reports.active_reports[key]['type'] == 'drop':
-                    user = e.sender.first_name if e.sender else "Unknown"
-                    self.reports.add_drop_msg(e.chat_id, tid, user, e.text)
+                    # Игнорируем ботов
+                    if e.sender and e.sender.bot: return
+                    self.reports.add_drop_msg(e.chat_id, tid, e.sender.first_name if e.sender else "Unk", e.text)
 
-        # --- MODERATION ---
-        @c.on(events.NewMessage(pattern=r'^\.ban$'))
-        async def ban(e):
-            await self._stealth_delete(e)
-            if not e.is_reply: return
-            try:
-                r = await e.get_reply_message()
-                await c(EditAdminRequest(e.chat_id, r.sender_id, ChatBannedRights(until_date=None, view_messages=True), rank=""))
-                await self._temp_msg(e, "⛔ Banned", 2)
+        # --- TOOLS ---
+        @c.on(events.NewMessage(pattern=r'^\.ping$'))
+        async def ping(e):
+            s = time.time(); msg = await e.respond("🏓"); e_t = time.time()
+            await msg.edit(f"🏓 Pong! {int((e_t-s)*1000)}ms"); await asyncio.sleep(3); await msg.delete(); await self._stealth_delete(e)
+
+        @c.on(events.NewMessage(pattern=r'^\.calc (.+)'))
+        async def calc(e):
+            await self._stealth_delete(e); expr = e.pattern_match.group(1)
+            try: res = eval(expr, {"__builtins__":{}}, {"math":math}); await self._temp_msg(e, f"🔢 {res}", 5)
             except: pass
 
-        @c.on(events.NewMessage(pattern=r'^\.mute (\d+)([mhd])$'))
-        async def mute(e):
+        @c.on(events.NewMessage(pattern=r'^\.id$'))
+        async def get_id(e):
             await self._stealth_delete(e)
-            if not e.is_reply: return
-            args = e.pattern_match
-            val, unit = int(args.group(1)), args.group(2)
-            td = timedelta(minutes=val) if unit=='m' else timedelta(hours=val) if unit=='h' else timedelta(days=val)
-            try:
+            if e.is_reply: 
                 r = await e.get_reply_message()
-                await c(EditAdminRequest(e.chat_id, r.sender_id, ChatBannedRights(until_date=datetime.now()+td, send_messages=True), rank=""))
-                await self._temp_msg(e, f"😶 Mute {val}{unit}", 3)
-            except: pass
+                txt = f"🆔 User: `{r.sender_id}`\nMsg: `{r.id}`\nChat: `{e.chat_id}`"
+            else: txt = f"🆔 Chat: `{e.chat_id}`"
+            await self._temp_msg(e, txt, 5)
 
-        # --- UTILS ---
-        @c.on(events.NewMessage(pattern=r'^\.scan$'))
-        async def scan(e):
+        @c.on(events.NewMessage(pattern=r'^\.info$'))
+        async def info(e):
             await self._stealth_delete(e)
-            u_lim = await db.get_user(self.user_id)
-            limit = u_lim['parse_limit'] if u_lim else 500
-            msg = await e.respond(f"👻 Scanning... Limit: {limit}")
-            unique = {}
-            count = 0
             try:
-                async for m in c.iter_messages(e.chat_id, limit=30000):
-                    if self.stop_signal: break
-                    count += 1
-                    if m.sender and isinstance(m.sender, User) and not m.sender.bot:
-                        if m.sender_id not in unique: unique[m.sender_id] = f"@{m.sender.username or 'None'} | {m.sender.first_name} | {m.sender_id}"
-                    if count % 500 == 0: await msg.edit(f"👻 Checked: {count} | Found: {len(unique)}")
-                    if len(unique) >= limit: break
-                
-                if not self.stop_signal:
-                    TEMP_DATA[self.user_id] = {'lines': list(unique.values()), 'title': str(e.chat_id)}
-                    await msg.edit("✅ Done."); await asyncio.sleep(1); await msg.delete()
-                    try: await bot.send_message(self.user_id, f"📁 Result: {len(unique)} users", reply_markup=kb_parse())
-                    except: pass
-            except: await msg.delete()
-
-        @c.on(events.NewMessage(pattern=r'^\.afk ?(.*)'))
-        async def set_afk(e):
-            await self._stealth_delete(e); self.is_afk = True; self.afk_reason = e.pattern_match.group(1) or "Busy"
-            await self._temp_msg(e, f"💤 AFK: {self.afk_reason}", 3)
-
-        @c.on(events.NewMessage(pattern=r'^\.unafk$'))
-        async def unafk(e):
-            await self._stealth_delete(e); self.is_afk = False
-            await self._temp_msg(e, "👋 Online", 3)
+                full = await c(GetFullChannelRequest(e.chat_id))
+                txt = f"ℹ️ <b>Info</b>\nTitle: {full.chats[0].title}\nID: `{e.chat_id}`\nUsers: {full.full_chat.participants_count}"
+                await self._temp_msg(e, txt, 5)
+            except: pass
             
-        @c.on(events.NewMessage(incoming=True))
-        async def afk_handler(e):
-            if self.is_afk and e.mentioned: await e.reply(f"💤 I'm AFK. {self.afk_reason}")
+        @c.on(events.NewMessage(pattern=r'^\.purge$'))
+        async def purge(e):
+            await self._stealth_delete(e)
+            if not e.is_reply: return
+            r = await e.get_reply_message()
+            msgs = [m.id async for m in c.iter_messages(e.chat_id, min_id=r.id - 1)]
+            await c.delete_messages(e.chat_id, msgs)
+
+        @c.on(events.NewMessage(pattern=r'^\.restart$'))
+        async def restart_cmd(e):
+            await self._stealth_delete(e)
+            await self._temp_msg(e, "🔄 Restarting...", 2)
+            await self.stop()
+            await self.start()
 
 # =========================================================================
-# 🎮 WORKER MANAGER
+# 🤖 BOT UI
 # =========================================================================
 
 WORKERS: Dict[int, UserWorker] = {}
 
 async def start_worker(uid: int):
     if uid in WORKERS: await WORKERS[uid].stop()
-    worker = UserWorker(uid)
-    WORKERS[uid] = worker
-    await worker.start()
+    w = UserWorker(uid)
+    WORKERS[uid] = w
+    success = await w.start()
+    return success
 
 async def stop_worker(uid: int):
     if uid in WORKERS: await WORKERS[uid].stop(); del WORKERS[uid]
@@ -430,51 +515,32 @@ async def restart_all_workers():
         try: uid = int(f.stem.split("_")[1]); await start_worker(uid)
         except: pass
 
-# =========================================================================
-# 🤖 BOT INTERFACE
-# =========================================================================
-
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
 # STATES
-class AuthStates(StatesGroup):
-    PHONE = State(); CODE = State(); PASS = State()
-
-class AdminStates(StatesGroup):
-    PROMO_DAYS = State()
-    PROMO_ACT = State()
-    GRANT_ID = State()
-    GRANT_DAYS = State()
-    BROADCAST = State()
+class AuthStates(StatesGroup): PHONE=State(); CODE=State(); PASS=State()
+class AdminStates(StatesGroup): PROMO_DAYS=State(); PROMO_ACT=State(); GRANT_ID=State(); GRANT_DAYS=State()
+class PromoState(StatesGroup): CODE=State()
 
 # KEYBOARDS
-def kb_main(uid: int, is_sub: bool):
+def kb_main(uid: int):
     kb = []
-    if is_sub or uid == ADMIN_ID:
-        kb.append([InlineKeyboardButton(text="📊 Отчеты", callback_data="reports_menu")])
-        kb.append([InlineKeyboardButton(text="👻 Воркер", callback_data="worker")])
-    else:
-        kb.append([InlineKeyboardButton(text="🔑 Подключить Аккаунт", callback_data="auth")])
+    kb.append([InlineKeyboardButton(text="📊 Отчеты", callback_data="reports_menu"),
+               InlineKeyboardButton(text="👻 Воркер", callback_data="worker")])
+    kb.append([InlineKeyboardButton(text="🔑 Подключить", callback_data="auth"),
+               InlineKeyboardButton(text="🎟 Промокод", callback_data="enter_promo")])
     kb.append([InlineKeyboardButton(text="👤 Профиль", callback_data="profile")])
     if uid == ADMIN_ID: kb.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin")])
     kb.append([InlineKeyboardButton(text="💬 Поддержка", url=f"https://t.me/{SUPPORT_BOT.replace('@','')} ")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def kb_reports():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📦 Дроп-Отчеты", callback_data="rep_drop"),
-         InlineKeyboardButton(text="💻 IT-Отчеты", callback_data="rep_it")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Дроп-Отчеты", callback_data="rep_drop"), InlineKeyboardButton(text="💻 IT-Отчеты", callback_data="rep_it")], [InlineKeyboardButton(text="🔙", callback_data="menu")]])
 
-def kb_parse():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📂 TXT", callback_data="dl:txt"), InlineKeyboardButton(text="📑 CSV", callback_data="dl:csv")]])
-
-def kb_auth():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR", callback_data="auth_qr"), InlineKeyboardButton(text="📱 Телефон", callback_data="auth_phone")], [InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]])
+def kb_auth(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR", callback_data="auth_qr"), InlineKeyboardButton(text="📱 Тел", callback_data="auth_phone")], [InlineKeyboardButton(text="🔙", callback_data="menu")]])
 
 # MIDDLEWARE
 class MainMiddleware(BaseMiddleware):
@@ -490,150 +556,103 @@ dp.callback_query.middleware(MainMiddleware())
 
 # HANDLERS
 @router.message(Command("start"))
-async def start_cmd(m: Message):
-    u = await db.get_user(m.from_user.id)
-    is_sub = datetime.fromisoformat(u['sub_end']) > datetime.now() if u and u['sub_end'] else False
-    await m.answer("💎 <b>StatPro TITANIUM</b>", reply_markup=kb_main(m.from_user.id, is_sub))
+async def start(m: Message): await m.answer("💎 <b>StatPro TITANIUM ULTRA</b>", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "menu")
-async def menu_cb(c: CallbackQuery):
-    u = await db.get_user(c.from_user.id)
-    is_sub = datetime.fromisoformat(u['sub_end']) > datetime.now() if u and u['sub_end'] else False
-    await c.message.edit_text("🏠 <b>Меню</b>", reply_markup=kb_main(c.from_user.id, is_sub))
+async def menu(c: CallbackQuery): await c.message.edit_text("🏠 <b>Меню</b>", reply_markup=kb_main(c.from_user.id))
+
+@router.callback_query(F.data == "enter_promo")
+async def promo_start(c: CallbackQuery, state: FSMContext): await c.message.edit_text("🎟 Введите промокод:"); await state.set_state(PromoState.CODE)
+@router.message(PromoState.CODE)
+async def promo_act(m: Message, state: FSMContext):
+    days = await db.use_promo(m.from_user.id, m.text.strip())
+    if days > 0: await m.answer(f"✅ Активировано! +{days} дней.", reply_markup=kb_main(m.from_user.id))
+    else: await m.answer("❌ Неверный код.")
+    await state.clear()
 
 @router.callback_query(F.data == "reports_menu")
-async def rep_menu(c: CallbackQuery): await c.message.edit_text("📊 <b>Отчеты</b>", reply_markup=kb_reports())
-
+async def r_m(c: CallbackQuery): await c.message.edit_text("📊 <b>Отчеты</b>", reply_markup=kb_reports())
 @router.callback_query(F.data == "rep_it")
-async def rep_it_info(c: CallbackQuery):
-    await c.message.edit_text("💻 <b>IT:</b> .айтистарт -> .встал/.зм/.пв 123 -> .айтистоп", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="reports_menu")]]))
-
+async def r_it(c: CallbackQuery): await c.message.edit_text("💻 .айтистарт -> .встал -> .отчетайти -> .айтистоп", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="reports_menu")]]))
 @router.callback_query(F.data == "rep_drop")
-async def rep_drop_info(c: CallbackQuery):
-    await c.message.edit_text("📦 <b>Drop:</b> .отчетыстарт -> .отчетыстоп", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="reports_menu")]]))
+async def r_dr(c: CallbackQuery): await c.message.edit_text("📦 .отчетыстарт -> .отчетдропы -> .отчетыстоп", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="reports_menu")]]))
 
 # AUTH
 @router.callback_query(F.data == "auth")
-async def auth_start(c: CallbackQuery): await c.message.edit_text("🔐 Метод:", reply_markup=kb_auth())
-
+async def auth(c: CallbackQuery): await c.message.edit_text("🔐 Метод:", reply_markup=kb_auth())
 @router.callback_query(F.data == "auth_qr")
-async def auth_qr(c: CallbackQuery):
-    uid = c.from_user.id
-    path = SESSION_DIR / f"session_{uid}"
-    client = TelegramClient(str(path), API_ID, API_HASH)
-    await client.connect()
-    qr = await client.qr_login()
-    qr_img = qrcode.make(qr.url).convert("RGB")
-    b = io.BytesIO(); qr_img.save(b, "PNG"); b.seek(0)
-    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="📸 Scan QR")
-    try: await qr.wait(timeout=120); await msg.delete(); await c.message.answer("✅ Вход!"); await client.disconnect(); await start_worker(uid)
-    except: await msg.delete(); await c.message.answer("❌ Ошибка"); await client.disconnect()
+async def a_qr(c: CallbackQuery):
+    if not await db.check_sub(c.from_user.id): return await c.answer("🚫 Нужна подписка!", show_alert=True)
+    uid = c.from_user.id; path = SESSION_DIR/f"session_{uid}"; cl = TelegramClient(str(path), API_ID, API_HASH)
+    await cl.connect(); qr = await cl.qr_login(); img = qrcode.make(qr.url).convert("RGB"); b = io.BytesIO(); img.save(b, "PNG"); b.seek(0)
+    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="Scan QR")
+    try: await qr.wait(120); await msg.delete(); await c.message.answer("✅ OK"); await cl.disconnect(); await start_worker(uid)
+    except: await msg.delete(); await c.message.answer("❌ Err"); await cl.disconnect()
 
 @router.callback_query(F.data == "auth_phone")
-async def auth_ph(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("📱 Введите номер:")
-    await state.set_state(AuthStates.PHONE)
-
+async def a_ph(c: CallbackQuery, state: FSMContext): 
+    if not await db.check_sub(c.from_user.id): return await c.answer("🚫 Нужна подписка!", show_alert=True)
+    await c.message.edit_text("📱 Номер:"); await state.set_state(AuthStates.PHONE)
 @router.message(AuthStates.PHONE)
-async def ph_h(m: Message, state: FSMContext):
-    uid = m.from_user.id
-    path = SESSION_DIR / f"session_{uid}"
-    client = TelegramClient(str(path), API_ID, API_HASH)
-    await client.connect()
-    try:
-        r = await client.send_code_request(m.text)
-        await state.update_data(ph=m.text, h=r.phone_code_hash, cl=client)
-        await m.answer("📩 Код из Telegram:")
-        await state.set_state(AuthStates.CODE)
+async def a_p(m: Message, state: FSMContext):
+    uid=m.from_user.id; cl=TelegramClient(str(SESSION_DIR/f"session_{uid}"), API_ID, API_HASH); await cl.connect()
+    try: r=await cl.send_code_request(m.text); await state.update_data(p=m.text, h=r.phone_code_hash, cl=cl); await m.answer("📩 Код:"); await state.set_state(AuthStates.CODE)
     except Exception as e: await m.answer(f"❌ {e}")
-
 @router.message(AuthStates.CODE)
-async def co_h(m: Message, state: FSMContext):
-    d = await state.get_data()
-    client: TelegramClient = d['cl']
-    try:
-        await client.sign_in(phone=d['ph'], code=m.text, phone_code_hash=d['h'])
-        await m.answer("✅ Вход!"); await client.disconnect(); await start_worker(m.from_user.id); await state.clear()
-    except SessionPasswordNeededError:
-        await m.answer("🔒 Пароль 2FA:")
-        await state.set_state(AuthStates.PASS)
+async def a_c(m: Message, state: FSMContext):
+    d=await state.get_data(); cl=d['cl']
+    try: await cl.sign_in(phone=d['p'], code=m.text, phone_code_hash=d['h']); await m.answer("✅ OK"); await cl.disconnect(); await start_worker(m.from_user.id); await state.clear()
+    except SessionPasswordNeededError: await m.answer("🔒 2FA Пароль:"); await state.set_state(AuthStates.PASS)
     except Exception as e: await m.answer(f"❌ {e}")
-
 @router.message(AuthStates.PASS)
-async def pa_h(m: Message, state: FSMContext):
-    d = await state.get_data()
-    client: TelegramClient = d['cl']
-    try:
-        await client.sign_in(password=m.text)
-        await m.answer("✅ Вход!"); await client.disconnect(); await start_worker(m.from_user.id); await state.clear()
+async def a_pa(m: Message, state: FSMContext):
+    d=await state.get_data(); cl=d['cl']
+    try: await cl.sign_in(password=m.text); await m.answer("✅ OK"); await cl.disconnect(); await start_worker(m.from_user.id); await state.clear()
     except Exception as e: await m.answer(f"❌ {e}")
 
 # WORKER CTRL
 @router.callback_query(F.data == "worker")
-async def worker_cb(c: CallbackQuery):
-    w = WORKERS.get(c.from_user.id)
-    st = w.status if w else "⚪️ Off"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Рестарт", callback_data="w_res"), InlineKeyboardButton(text="🛑 Стоп", callback_data="w_stop")], [InlineKeyboardButton(text="🔙", callback_data="menu")]])
-    await c.message.edit_text(f"👻 <b>Воркер</b>\nСтатус: {st}", reply_markup=kb)
-
-@router.callback_query(F.data == "w_res")
-async def w_r(c: CallbackQuery): await start_worker(c.from_user.id); await c.answer("Рестарт"); await worker_cb(c)
-@router.callback_query(F.data == "w_stop")
-async def w_s(c: CallbackQuery): await stop_worker(c.from_user.id); await c.answer("Стоп"); await worker_cb(c)
+async def w_cb(c: CallbackQuery):
+    w=WORKERS.get(c.from_user.id); st=w.status if w else "⚪️ Off"
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄",callback_data="w_r"),InlineKeyboardButton(text="🛑",callback_data="w_s")],[InlineKeyboardButton(text="🔙",callback_data="menu")]])
+    await c.message.edit_text(f"👻 <b>Воркер</b>: {st}", reply_markup=kb)
+@router.callback_query(F.data == "w_r")
+async def w_r(c: CallbackQuery): 
+    res = await start_worker(c.from_user.id)
+    if res: await c.answer("Started")
+    else: await c.answer("🚫 No Subscription!", show_alert=True)
+    await w_cb(c)
+@router.callback_query(F.data == "w_s")
+async def w_s(c: CallbackQuery): await stop_worker(c.from_user.id); await c.answer("Stopped"); await w_cb(c)
 
 # ADMIN
 @router.callback_query(F.data == "admin")
 async def adm(c: CallbackQuery):
-    if c.from_user.id == ADMIN_ID: await c.message.edit_text("👑 Админ", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Выдать", callback_data="adm_grant"), InlineKeyboardButton(text="🎫 Промо", callback_data="adm_promo")], [InlineKeyboardButton(text="🔙", callback_data="menu")]]))
+    if c.from_user.id==ADMIN_ID: await c.message.edit_text("👑", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Выдать",callback_data="adm_grant"),InlineKeyboardButton(text="🎫 Промо",callback_data="adm_promo")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
 
-# --- FIX: PROMO CREATION ---
 @router.callback_query(F.data == "adm_promo")
-async def adm_p(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("📅 Сколько дней?")
-    await state.set_state(AdminStates.PROMO_DAYS)
-
+async def ap(c: CallbackQuery, state: FSMContext): await c.message.edit_text("📅 Дней:"); await state.set_state(AdminStates.PROMO_DAYS)
 @router.message(AdminStates.PROMO_DAYS)
-async def adm_pd(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("❌ Введите число!")
-    await state.update_data(d=int(m.text))
-    await m.answer("🔢 Сколько активаций?")
-    await state.set_state(AdminStates.PROMO_ACT)
-
+async def ap_d(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("🔢 Акты:"); await state.set_state(AdminStates.PROMO_ACT)
 @router.message(AdminStates.PROMO_ACT)
-async def adm_pa(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("❌ Введите число!")
-    d = await state.get_data()
-    code = await db.create_promo(d['d'], int(m.text))
-    await m.answer(f"✅ Промокод создан:\n<code>{code}</code>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👑 Админ", callback_data="admin")]]))
-    await state.clear()
-# ---------------------------
+async def ap_a(m: Message, state: FSMContext): d=await state.get_data(); c=await db.create_promo(d['d'], int(m.text)); await m.answer(f"Code: <code>{c}</code>"); await state.clear()
 
 @router.callback_query(F.data == "adm_grant")
-async def ag(c: CallbackQuery, state: FSMContext): await c.message.edit_text("🆔 ID:"); await state.set_state(AdminStates.GRANT_ID)
+async def ag(c: CallbackQuery, state: FSMContext): await c.message.edit_text("🆔"); await state.set_state(AdminStates.GRANT_ID)
 @router.message(AdminStates.GRANT_ID)
-async def ag_i(m: Message, state: FSMContext): await state.update_data(uid=m.text); await m.answer("📅 Дней:"); await state.set_state(AdminStates.GRANT_DAYS)
+async def ag_i(m: Message, state: FSMContext): await state.update_data(uid=m.text); await m.answer("📅"); await state.set_state(AdminStates.GRANT_DAYS)
 @router.message(AdminStates.GRANT_DAYS)
 async def ag_d(m: Message, state: FSMContext): d=await state.get_data(); await db.update_sub(int(d['uid']), int(m.text)); await m.answer("✅"); await state.clear()
 
 @router.callback_query(F.data == "profile")
 async def prof(c: CallbackQuery):
-    u = await db.get_user(c.from_user.id)
-    end = datetime.fromisoformat(u['sub_end']) if u and u['sub_end'] else None
-    is_sub = end > datetime.now() if end else False
-    date_str = end.strftime('%d.%m.%Y') if is_sub else "Нет"
-    await c.message.edit_text(f"👤 <b>Профиль</b>\nID: {c.from_user.id}\nПодписка: {date_str}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
+    if c.from_user.id == ADMIN_ID: sub = "♾ ВЕЧНАЯ (Админ)"
+    else:
+        u = await db.get_user(c.from_user.id)
+        d = datetime.fromisoformat(u['sub_end']) if u and u['sub_end'] else None
+        sub = d.strftime('%d.%m.%Y') if d and d > datetime.now() else "❌ Нет"
+    await c.message.edit_text(f"👤 ID: {c.from_user.id}\n💎 Подписка: {sub}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
 
-@router.callback_query(F.data.startswith("dl:"))
-async def dl(c: CallbackQuery):
-    fmt = c.data.split(":")[1]; data = TEMP_DATA.get(c.from_user.id)
-    if not data: return await c.answer("Нет данных")
-    lines = data['lines']; fn = f"Res.{fmt}"
-    with open(fn, "w", encoding="utf-8") as f:
-        if fmt=="txt": f.write("\n".join(lines))
-        else: w = csv.writer(f); w.writerow(["Data"]); [w.writerow([l]) for l in lines]
-    await c.message.answer_document(FSInputFile(fn)); os.remove(fn); await c.answer()
-
-# MAIN
 async def main():
     await db.init()
     for f in SESSION_DIR.glob("*.session"): 
