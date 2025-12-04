@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-🌌 StatPro v22.0 - QUANTUM EDITION
-----------------------------------
-ARCHITECTURE: OOP, Singleton DB, Async Managers.
-FEATURES: 85+ Improvements (Moderation, Fun, Utils, Parsing).
-STABILITY: FloodWait Handling, Auto-Recovery.
+🇷🇺 StatPro v22.1 - RUSSIFIER EDITION
+------------------------------------
+ЯЗЫК: Полностью Русский интерфейс (Меню, Кнопки, Ответы).
+ФУНКЦИОНАЛ: Сохранены все 85+ улучшений версии Quantum.
+ПРОМОКОДЫ: Доступно и создание кодов, и выдача по ID.
 """
 
 import asyncio
@@ -27,7 +27,7 @@ from typing import Dict, Optional, Union, List, Set, Any
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# --- IMPORTS ---
+# --- ИМПОРТЫ ---
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -64,10 +64,10 @@ import qrcode
 from PIL import Image
 
 # =========================================================================
-# ⚙️ CONFIG & CONSTANTS
+# ⚙️ КОНФИГУРАЦИЯ
 # =========================================================================
 
-VERSION = "v22.0 Quantum"
+VERSION = "v22.1 RUS"
 START_TS = datetime.now().timestamp()
 
 BASE_DIR = Path("/app")
@@ -77,7 +77,6 @@ LOG_FILE = BASE_DIR / "bot.log"
 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-# Logger Setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
@@ -88,7 +87,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("StatPro")
 
-# Env Vars
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
@@ -96,21 +94,19 @@ try:
     API_HASH = os.getenv("API_HASH", "")
     SUPPORT_BOT = os.getenv("SUPPORT_BOT_USERNAME", "@suppor_tstatpro1bot")
 except Exception as e:
-    logger.critical(f"Config Missing: {e}")
+    logger.critical(f"Ошибка конфига: {e}")
     sys.exit(1)
 
 if not all([BOT_TOKEN, API_ID, API_HASH]):
     sys.exit(1)
 
-# Global Stores
-TEMP_DATA = {} # {uid: data}
+TEMP_DATA = {} 
 
-# Regex
 RE_PHONE = r"^\+?[0-9]{10,15}$"
 RE_PROMO = r"^[A-Za-z0-9-]{4,20}$"
 
 # =========================================================================
-# 🗄️ DATABASE MANAGER (SINGLETON)
+# 🗄️ МЕНЕДЖЕР БАЗЫ ДАННЫХ
 # =========================================================================
 
 class DatabaseManager:
@@ -150,10 +146,8 @@ class DatabaseManager:
             """)
             await db.commit()
 
-    # --- User Methods ---
     async def add_user(self, uid: int, uname: str):
         now = datetime.now().isoformat()
-        # Trial: 0 days
         end = now 
         async with self.get_connection() as db:
             await db.execute(
@@ -175,7 +169,6 @@ class DatabaseManager:
         new_end = current_end + timedelta(days=days)
         
         async with self.get_connection() as db:
-            # Ensure exists
             await db.execute("INSERT OR IGNORE INTO users (user_id, sub_end) VALUES (?, ?)", (uid, datetime.now().isoformat()))
             await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), uid))
             await db.commit()
@@ -185,7 +178,6 @@ class DatabaseManager:
             await db.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (state, uid))
             await db.commit()
 
-    # --- Promo Methods ---
     async def create_promo(self, days: int, acts: int):
         code = f"PRO-{uuid.uuid4().hex[:6].upper()}"
         async with self.get_connection() as db:
@@ -213,15 +205,10 @@ class DatabaseManager:
             async with db.execute("SELECT COUNT(*) FROM users WHERE sub_end > ?", (datetime.now().isoformat(),)) as c: active = (await c.fetchone())[0]
         return total, active
 
-    async def get_all_ids(self):
-        async with self.get_connection() as db:
-            async with db.execute("SELECT user_id FROM users") as c:
-                return [r[0] for r in await c.fetchall()]
-
 db = DatabaseManager()
 
 # =========================================================================
-# 🧠 USER WORKER CLASS (OOP)
+# 🧠 КЛАСС USER WORKER (Воркер Юзера)
 # =========================================================================
 
 class UserWorker:
@@ -229,7 +216,7 @@ class UserWorker:
         self.user_id = user_id
         self.client: Optional[TelegramClient] = None
         self.task: Optional[asyncio.Task] = None
-        self.status = "⚪️ Initializing"
+        self.status = "⚪️ Инициализация"
         self.stop_signal = False
         self.is_afk = False
         self.afk_reason = ""
@@ -247,7 +234,7 @@ class UserWorker:
         self.stop_signal = True
         if self.client: await self.client.disconnect()
         if self.task: self.task.cancel()
-        self.status = "🔴 Stopped"
+        self.status = "🔴 Остановлен"
 
     async def _stealth_delete(self, event):
         try: await event.delete()
@@ -262,49 +249,47 @@ class UserWorker:
 
     async def _loop(self):
         self.start_ts = time.time()
-        self.status = "🟡 Connecting..."
+        self.status = "🟡 Подключение..."
         
         try:
             sess = self.get_session_file()
             if not sess.with_suffix(".session").exists():
-                self.status = "🔴 No Session"
+                self.status = "🔴 Нет Сессии"
                 return
 
             self.client = TelegramClient(str(sess), API_ID, API_HASH, connection_retries=None)
             await self.client.connect()
             
             if not await self.client.is_user_authorized():
-                self.status = "🔴 Auth Failed"
+                self.status = "🔴 Ошибка Входа"
                 return
 
-            self.status = "🟢 Active"
+            self.status = "🟢 Активен"
             logger.info(f"Worker {self.user_id} Online")
             
-            # Register Handlers
             self._register_handlers()
             
             await self.client.run_until_disconnected()
 
         except FloodWaitError as e:
-            self.status = f"⏳ FloodWait {e.seconds}s"
-            logger.warning(f"Worker {self.user_id} FloodWait: {e.seconds}")
+            self.status = f"⏳ Флуд-Ожидание {e.seconds}с"
             await asyncio.sleep(e.seconds)
         except Exception as e:
-            self.status = f"🔴 Error: {e.__class__.__name__}"
+            self.status = f"🔴 Сбой: {e.__class__.__name__}"
             logger.error(f"Worker {self.user_id} Crash: {e}")
         finally:
             if self.client: await self.client.disconnect()
-            self.status = "⚪️ Offline"
+            self.status = "⚪️ Оффлайн"
 
     def _register_handlers(self):
         c = self.client
         
-        # --- 1. UTILS ---
+        # --- 1. УТИЛИТЫ ---
         @c.on(events.NewMessage(pattern=r'^\.ping$'))
         async def ping(e):
             s = time.time()
             await self._stealth_delete(e)
-            await self._temp_msg(e, f"🏓 Pong! {int((time.time()-s)*1000)}ms")
+            await self._temp_msg(e, f"🏓 Понг! {int((time.time()-s)*1000)}мс")
 
         @c.on(events.NewMessage(pattern=r'^\.id$'))
         async def show_id(e):
@@ -312,9 +297,9 @@ class UserWorker:
             rid = e.reply_to_msg_id
             if rid:
                 r = await e.get_reply_message()
-                await self._temp_msg(e, f"🆔 User: `{r.sender_id}`\nMsg: `{r.id}`\nChat: `{e.chat_id}`", 5)
+                await self._temp_msg(e, f"🆔 Юзер: `{r.sender_id}`\nMsg: `{r.id}`\nЧат: `{e.chat_id}`", 5)
             else:
-                await self._temp_msg(e, f"🆔 Chat: `{e.chat_id}`", 5)
+                await self._temp_msg(e, f"🆔 Чат: `{e.chat_id}`", 5)
 
         @c.on(events.NewMessage(pattern=r'^\.info$'))
         async def chat_info(e):
@@ -322,16 +307,16 @@ class UserWorker:
             try:
                 full = await c(GetFullChannelRequest(e.chat_id))
                 chat = full.full_chat
-                txt = (f"ℹ️ <b>Chat Info</b>\n"
+                txt = (f"ℹ️ <b>Инфо о чате</b>\n"
                        f"ID: <code>{e.chat_id}</code>\n"
-                       f"Title: {full.chats[0].title}\n"
-                       f"Users: {chat.participants_count}\n"
-                       f"Admins: {chat.admins_count}\n"
-                       f"Online: {getattr(chat, 'online_count', '?')}")
+                       f"Название: {full.chats[0].title}\n"
+                       f"Участников: {chat.participants_count}\n"
+                       f"Админов: {chat.admins_count}\n"
+                       f"Онлайн: {getattr(chat, 'online_count', '?')}")
                 await self._temp_msg(e, txt, 10)
             except: pass
 
-        # --- 2. MODERATION ---
+        # --- 2. МОДЕРАЦИЯ ---
         @c.on(events.NewMessage(pattern=r'^\.ban$'))
         async def ban(e):
             await self._stealth_delete(e)
@@ -339,7 +324,7 @@ class UserWorker:
             try:
                 r = await e.get_reply_message()
                 await c(EditAdminRequest(e.chat_id, r.sender_id, ChatBannedRights(until_date=None, view_messages=True), rank=""))
-                await self._temp_msg(e, "⛔ Banned", 2)
+                await self._temp_msg(e, "⛔ Забанен", 2)
             except Exception as ex: await self._temp_msg(e, f"❌ {ex}", 2)
 
         @c.on(events.NewMessage(pattern=r'^\.mute (\d+)([mhd])$'))
@@ -349,10 +334,11 @@ class UserWorker:
             args = e.pattern_match
             val, unit = int(args.group(1)), args.group(2)
             td = timedelta(minutes=val) if unit=='m' else timedelta(hours=val) if unit=='h' else timedelta(days=val)
+            unit_rus = 'мин' if unit=='m' else 'час' if unit=='h' else 'дней'
             try:
                 r = await e.get_reply_message()
                 await c(EditAdminRequest(e.chat_id, r.sender_id, ChatBannedRights(until_date=datetime.now()+td, send_messages=True), rank=""))
-                await self._temp_msg(e, f"😶 Muted for {val}{unit}", 3)
+                await self._temp_msg(e, f"😶 Мут на {val} {unit_rus}", 3)
             except: pass
 
         @c.on(events.NewMessage(pattern=r'^\.purge$'))
@@ -365,17 +351,17 @@ class UserWorker:
                 msgs.append(m.id)
             await c.delete_messages(e.chat_id, msgs)
 
-        # --- 3. PARSING (PHANTOM) ---
+        # --- 3. ПАРСИНГ (PHANTOM) ---
         @c.on(events.NewMessage(pattern=r'^\.scan$'))
         async def scan(e):
             await self._stealth_delete(e)
             self.stop_signal = False
-            self.status = "🔎 Scanning..."
+            self.status = "🔎 Сканирую..."
             
             u_lim = await db.get_user(self.user_id)
             limit = u_lim['parse_limit'] if u_lim else 500
             
-            msg = await e.respond(f"👻 <b>Phantom Scan</b>\nLimit: {limit}")
+            msg = await e.respond(f"👻 <b>Фантом Сканирование</b>\nЛимит: {limit}")
             unique = {}
             count = 0
             
@@ -388,30 +374,30 @@ class UserWorker:
                             unique[m.sender_id] = f"@{m.sender.username or 'None'} | {m.sender.first_name} | {m.sender_id}"
                     
                     if count % 300 == 0:
-                        await msg.edit(f"👻 Scanned: {count} | Found: {len(unique)}/{limit}")
+                        await msg.edit(f"👻 Проверено: {count} | Найдено: {len(unique)}/{limit}")
                     
                     if len(unique) >= limit: break
                 
                 if not self.stop_signal:
                     TEMP_DATA[self.user_id] = {'lines': list(unique.values()), 'title': str(e.chat_id)}
-                    await msg.edit("✅ Done.")
+                    await msg.edit("✅ Готово.")
                     await asyncio.sleep(1)
                     await msg.delete()
                     # Trigger Bot
                     try:
-                        await bot.send_message(self.user_id, f"📁 <b>Scan Result</b>\nChat: {e.chat_id}\nUsers: {len(unique)}", reply_markup=kb_parse())
+                        await bot.send_message(self.user_id, f"📁 <b>Результат Парсинга</b>\nЧат: {e.chat_id}\nЮзеров: {len(unique)}", reply_markup=kb_parse())
                     except: pass
             
             except Exception as ex:
-                await msg.edit(f"❌ Error: {ex}")
+                await msg.edit(f"❌ Ошибка: {ex}")
             finally:
-                self.status = "🟢 Active"
+                self.status = "🟢 Активен"
 
         @c.on(events.NewMessage(pattern=r'^\.stop$'))
         async def stop_scan(e):
             await self._stealth_delete(e)
             self.stop_signal = True
-            await self._temp_msg(e, "🛑 Stopping...", 2)
+            await self._temp_msg(e, "🛑 Останавливаю...", 2)
 
         # --- 4. FUN & RAID ---
         @c.on(events.NewMessage(pattern=r'^\.spam (\d+) (.*)'))
@@ -434,8 +420,8 @@ class UserWorker:
         @c.on(events.NewMessage(pattern=r'^\.magic$'))
         async def magic(e):
             await self._stealth_delete(e)
-            m = await e.respond("Wait...")
-            anim = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "✨ MAGIC ✨"]
+            m = await e.respond("Жди...")
+            anim = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "✨ МАГИЯ ✨"]
             for frame in anim:
                 await m.edit(frame)
                 await asyncio.sleep(0.3)
@@ -445,50 +431,49 @@ class UserWorker:
             await self._stealth_delete(e)
             expr = e.pattern_match.group(1)
             try:
-                # Basic safety: only allow math chars
                 if not re.match(r"^[0-9+\-*/(). ]+$", expr):
-                    return await self._temp_msg(e, "❌ Invalid chars", 2)
+                    return await self._temp_msg(e, "❌ Неверные символы", 2)
                 res = eval(expr, {"__builtins__": {}}, {"math": math})
                 await self._temp_msg(e, f"🔢 {expr} = <b>{res}</b>", 5)
             except: pass
 
-        # --- 5. AFK SYSTEM ---
+        # --- 5. AFK СИСТЕМА ---
         @c.on(events.NewMessage(pattern=r'^\.afk ?(.*)'))
         async def set_afk(e):
             await self._stealth_delete(e)
             self.is_afk = True
-            self.afk_reason = e.pattern_match.group(1) or "Busy"
-            await self._temp_msg(e, f"💤 AFK Mode: {self.afk_reason}", 3)
+            self.afk_reason = e.pattern_match.group(1) or "Занят"
+            await self._temp_msg(e, f"💤 Режим AFK: {self.afk_reason}", 3)
 
         @c.on(events.NewMessage(pattern=r'^\.unafk$'))
         async def unafk(e):
             await self._stealth_delete(e)
             self.is_afk = False
-            await self._temp_msg(e, "👋 Welcome back!", 3)
+            await self._temp_msg(e, "👋 С возвращением!", 3)
 
         @c.on(events.NewMessage(incoming=True))
         async def afk_handler(e):
             if self.is_afk and e.is_private:
-                await e.reply(f"💤 <b>I am AFK.</b>\nReason: {self.afk_reason}")
+                await e.reply(f"💤 <b>Я сейчас AFK.</b>\nПричина: {self.afk_reason}")
             elif self.is_afk and e.mentioned:
-                await e.reply(f"💤 <b>Don't tag me.</b>\nReason: {self.afk_reason}")
+                await e.reply(f"💤 <b>Не тегай меня.</b>\nПричина: {self.afk_reason}")
 
-        # --- 6. MISC ---
+        # --- 6. ПОМОЩЬ ---
         @c.on(events.NewMessage(pattern=r'^\.help$'))
         async def help_cmd(e):
             await self._stealth_delete(e)
             txt = (
-                "💎 <b>StatPro Quantum Help</b>\n"
-                "<b>Mod:</b> .ban, .mute, .kick, .purge, .pin\n"
-                "<b>Info:</b> .id, .info, .admins, .bots\n"
-                "<b>Fun:</b> .spam, .tspam, .magic, .calc\n"
-                "<b>Parse:</b> .scan, .stop\n"
-                "<b>Utils:</b> .afk, .unafk, .msg\n"
+                "💎 <b>Помощь StatPro Quantum</b>\n"
+                "<b>Админ:</b> .ban, .mute, .kick, .purge, .pin\n"
+                "<b>Инфо:</b> .id, .info, .admins, .bots\n"
+                "<b>Веселье:</b> .spam, .tspam, .magic, .calc\n"
+                "<b>Парсинг:</b> .scan, .stop\n"
+                "<b>Утилиты:</b> .afk, .unafk, .msg\n"
             )
             await self._temp_msg(e, txt, 15)
 
 # =========================================================================
-# 🎮 WORKER MANAGER
+# 🎮 МЕНЕДЖЕР ВОРКЕРОВ
 # =========================================================================
 
 WORKERS: Dict[int, UserWorker] = {}
@@ -509,7 +494,6 @@ async def restart_all_workers():
     for w in list(WORKERS.values()):
         await w.stop()
     
-    # Scan dir
     for f in SESSION_DIR.glob("session_*.session"):
         try:
             uid = int(f.stem.split("_")[1])
@@ -517,7 +501,7 @@ async def restart_all_workers():
         except: pass
 
 # =========================================================================
-# 🤖 BOT (AIOGRAM) HANDLERS
+# 🤖 БОТ (AIOGRAM)
 # =========================================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -538,17 +522,17 @@ class AuthStates(StatesGroup):
     CODE = State()
     PASS = State()
 
-# --- Keyboards ---
+# --- Клавиатуры ---
 def kb_main(uid: int, is_sub: bool):
     kb = []
     if is_sub or uid == ADMIN_ID:
-        kb.append([InlineKeyboardButton(text="🔑 Connect Account", callback_data="auth")])
-    kb.append([InlineKeyboardButton(text="👤 Profile", callback_data="profile")])
+        kb.append([InlineKeyboardButton(text="🔑 Подключить Аккаунт", callback_data="auth")])
+    kb.append([InlineKeyboardButton(text="👤 Профиль", callback_data="profile")])
     if is_sub:
-        kb.append([InlineKeyboardButton(text="👻 Worker Menu", callback_data="worker")])
+        kb.append([InlineKeyboardButton(text="👻 Меню Воркера", callback_data="worker")])
     if uid == ADMIN_ID:
-        kb.append([InlineKeyboardButton(text="👑 Admin Panel", callback_data="admin")])
-    kb.append([InlineKeyboardButton(text="💬 Support", url=f"https://t.me/{SUPPORT_BOT.replace('@','')} ")])
+        kb.append([InlineKeyboardButton(text="👑 Админ Панель", callback_data="admin")])
+    kb.append([InlineKeyboardButton(text="💬 Поддержка", url=f"https://t.me/{SUPPORT_BOT.replace('@','')} ")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def kb_parse():
@@ -560,19 +544,17 @@ def kb_parse():
 
 def kb_auth():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Phone", callback_data="auth_phone"),
-         InlineKeyboardButton(text="📸 QR Code", callback_data="auth_qr")],
-        [InlineKeyboardButton(text="🔙 Back", callback_data="menu")]
+        [InlineKeyboardButton(text="📱 По номеру", callback_data="auth_phone"),
+         InlineKeyboardButton(text="📸 По QR-коду", callback_data="auth_qr")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]
     ])
 
-# --- Middlewares ---
+# --- Middleware ---
 class MainMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         uid = event.from_user.id
-        # Auto register
         await db.add_user(uid, event.from_user.username or "Unknown")
         
-        # Check Ban
         u = await db.get_user(uid)
         if u and u['is_banned']: return
         
@@ -581,69 +563,69 @@ class MainMiddleware(BaseMiddleware):
 dp.message.middleware(MainMiddleware())
 dp.callback_query.middleware(MainMiddleware())
 
-# --- Handlers ---
+# --- Хендлеры ---
 @router.message(Command("start"))
 async def start_cmd(m: Message):
     u = await db.get_user(m.from_user.id)
     is_sub = datetime.fromisoformat(u['sub_end']) > datetime.now() if u else False
-    await m.answer(f"🌌 <b>StatPro Quantum</b>\nUser: {m.from_user.first_name}", 
+    await m.answer(f"🌌 <b>StatPro Quantum</b>\nПривет, {m.from_user.first_name}", 
                    reply_markup=kb_main(m.from_user.id, is_sub))
 
 @router.callback_query(F.data == "menu")
 async def menu_cb(c: CallbackQuery):
     u = await db.get_user(c.from_user.id)
     is_sub = datetime.fromisoformat(u['sub_end']) > datetime.now()
-    await c.message.edit_text("🏠 <b>Main Menu</b>", reply_markup=kb_main(c.from_user.id, is_sub))
+    await c.message.edit_text("🏠 <b>Главное меню</b>", reply_markup=kb_main(c.from_user.id, is_sub))
 
 @router.callback_query(F.data == "profile")
 async def profile_cb(c: CallbackQuery):
     u = await db.get_user(c.from_user.id)
     end = datetime.fromisoformat(u['sub_end'])
     is_sub = end > datetime.now()
-    w_status = WORKERS[c.from_user.id].status if c.from_user.id in WORKERS else "⚪️ Offline"
+    w_status = WORKERS[c.from_user.id].status if c.from_user.id in WORKERS else "⚪️ Оффлайн"
     
-    txt = (f"👤 <b>Profile</b>\n"
+    txt = (f"👤 <b>Профиль</b>\n"
            f"ID: <code>{c.from_user.id}</code>\n"
-           f"Sub: {'✅' if is_sub else '❌'} (Till: {end.strftime('%Y-%m-%d')})\n"
-           f"Worker: {w_status}\n"
-           f"Limit: {u['parse_limit']}")
-    await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
+           f"Подписка: {'✅' if is_sub else '❌'} (До: {end.strftime('%d.%m.%Y')})\n"
+           f"Воркер: {w_status}\n"
+           f"Лимит парсинга: {u['parse_limit']}")
+    await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]]))
 
 @router.callback_query(F.data == "worker")
 async def worker_cb(c: CallbackQuery):
     w = WORKERS.get(c.from_user.id)
-    st = w.status if w else "⚪️ Offline"
-    txt = (f"👻 <b>Worker Control</b>\nStatus: {st}\n\n"
-           "Commands:\n"
-           "<code>.help</code> - Show command list\n"
-           "<code>.scan</code> - Start parsing\n"
-           "<code>.stop</code> - Stop parsing\n"
-           "<code>.restart</code> - Restart worker")
+    st = w.status if w else "⚪️ Оффлайн"
+    txt = (f"👻 <b>Управление Воркером</b>\nСтатус: {st}\n\n"
+           "Команды в чате:\n"
+           "<code>.help</code> - Список команд\n"
+           "<code>.scan</code> - Начать парсинг\n"
+           "<code>.stop</code> - Остановить парсинг\n"
+           "<code>.restart</code> - Перезагрузить")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Restart", callback_data="w_restart"),
-         InlineKeyboardButton(text="🛑 Stop", callback_data="w_stop")],
-        [InlineKeyboardButton(text="🔙 Back", callback_data="menu")]
+        [InlineKeyboardButton(text="🔄 Рестарт", callback_data="w_restart"),
+         InlineKeyboardButton(text="🛑 Стоп", callback_data="w_stop")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]
     ])
     await c.message.edit_text(txt, reply_markup=kb)
 
 @router.callback_query(F.data == "w_restart")
 async def w_res(c: CallbackQuery):
-    await c.answer("Restarting...")
+    await c.answer("Перезагрузка...")
     await start_worker(c.from_user.id)
     await worker_cb(c)
 
 @router.callback_query(F.data == "w_stop")
 async def w_stop(c: CallbackQuery):
     await stop_worker(c.from_user.id)
-    await c.answer("Stopped.")
+    await c.answer("Остановлено.")
     await worker_cb(c)
 
-# --- Parsing Results ---
+# --- Скачивание Результатов ---
 @router.callback_query(F.data.startswith("dl:"))
 async def dl_res(c: CallbackQuery):
     fmt = c.data.split(":")[1]
     data = TEMP_DATA.get(c.from_user.id)
-    if not data: return await c.answer("Expired.", show_alert=True)
+    if not data: return await c.answer("Устарело.", show_alert=True)
     
     lines = data['lines']
     name = f"Result_{data['title']}"
@@ -666,49 +648,69 @@ async def dl_res(c: CallbackQuery):
         os.remove(f.path)
     await c.answer()
 
-# --- ADMIN ---
+# --- АДМИН ПАНЕЛЬ ---
 @router.callback_query(F.data == "admin")
 async def adm_cb(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
     t, a = await db.get_stats()
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Grant Sub", callback_data="adm_grant"),
-         InlineKeyboardButton(text="⛔ Ban User", callback_data="adm_ban")],
-        [InlineKeyboardButton(text="📢 Broadcast", callback_data="adm_bc"),
-         InlineKeyboardButton(text="🔄 Restart All", callback_data="adm_ra")],
-        [InlineKeyboardButton(text="🔙 Back", callback_data="menu")]
+        [InlineKeyboardButton(text="🎁 Выдать по ID", callback_data="adm_grant"),
+         InlineKeyboardButton(text="🎫 Создать Промокод", callback_data="adm_promo")],
+        [InlineKeyboardButton(text="⛔ Бан Юзера", callback_data="adm_ban"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_bc")],
+        [InlineKeyboardButton(text="🔄 Рестарт Всех", callback_data="adm_ra"),
+         InlineKeyboardButton(text="🔙 Назад", callback_data="menu")]
     ])
-    await c.message.edit_text(f"👑 <b>Admin Panel</b>\nUsers: {t}\nActive: {a}\nWorkers: {len(WORKERS)}", reply_markup=kb)
+    await c.message.edit_text(f"👑 <b>Админ Панель</b>\nЮзеров: {t}\nАктивных: {a}\nВоркеров: {len(WORKERS)}", reply_markup=kb)
 
+# --- Создание Промокода (Для ввода юзером) ---
+@router.callback_query(F.data == "adm_promo")
+async def adm_promo_start(c: CallbackQuery, state: FSMContext):
+    await c.message.edit_text("📅 На сколько дней код?")
+    await state.set_state(AdminStates.PROMO_DAYS)
+
+@router.message(AdminStates.PROMO_DAYS)
+async def adm_promo_days(m: Message, state: FSMContext):
+    await state.update_data(d=m.text)
+    await m.answer("🔢 Сколько активаций?")
+    await state.set_state(AdminStates.PROMO_ACT)
+
+@router.message(AdminStates.PROMO_ACT)
+async def adm_promo_fin(m: Message, state: FSMContext):
+    d = await state.get_data()
+    code = await db.create_promo(int(d['d']), int(m.text))
+    await m.answer(f"✅ Промокод создан:\n<code>{code}</code>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Админ", callback_data="admin")]]))
+    await state.clear()
+
+# --- Выдача по ID (Без ввода) ---
 @router.callback_query(F.data == "adm_grant")
 async def ag(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("🆔 User ID:")
+    await c.message.edit_text("🆔 Введите ID Юзера:")
     await state.set_state(AdminStates.GRANT_ID)
 
 @router.message(AdminStates.GRANT_ID)
 async def ag_id(m: Message, state: FSMContext):
     await state.update_data(uid=m.text)
-    await m.answer("📅 Days:")
+    await m.answer("📅 На сколько дней выдать?")
     await state.set_state(AdminStates.GRANT_DAYS)
 
 @router.message(AdminStates.GRANT_DAYS)
 async def ag_d(m: Message, state: FSMContext):
     d = await state.get_data()
     await db.update_sub(int(d['uid']), int(m.text))
-    await m.answer("✅ Done.")
+    await m.answer("✅ Подписка выдана.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Админ", callback_data="admin")]]))
     await state.clear()
 
 @router.callback_query(F.data == "adm_ra")
 async def adm_restart_all(c: CallbackQuery):
-    await c.answer("Restarting all workers...")
+    await c.answer("Перезагрузка воркеров...")
     await restart_all_workers()
-    await c.message.answer("✅ System Reloaded")
+    await c.message.answer("✅ Система перезагружена")
 
-# --- AUTH SYSTEM (Telethon) ---
-# (Simplified for brevity, similar logic to previous versions but cleaner)
+# --- СИСТЕМА АВТОРИЗАЦИИ (Telethon) ---
 @router.callback_query(F.data == "auth")
 async def auth_start(c: CallbackQuery):
-    await c.message.edit_text("🔐 Select Method:", reply_markup=kb_auth())
+    await c.message.edit_text("🔐 Выберите метод:", reply_markup=kb_auth())
 
 @router.callback_query(F.data == "auth_qr")
 async def auth_qr(c: CallbackQuery):
@@ -721,35 +723,31 @@ async def auth_qr(c: CallbackQuery):
     qr_img = qrcode.make(qr.url).convert("RGB")
     b = io.BytesIO(); qr_img.save(b, "PNG"); b.seek(0)
     
-    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="📸 Scan via Settings > Devices")
+    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="📸 Сканируйте в Настройки > Устройства")
     
     try:
         await qr.wait(timeout=120)
         await msg.delete()
-        await c.message.answer("✅ Success! Starting worker...")
+        await c.message.answer("✅ Успех! Запускаю воркер...")
         await client.disconnect()
         await start_worker(uid)
     except Exception as e:
         await msg.delete()
-        await c.message.answer(f"❌ Error: {e}")
+        await c.message.answer(f"❌ Ошибка: {e}")
         await client.disconnect()
 
 # =========================================================================
-# 🚀 MAIN LOOP
+# 🚀 ЗАПУСК
 # =========================================================================
 
 async def main():
-    # 1. Init DB
     await db.init()
     
-    # 2. Cleanup
     for f in SESSION_DIR.glob("*.session"):
         if f.stat().st_size == 0: f.unlink()
 
-    # 3. Start Workers
     asyncio.create_task(restart_all_workers())
     
-    # 4. Start Bot
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
@@ -761,4 +759,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("System Shutdown")
+        logger.info("Система выключена")
