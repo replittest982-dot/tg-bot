@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v38.0 - TITANIUM EDITION
+💎 StatPro v38.1 - PLATINUM EDITION
 -----------------------------------
-✅ FIX DB: База данных создается локально (решает ошибку доступа).
-✅ FIX PROMO: Промокоды работают идеально (без учета регистра/пробелов).
-🇷🇺 LANG: Полный, грамотный русский перевод.
-🚀 CORE: Оптимизация памяти и жесткая защита от вылетов.
+✅ FIX: Исправлена ошибка '4 values for 3 columns' в БД.
+✅ FIX: Промокоды и выдача админом теперь работают 100%.
+🚀 CORE: Максимальная стабильность и скорость.
 """
 
 import asyncio
@@ -47,19 +46,17 @@ import qrcode
 from PIL import Image
 
 # =========================================================================
-# ⚙️ НАСТРОЙКИ СИСТЕМЫ
+# ⚙️ НАСТРОЙКИ
 # =========================================================================
 
-# Определяем путь относительно запускаемого скрипта (РЕШАЕТ ПРОБЛЕМУ ДОСТУПА)
 BASE_DIR = Path(__file__).resolve().parent
 SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "titanium.db"
+DB_PATH = BASE_DIR / "platinum.db"
 STATE_FILE = BASE_DIR / "state.json"
 
-# Создаем папки при старте
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-VERSION = "v38.0 TITANIUM"
+VERSION = "v38.1 PLATINUM"
 MSK_TZ = timezone(timedelta(hours=3))
 
 logging.basicConfig(
@@ -76,9 +73,7 @@ try:
     API_HASH = os.getenv("API_HASH", "")
 except: sys.exit(1)
 
-if not all([BOT_TOKEN, API_ID, API_HASH]):
-    logger.critical("❌ НЕ ЗАПОЛНЕНЫ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!")
-    sys.exit(1)
+if not all([BOT_TOKEN, API_ID, API_HASH]): sys.exit(1)
 
 RE_IT_CMD = r'^\.(встал|зм|пв)\s*(\d+)$'
 
@@ -97,11 +92,9 @@ class Database:
     def __init__(self): self.path = DB_PATH
 
     def get_conn(self):
-        # check_same_thread=False решает проблемы с блокировками
         return aiosqlite.connect(self.path, timeout=30.0)
 
     async def init(self):
-        # Бэкап базы если есть
         if self.path.exists():
             try: shutil.copy(self.path, f"{self.path}.bak")
             except: pass
@@ -150,6 +143,7 @@ class Database:
     async def update_sub(self, uid: int, days: int):
         u_date = datetime.now()
         async with self.get_conn() as db:
+            # 1. Сначала узнаем текущую дату окончания
             async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c:
                 r = await c.fetchone()
                 if r:
@@ -159,9 +153,13 @@ class Database:
                     except: pass
         
         new_end = u_date + timedelta(days=days)
+        
         async with self.get_conn() as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, sub_end, joined_at) VALUES (?, ?, ?, ?)", 
-                             (uid, datetime.now().isoformat(), datetime.now().isoformat()))
+            # FIX: Исправлено количество аргументов (4 колонки = 4 значения)
+            await db.execute(
+                "INSERT OR IGNORE INTO users (user_id, username, sub_end, joined_at) VALUES (?, ?, ?, ?)", 
+                (uid, "Unknown", datetime.now().isoformat(), datetime.now().isoformat())
+            )
             await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), uid))
             await db.commit()
 
@@ -173,15 +171,13 @@ class Database:
         return code
 
     async def use_promo(self, uid: int, code: str) -> int:
-        code = code.strip() # Убираем пробелы
+        code = code.strip()
         async with self.get_conn() as db:
-            # COLLATE NOCASE = Неважен регистр (Code == code)
             async with db.execute("SELECT days, activations FROM promos WHERE code = ? COLLATE NOCASE", (code,)) as c:
                 row = await c.fetchone()
                 if not row or row[1] < 1: return 0
                 days = row[0]
             
-            # Обновляем
             await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ? COLLATE NOCASE", (code,))
             await db.execute("DELETE FROM promos WHERE activations <= 0")
             await db.commit()
@@ -246,7 +242,7 @@ class ReportManager:
     def get(self, cid, tid): return self._state.get(f"{cid}_{tid}")
 
 # =========================================================================
-# 🧠 ВОРКЕР (ПОЛНОСТЬЮ БЕЗОПАСНЫЙ)
+# 🧠 ВОРКЕР
 # =========================================================================
 
 class Worker:
@@ -280,9 +276,7 @@ class Worker:
         s_path = SESSION_DIR / f"session_{self.uid}"
         while True:
             try:
-                # Очистка памяти каждые 10 мин
-                gc.collect() 
-                
+                gc.collect()
                 if not s_path.with_suffix(".session").exists(): self.status = "🔴 Нет сессии (войдите заново)"; return
                 
                 self.client = TelegramClient(str(s_path), API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
@@ -297,7 +291,7 @@ class Worker:
             except Exception as e:
                 logger.error(f"Worker Error {self.uid}: {e}")
                 self.status = f"⚠️ Сбой: {str(e)[:15]}"
-                await asyncio.sleep(5) # Авто-рестарт
+                await asyncio.sleep(5)
             finally:
                 if self.client: await self.client.disconnect()
 
@@ -317,47 +311,37 @@ class Worker:
         @c.on(events.NewMessage(incoming=True))
         async def on_msg(e):
             if not self.ghost: pass
+            if e.chat_id in self.react_map: asyncio.create_task(self._safe_react(e.chat_id, e.id, self.react_map[e.chat_id]))
             
-            # Реакции
-            if e.chat_id in self.react_map: 
-                asyncio.create_task(self._safe_react(e.chat_id, e.id, self.react_map[e.chat_id]))
-            
-            # Рейд
             if e.sender_id and e.sender_id in self.raid_targets: 
                 asyncio.create_task(e.reply(random.choice(["🗑", "🤡", "🤫"])))
             
-            # AFK
             if self.is_afk and e.mentioned: 
-                asyncio.create_task(e.reply(f"💤 Я сейчас AFK: {self.afk_reason}"))
+                asyncio.create_task(e.reply(f"💤 AFK: {self.afk_reason}"))
             
-            # Логи
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             is_bot = e.sender.bot if (e.sender and isinstance(e.sender, User)) else False
             is_cmd = e.text and e.text.startswith(".")
             
             if not is_cmd and not is_bot:
-                self.reports.add(e.chat_id, tid, {'user': get_name(e), 'text': e.text or "[Файл]"})
+                self.reports.add(e.chat_id, tid, {'user': get_name(e), 'text': e.text or "[Медиа]"})
 
-        # --- КОМАНДЫ ---
-        
+        # КОМАНДЫ
         @c.on(events.NewMessage(pattern=r'^\.(?:флуд|spam)\s+(.+)'))
         async def flood(e):
             await e.delete()
-            # Умный парсинг аргументов
             raw = e.pattern_match.group(1).split()
             count, delay, txt = 10, 0.1, []
             c_set, d_set = False, False
-            
             for x in raw:
                 if x.isdigit() and not c_set: count=int(x); c_set=True
                 elif x.replace('.', '', 1).isdigit() and not d_set: delay=float(x); d_set=True
                 else: txt.append(x)
-            
             msg = " ".join(txt)
             if not msg: return
-            if delay < 0.05: delay = 0.05 # Защита от бана
+            if delay < 0.05: delay = 0.05
             
-            if self.flood_task and not self.flood_task.done(): return await self._tmsg(e, "⚠️ Уже спамлю!")
+            if self.flood_task and not self.flood_task.done(): return await self._tmsg(e, "⚠️ Спам уже активен!")
             
             async def run():
                 st = await e.respond(f"💣 <b>Спам:</b> {count}x\n⏱ <b>Задержка:</b> {delay}s\n📝 <b>Текст:</b> {msg}")
@@ -389,13 +373,9 @@ class Worker:
                     data.append([uid, first, user])
                     if cnt%2000==0: await st.edit(f"📊 Обработано: {cnt}...")
                 
-                # CSV Export
-                f = io.StringIO()
-                csv.writer(f).writerows([['ID', 'Имя', 'Юзернейм']] + data)
-                f.seek(0)
-                
+                f = io.StringIO(); csv.writer(f).writerows([['ID', 'Name', 'User']] + data); f.seek(0)
                 await st.delete()
-                await bot.send_document(self.uid, BufferedInputFile(f.getvalue().encode(), filename="scan_result.csv"), caption=f"✅ Найдено уникальных: {len(data)}")
+                await bot.send_document(self.uid, BufferedInputFile(f.getvalue().encode(), filename="scan_result.csv"), caption=f"✅ Найдено: {len(data)}")
                 del data; gc.collect()
             except Exception as ex: await st.edit(f"❌ Ошибка: {ex}")
 
@@ -415,7 +395,6 @@ class Worker:
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             if self.reports.add(e.chat_id, tid, {'user':get_name(e), 'action':e.pattern_match.group(1).lower(), 'number':e.pattern_match.group(2)}):
                 await self._safe_react(e.chat_id, e.id, '✍️')
-
         @c.on(events.NewMessage(pattern=r'^\.отчетыстарт$'))
         async def ds(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'drop'); await self._tmsg(e, "📦 Дроп-лог: Запущен")
         @c.on(events.NewMessage(pattern=r'^\.отчетыстоп$'))
@@ -508,7 +487,7 @@ async def mn(c: CallbackQuery, state: FSMContext):
     admin = (c.from_user.id == ADMIN_ID)
     await c.message.edit_text("🏠 Главное меню", reply_markup=kb(c.from_user.id, admin, sub))
 
-# AUTH LOGIC (ATOMIC)
+# AUTH
 @router.callback_query(F.data=="m_auth")
 async def ma(c: CallbackQuery): 
     if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нужна подписка", True)
@@ -561,7 +540,7 @@ async def mpro(c: CallbackQuery, state: FSMContext): await c.message.edit_text("
 
 @router.message(PromoS.CODE)
 async def proc(m: Message, state: FSMContext): 
-    d=await db.use_promo(m.from_user.id, m.text.strip()); await m.answer(f"✅ Успешно! Добавлено +{d} дней." if d else "❌ Неверный код или он закончился."); await state.clear()
+    d=await db.use_promo(m.from_user.id, m.text.strip()); await m.answer(f"✅ Активировано: +{d} дней" if d else "❌ Неверный код или он закончился."); await state.clear()
 
 # ADMIN
 @router.callback_query(F.data=="m_adm")
