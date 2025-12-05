@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v36.0 - RUSSIAN SHIELD
----------------------------------
-🔒 ДОСТУП: Без подписки видны только "Профиль" и "Промокод".
-🇷🇺 ЯЗЫК: Полный перевод интерфейса на русский.
-✅ FIX: Исправлены ошибки редактирования сообщений и падения воркера.
+💎 StatPro v37.0 - FINALITY EDITION
+-----------------------------------
+✅ FIX: Атомарное устранение ошибок авторизации Telethon (PhoneCodeExpiredError).
+👑 NAME: Чистое название 'StatPro'.
+🔒 UI: Строгая блокировка доступа для юзеров без подписки.
+🚀 CORE: Максимальная стабильность, __slots__, WAL DB, Sentinel System.
 """
 
 import asyncio
@@ -40,7 +41,7 @@ from aiogram.client.default import DefaultBotProperties
 
 # --- TELETHON ---
 from telethon import TelegramClient, events, types
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import User, Channel, Chat, ChatBannedRights
 
@@ -51,11 +52,11 @@ from PIL import Image
 # ⚙️ КОНФИГУРАЦИЯ
 # =========================================================================
 
-VERSION = "v36.0 RUSSIAN SHIELD"
+VERSION = "v37.0 FINALITY"
 MSK_TZ = timezone(timedelta(hours=3))
 BASE_DIR = Path("/app")
 SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "shield.db"
+DB_PATH = BASE_DIR / "finality.db"
 STATE_FILE = BASE_DIR / "state.json"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -155,7 +156,7 @@ class Database:
             await db.commit()
 
     async def create_promo(self, days: int, acts: int) -> str:
-        code = f"RU-{random.randint(1000,9999)}-{days}D"
+        code = f"FNL-{random.randint(1000,9999)}-{days}D"
         async with self.get_conn() as db:
             await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
             await db.commit()
@@ -230,7 +231,7 @@ class ReportManager:
     def get(self, cid, tid): return self._state.get(f"{cid}_{tid}")
 
 # =========================================================================
-# 🧠 ВОРКЕР (БЕЗОПАСНЫЙ)
+# 🧠 ВОРКЕР
 # =========================================================================
 
 class Worker:
@@ -300,7 +301,6 @@ class Worker:
             if not self.ghost: pass
             if e.chat_id in self.react_map: asyncio.create_task(self._react(e.chat_id, e.id, self.react_map[e.chat_id]))
             
-            # Безопасная проверка на рейд
             if e.sender_id and e.sender_id in self.raid_targets: 
                 asyncio.create_task(e.reply(random.choice(["🗑", "🤡", "🤫"])))
             
@@ -308,7 +308,6 @@ class Worker:
             
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             
-            # Проверка: Не бот и не команда
             is_bot = False
             if e.sender and isinstance(e.sender, User): is_bot = e.sender.bot
             is_cmd = e.text and e.text.startswith(".")
@@ -320,8 +319,7 @@ class Worker:
         @c.on(events.NewMessage(pattern=r'^\.(?:флуд|spam)\s+(.+)'))
         async def flood(e):
             await e.delete()
-            raw = e.pattern_match.group(1).split()
-            count, delay, txt = 10, 0.1, []
+            raw = e.pattern_match.group(1).split(); count, delay, txt = 10, 0.1, []
             c_set, d_set = False, False
             for x in raw:
                 if x.isdigit() and not c_set: count=int(x); c_set=True
@@ -330,7 +328,6 @@ class Worker:
             msg = " ".join(txt)
             if not msg: return
             if delay < 0.05: delay = 0.05
-            
             if self.flood_task and not self.flood_task.done(): return await self._tmsg(e, "⚠️ Занято")
             
             async def run():
@@ -361,9 +358,7 @@ class Worker:
                     data.append([uid, first, user])
                     if cnt%2000==0: await st.edit(f"📊 {cnt}...")
                 
-                f = io.StringIO()
-                csv.writer(f).writerows([['ID', 'Name', 'User']] + data)
-                f.seek(0)
+                f = io.StringIO(); csv.writer(f).writerows([['ID', 'Name', 'User']] + data); f.seek(0)
                 await st.delete()
                 await bot.send_document(self.uid, BufferedInputFile(f.getvalue().encode(), filename="scan.csv"), caption=f"✅ Найдено: {len(data)}")
                 del data; gc.collect()
@@ -385,7 +380,6 @@ class Worker:
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             if self.reports.add(e.chat_id, tid, {'user':get_sender_name(e), 'action':e.pattern_match.group(1).lower(), 'number':e.pattern_match.group(2)}):
                 await self._react(e.chat_id, e.id, '✍️')
-
         @c.on(events.NewMessage(pattern=r'^\.отчетыстарт$'))
         async def ds(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'drop'); await self._tmsg(e, "📦 Лог запущен", 3)
         @c.on(events.NewMessage(pattern=r'^\.отчетыстоп$'))
@@ -449,23 +443,18 @@ class AuthS(StatesGroup): PH=State(); CO=State(); PA=State()
 class PromoS(StatesGroup): CODE=State()
 class AdmS(StatesGroup): D=State(); A=State(); U=State(); UD=State()
 
-# ГЕНЕРАТОР МЕНЮ
 def kb(uid, is_admin, has_sub):
-    """Генерация меню в зависимости от подписки"""
     k = []
     
-    # 1. Секция доступа (Только для активных или админов)
     if has_sub or is_admin:
         k.append([InlineKeyboardButton(text="📊 Отчеты", callback_data="m_rep"),
                   InlineKeyboardButton(text="⚙️ Бот", callback_data="m_bot")])
         k.append([InlineKeyboardButton(text="🔑 Вход", callback_data="m_auth"),
                   InlineKeyboardButton(text="📚 Инструкция", callback_data="m_g")])
 
-    # 2. Секция для всех
     k.append([InlineKeyboardButton(text="🎟 Промокод", callback_data="m_pro"),
               InlineKeyboardButton(text="👤 Профиль", callback_data="m_p")])
 
-    # 3. Админка
     if is_admin:
         k.append([InlineKeyboardButton(text="⚡️ Статус", callback_data="ad_stat"), 
                   InlineKeyboardButton(text="👑 Админ", callback_data="m_adm")])
@@ -480,7 +469,7 @@ async def start(m: Message, state: FSMContext):
     sub = await db.check_sub(m.from_user.id)
     admin = (m.from_user.id == ADMIN_ID)
     
-    await m.answer("💎 <b>StatPro RUSSIAN SHIELD</b>", reply_markup=kb(m.from_user.id, admin, sub))
+    await m.answer("💎 <b>StatPro</b>", reply_markup=kb(m.from_user.id, admin, sub))
 
 @router.callback_query(F.data=="menu")
 async def mn(c: CallbackQuery, state: FSMContext): 
@@ -489,7 +478,7 @@ async def mn(c: CallbackQuery, state: FSMContext):
     admin = (c.from_user.id == ADMIN_ID)
     await c.message.edit_text("🏠 Главное меню", reply_markup=kb(c.from_user.id, admin, sub))
 
-# AUTH (С ЗАЩИТОЙ ДОСТУПА)
+# AUTH FIX: Atomic error handling
 @router.callback_query(F.data=="m_auth")
 async def ma(c: CallbackQuery): 
     if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
@@ -513,19 +502,49 @@ async def aph(c: CallbackQuery, state: FSMContext):
 async def aphs(m: Message, state: FSMContext): 
     try:
         cl=TelegramClient(str(SESSION_DIR/f"session_{m.from_user.id}"), API_ID, API_HASH); await cl.connect()
-        r=await cl.send_code_request(m.text); await state.update_data(p=m.text,h=r.phone_code_hash,cl=cl); await m.answer("📩 Код:"); await state.set_state(AuthS.CO)
-    except Exception as e: await m.answer(f"Ошибка: {e}"); await state.clear()
+        r=await cl.send_code_request(m.text); await state.update_data(p=m.text,h=r.phone_code_hash,cl=cl); await m.answer("📩 Введите код:"); await state.set_state(AuthS.CO)
+    except Exception as e: await m.answer(f"❌ Ошибка отправки: {e}"); await state.clear()
 
 @router.message(AuthS.CO)
 async def aco(m: Message, state: FSMContext): 
     d=await state.get_data(); cl=d['cl']
-    try: await cl.sign_in(phone=d['p'],code=m.text,phone_code_hash=d['h']); await m.answer("✅"); await cl.disconnect(); await mng_w(m.from_user.id,'start'); await state.clear()
-    except SessionPasswordNeededError: await m.answer("🔒 Пароль 2FA:"); await state.set_state(AuthS.PA)
-    except Exception as e: await m.answer(f"Ошибка: {e}"); await state.clear()
+    
+    async def cleanup_and_fail(error_msg):
+        if cl: await cl.disconnect()
+        await m.answer(f"❌ {error_msg}. Повторите с начала.")
+        await state.clear()
+        
+    try: 
+        await cl.sign_in(phone=d['p'],code=m.text,phone_code_hash=d['h']); 
+        
+        # УСПЕХ
+        await m.answer("✅ Успешно!"); 
+        await cl.disconnect(); 
+        await mng_w(m.from_user.id,'start'); 
+        await state.clear()
+        
+    except SessionPasswordNeededError: 
+        await m.answer("🔒 Введите 2FA пароль:"); 
+    except PhoneCodeExpiredError:
+        logger.warning(f"Auth failed: Code expired for {m.from_user.id}")
+        await cleanup_and_fail("Код истек или был использован повторно")
+    except Exception as e:
+        logger.error(f"Auth final error for {m.from_user.id}: {e}")
+        await cleanup_and_fail(f"Ошибка входа: {str(e)[:40]}")
 
 @router.message(AuthS.PA)
 async def apa(m: Message, state: FSMContext): 
-    d=await state.get_data(); cl=d['cl']; await cl.sign_in(password=m.text); await m.answer("✅"); await cl.disconnect(); await mng_w(m.from_user.id,'start'); await state.clear()
+    d=await state.get_data(); cl=d['cl']
+    try:
+        await cl.sign_in(password=m.text); 
+        await m.answer("✅ Успешно!"); 
+        await cl.disconnect(); 
+        await mng_w(m.from_user.id,'start'); 
+        await state.clear()
+    except Exception as e:
+        await m.answer(f"❌ Ошибка 2FA: {e}");
+        await cl.disconnect()
+        await state.clear()
 
 # PROMO
 @router.callback_query(F.data=="m_pro")
@@ -541,7 +560,6 @@ async def madm(c: CallbackQuery): await c.message.edit_text("Админка", re
 
 @router.callback_query(F.data=="ad_stat")
 async def ad_stat(c: CallbackQuery):
-    """МОНИТОРИНГ С FIX 'MESSAGE NOT MODIFIED'"""
     total = len(W_POOL)
     active = sum(1 for w in W_POOL.values() if "Активен" in w.status)
     users, subs = await db.get_stats()
@@ -576,7 +594,10 @@ async def mbot(c: CallbackQuery):
     s="🟢" if c.from_user.id in W_POOL else "🔴"
     await c.message.edit_text(f"Статус бота: {s}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Запуск",callback_data="w_on"),InlineKeyboardButton(text="Стоп",callback_data="w_off")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 @router.callback_query(F.data=="w_on")
-async def won(c: CallbackQuery): await mng_w(c.from_user.id,'start'); await mbot(c)
+async def won(c: CallbackQuery): 
+    await c.answer("⏳ Запускаю Worker...", show_alert=False) 
+    await mng_w(c.from_user.id,'start')
+    await mbot(c)
 @router.callback_query(F.data=="w_off")
 async def woff(c: CallbackQuery): await mng_w(c.from_user.id,'stop'); await mbot(c)
 
@@ -589,8 +610,7 @@ async def mg(c: CallbackQuery):
         "<b>📊 Скан:</b> <code>.scan all</code> (в файл)\n"
         "<b>☠️ Рейд:</b> <code>.raid</code> (реплай) / <code>.raidstop</code>\n"
         "<b>🔥 Реакции:</b> <code>.react 👍</code>\n"
-        "<b>👻 Призрак:</b> <code>.ghost on/off</code>\n"
-        "<b>💻 IT-Смена:</b> <code>.айтистарт</code>, <code>.встал 1</code>, <code>.айтистоп</code>\n",
+        "<b>👻 Призрак:</b> <code>.ghost on/off</code>\n",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]])
     )
 
