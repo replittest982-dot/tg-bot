@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v35.0 - ETERNITY EDITION
------------------------------------
-✅ FIX: Полная защита от AttributeError (NoneType, Channel).
-👑 NEW: Админ-мониторинг активных сессий.
-🚀 CORE: WAL Mode DB, Smart Flood, CSV Scan.
-🛡 STABLE: Воркер не падает от ошибок Telegram API.
+💎 StatPro v36.0 - RUSSIAN SHIELD
+---------------------------------
+🔒 ДОСТУП: Без подписки видны только "Профиль" и "Промокод".
+🇷🇺 ЯЗЫК: Полный перевод интерфейса на русский.
+✅ FIX: Исправлены ошибки редактирования сообщений и падения воркера.
 """
 
 import asyncio
@@ -49,14 +48,14 @@ import qrcode
 from PIL import Image
 
 # =========================================================================
-# ⚙️ CONFIG
+# ⚙️ КОНФИГУРАЦИЯ
 # =========================================================================
 
-VERSION = "v35.0 ETERNITY"
+VERSION = "v36.0 RUSSIAN SHIELD"
 MSK_TZ = timezone(timedelta(hours=3))
 BASE_DIR = Path("/app")
 SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "eternity.db"
+DB_PATH = BASE_DIR / "shield.db"
 STATE_FILE = BASE_DIR / "state.json"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +64,7 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
     handlers=[logging.StreamHandler()]
 )
-logger = logging.getLogger("Eternity")
+logger = logging.getLogger("StatPro")
 
 try:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -80,7 +79,7 @@ if not all([BOT_TOKEN, API_ID, API_HASH]): sys.exit(1)
 RE_IT_CMD = r'^\.(встал|зм|пв)\s*(\d+)$'
 
 # =========================================================================
-# 🗄️ DATABASE (HIGH PERFORMANCE)
+# 🗄️ БАЗА ДАННЫХ
 # =========================================================================
 
 class Database:
@@ -119,7 +118,6 @@ class Database:
 
     async def upsert_user(self, uid: int, uname: str):
         async with self.get_conn() as db:
-            # Atomic check
             cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (uid,))
             if not await cursor.fetchone():
                 await db.execute("INSERT INTO users (user_id, username, sub_end, joined_at) VALUES (?, ?, ?, ?)", 
@@ -157,7 +155,7 @@ class Database:
             await db.commit()
 
     async def create_promo(self, days: int, acts: int) -> str:
-        code = f"ET-{random.randint(1000,9999)}-{days}D"
+        code = f"RU-{random.randint(1000,9999)}-{days}D"
         async with self.get_conn() as db:
             await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
             await db.commit()
@@ -178,7 +176,6 @@ class Database:
     async def get_stats(self):
         async with self.get_conn() as db:
             async with db.execute("SELECT COUNT(*) FROM users") as c: total = (await c.fetchone())[0]
-            # Active subs
             now = datetime.now().isoformat()
             async with db.execute("SELECT COUNT(*) FROM users WHERE sub_end > ?", (now,)) as c: active = (await c.fetchone())[0]
         return total, active
@@ -186,7 +183,7 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 📊 REPORTS (PERSISTENT)
+# 📊 МЕНЕДЖЕР ОТЧЕТОВ
 # =========================================================================
 
 class ReportPersistence:
@@ -208,7 +205,6 @@ class ReportPersistence:
 class ReportManager:
     __slots__ = ('_state',)
     def __init__(self): self._state = ReportPersistence.load()
-
     def _sync(self): ReportPersistence.save(self._state)
 
     def start(self, cid, tid, rtype):
@@ -234,7 +230,7 @@ class ReportManager:
     def get(self, cid, tid): return self._state.get(f"{cid}_{tid}")
 
 # =========================================================================
-# 🧠 WORKER (ERROR-PROOF)
+# 🧠 ВОРКЕР (БЕЗОПАСНЫЙ)
 # =========================================================================
 
 class Worker:
@@ -250,16 +246,16 @@ class Worker:
         self.raid_targets: Set[int] = set()
         self.react_map: Dict[int, str] = {}
         self.ghost = False
-        self.status = "⚪️ Init"
+        self.status = "⚪️ Инициализация"
 
     async def start(self):
-        if not await db.check_sub(self.uid): self.status = "⛔️ No Sub"; return False
+        if not await db.check_sub(self.uid): self.status = "⛔️ Нет подписки"; return False
         if self.task and not self.task.done(): self.task.cancel()
         self.task = asyncio.create_task(self._run())
         return True
 
     async def stop(self):
-        self.status = "🔴 Stopped"
+        self.status = "🔴 Остановлен"
         if self.flood_task: self.flood_task.cancel()
         if self.client: await self.client.disconnect()
         if self.task: self.task.cancel()
@@ -268,76 +264,59 @@ class Worker:
         s_path = SESSION_DIR / f"session_{self.uid}"
         while True:
             try:
-                if not s_path.with_suffix(".session").exists(): self.status = "🔴 No Session"; return
+                if not s_path.with_suffix(".session").exists(): self.status = "🔴 Нет сессии"; return
                 self.client = TelegramClient(str(s_path), API_ID, API_HASH, connection_retries=None, auto_reconnect=True)
                 await self.client.connect()
-                if not await self.client.is_user_authorized(): self.status = "🔴 Auth Failed"; return
+                if not await self.client.is_user_authorized(): self.status = "🔴 Ошибка входа"; return
                 
-                self.status = "🟢 Active"
+                self.status = "🟢 Активен"
                 self._bind()
                 await self.client.run_until_disconnected()
             except Exception as e:
                 logger.error(f"Worker {self.uid} crash: {e}")
-                self.status = f"⚠️ Error: {str(e)[:20]}..."
-                await asyncio.sleep(5) # Recovery wait
+                self.status = f"⚠️ Ошибка: {str(e)[:15]}..."
+                await asyncio.sleep(5)
             finally:
                 if self.client: await self.client.disconnect()
 
     def _bind(self):
         c = self.client
 
-        # --- FIX: SAFE SENDER EXTRACTION ---
         def get_sender_name(event):
-            """Идеальное извлечение имени без ошибок NoneType"""
             s = event.sender
             if s is None:
-                # Это может быть анонимный админ или канал
-                if event.chat: return getattr(event.chat, 'title', 'Anonymous')
-                return 'Unknown'
-            
+                if event.chat: return getattr(event.chat, 'title', 'Аноним')
+                return 'Неизвестно'
             if isinstance(s, User):
-                # Проверка на удаленный аккаунт или отсутствие имени
-                if s.deleted: return f"Deleted_{s.id}"
+                if s.deleted: return f"Удален_{s.id}"
                 name = s.first_name or ""
                 if s.last_name: name += f" {s.last_name}"
                 return name if name.strip() else s.username or f"User_{s.id}"
-            
-            if isinstance(s, (Channel, Chat)):
-                return s.title
-            
-            return 'Unknown Type'
+            if isinstance(s, (Channel, Chat)): return s.title
+            return 'Неизвестно'
 
         @c.on(events.NewMessage(incoming=True))
         async def on_msg(e):
-            # 1. Ghost
-            if not self.ghost: pass # Let Telethon handle read status
-            
-            # 2. React
+            if not self.ghost: pass
             if e.chat_id in self.react_map: asyncio.create_task(self._react(e.chat_id, e.id, self.react_map[e.chat_id]))
             
-            # 3. Raid
-            # FIX: Check sender_id validity
+            # Безопасная проверка на рейд
             if e.sender_id and e.sender_id in self.raid_targets: 
-                asyncio.create_task(e.reply(random.choice(["🗑", "🤡", "Shh"])))
+                asyncio.create_task(e.reply(random.choice(["🗑", "🤡", "🤫"])))
             
-            # 4. AFK
             if self.is_afk and e.mentioned: asyncio.create_task(e.reply(f"💤 AFK: {self.afk_reason}"))
             
-            # 5. Drop Log (CRITICAL FIX APPLIED HERE)
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
             
-            # FIX: Check if sender is bot properly using isinstance
+            # Проверка: Не бот и не команда
             is_bot = False
-            if e.sender and isinstance(e.sender, User):
-                is_bot = e.sender.bot
-            
-            # FIX: Check command start
+            if e.sender and isinstance(e.sender, User): is_bot = e.sender.bot
             is_cmd = e.text and e.text.startswith(".")
             
             if not is_cmd and not is_bot:
-                self.reports.add(e.chat_id, tid, {'user': get_sender_name(e), 'text': e.text or "[Media]"})
+                self.reports.add(e.chat_id, tid, {'user': get_sender_name(e), 'text': e.text or "[Медиа]"})
 
-        # COMMANDS
+        # КОМАНДЫ
         @c.on(events.NewMessage(pattern=r'^\.(?:флуд|spam)\s+(.+)'))
         async def flood(e):
             await e.delete()
@@ -351,38 +330,34 @@ class Worker:
             msg = " ".join(txt)
             if not msg: return
             if delay < 0.05: delay = 0.05
-            if self.flood_task and not self.flood_task.done(): return await self._tmsg(e, "⚠️ Busy")
+            
+            if self.flood_task and not self.flood_task.done(): return await self._tmsg(e, "⚠️ Занято")
             
             async def run():
                 st = await e.respond(f"💣 {count}x | {delay}s\n📝 {msg}")
                 try:
                     for _ in range(count): await c.send_message(e.chat_id, msg); await asyncio.sleep(delay)
-                    await st.edit("✅"); await asyncio.sleep(1); await st.delete()
+                    await st.edit("✅ Готово"); await asyncio.sleep(1); await st.delete()
                 except: await st.delete()
             self.flood_task = asyncio.create_task(run())
 
         @c.on(events.NewMessage(pattern=r'^\.флудстоп$'))
         async def fstop(e): 
-            if self.flood_task: self.flood_task.cancel(); await self._tmsg(e, "🛑")
+            if self.flood_task: self.flood_task.cancel(); await self._tmsg(e, "🛑 Стоп")
 
         @c.on(events.NewMessage(pattern=r'^\.scan(?:\s+(\d+|all))?$'))
         async def scan(e):
             await e.delete()
             limit = 1000000 if e.pattern_match.group(1)=='all' else int(e.pattern_match.group(1) or 100)
-            st = await e.respond(f"📊 Scanning {limit}...")
+            st = await e.respond(f"📊 Сканирую {limit}...")
             data = []
             try:
                 cnt = 0
                 async for m in c.iter_messages(e.chat_id, limit=limit):
                     cnt+=1
-                    # FIX: Safe extraction for CSV
-                    uid = m.sender_id or 0
-                    first = ""
-                    user = ""
+                    uid = m.sender_id or 0; first = ""; user = ""
                     if m.sender and isinstance(m.sender, User):
-                        first = m.sender.first_name or ""
-                        user = m.sender.username or ""
-                    
+                        first = m.sender.first_name or ""; user = m.sender.username or ""
                     data.append([uid, first, user])
                     if cnt%2000==0: await st.edit(f"📊 {cnt}...")
                 
@@ -390,13 +365,13 @@ class Worker:
                 csv.writer(f).writerows([['ID', 'Name', 'User']] + data)
                 f.seek(0)
                 await st.delete()
-                await bot.send_document(self.uid, BufferedInputFile(f.getvalue().encode(), filename="scan.csv"), caption=f"✅ {len(data)}")
+                await bot.send_document(self.uid, BufferedInputFile(f.getvalue().encode(), filename="scan.csv"), caption=f"✅ Найдено: {len(data)}")
                 del data; gc.collect()
             except Exception as ex: await st.edit(f"❌ {ex}")
 
-        # REPORT CMDS
+        # ОТЧЕТЫ
         @c.on(events.NewMessage(pattern=r'^\.айтистарт$'))
-        async def its(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'it'); await self._tmsg(e, "💻 Start")
+        async def its(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'it'); await self._tmsg(e, "💻 Смена начата", 3)
         @c.on(events.NewMessage(pattern=r'^\.айтистоп$'))
         async def itst(e): 
             d=self.reports.stop(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0))
@@ -408,19 +383,21 @@ class Worker:
         @c.on(events.NewMessage(pattern=RE_IT_CMD))
         async def itr(e):
             tid = e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0)
-            # FIX: Safe sender name
-            uname = get_sender_name(e)
-            if self.reports.add(e.chat_id, tid, {'user': uname, 'action':e.pattern_match.group(1).lower(), 'number':e.pattern_match.group(2)}):
+            if self.reports.add(e.chat_id, tid, {'user':get_sender_name(e), 'action':e.pattern_match.group(1).lower(), 'number':e.pattern_match.group(2)}):
                 await self._react(e.chat_id, e.id, '✍️')
 
         @c.on(events.NewMessage(pattern=r'^\.отчетыстарт$'))
-        async def ds(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'drop'); await self._tmsg(e, "📦 Start")
+        async def ds(e): self.reports.start(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0), 'drop'); await self._tmsg(e, "📦 Лог запущен", 3)
         @c.on(events.NewMessage(pattern=r'^\.отчетыстоп$'))
         async def dst(e):
             d=self.reports.stop(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0))
             if d: await self._send_rep(d['data'], 'drop')
+        @c.on(events.NewMessage(pattern=r'^\.отчетдропы$'))
+        async def dsv(e):
+             d=self.reports.get(e.chat_id, e.reply_to.reply_to_msg_id if e.reply_to else (e.reply_to_msg_id or 0))
+             if d and d['type']=='drop': await self._send_rep(d['data'], 'drop')
 
-        # UTILS
+        # УТИЛИТЫ
         @c.on(events.NewMessage(pattern=r'^\.ping$'))
         async def pg(e): s=time.perf_counter(); m=await e.respond("🏓"); await m.edit(f"🏓 {((time.perf_counter()-s)*1000):.1f}ms"); await asyncio.sleep(2); await m.delete(); await e.delete()
         @c.on(events.NewMessage(pattern=r'^\.react (.+)'))
@@ -428,9 +405,9 @@ class Worker:
         @c.on(events.NewMessage(pattern=r'^\.ghost (on|off)'))
         async def gh(e): await e.delete(); self.ghost=(e.pattern_match.group(1)=='on'); await self._tmsg(e, f"👻 {self.ghost}")
         @c.on(events.NewMessage(pattern=r'^\.raid$'))
-        async def rd(e): await e.delete(); (self.raid_targets.add((await e.get_reply_message()).sender_id) if e.is_reply else None); await self._tmsg(e, "☠️ Raid")
+        async def rd(e): await e.delete(); (self.raid_targets.add((await e.get_reply_message()).sender_id) if e.is_reply else None); await self._tmsg(e, "☠️ Рейд")
         @c.on(events.NewMessage(pattern=r'^\.raidstop$'))
-        async def rds(e): await e.delete(); self.raid_targets.clear(); await self._tmsg(e, "🏳️ Stop")
+        async def rds(e): await e.delete(); self.raid_targets.clear(); await self._tmsg(e, "🏳️ Стоп")
 
     async def _react(self, cid, mid, e):
         try: await self.client(SendReactionRequest(cid, mid, reaction=[types.ReactionEmoji(emoticon=e)]))
@@ -442,7 +419,7 @@ class Worker:
 
     async def _send_rep(self, data, rt):
         if rt == 'it':
-            l = ["💻 IT REPORT", "", "<code>TIME  |ACT   |NUM</code>"]
+            l = ["💻 ОТЧЕТ IT", "", "<code>ВРЕМЯ |АКТ   |НОМЕР</code>"]
             for r in data: l.append(f"<code>{r['time']:<6}|{r['action'][:3].upper():<6}|{r['number']:<10}</code>")
             try: await bot.send_message(self.uid, "\n".join(l), parse_mode='HTML')
             except: pass
@@ -452,7 +429,7 @@ class Worker:
             except: pass
 
 # =========================================================================
-# 🤖 BOT INTERFACE
+# 🤖 ИНТЕРФЕЙС БОТА
 # =========================================================================
 
 W_POOL: Dict[int, Worker] = {}
@@ -472,53 +449,79 @@ class AuthS(StatesGroup): PH=State(); CO=State(); PA=State()
 class PromoS(StatesGroup): CODE=State()
 class AdmS(StatesGroup): D=State(); A=State(); U=State(); UD=State()
 
-def kb(uid):
-    k=[[InlineKeyboardButton(text="📊 Отчеты",callback_data="m_rep"),InlineKeyboardButton(text="🤖 Бот",callback_data="m_bot")],
-       [InlineKeyboardButton(text="🔑 Вход",callback_data="m_auth"),InlineKeyboardButton(text="🎟 Промо",callback_data="m_pro")],
-       [InlineKeyboardButton(text="📚 Guide",callback_data="m_g"),InlineKeyboardButton(text="👤 Prof",callback_data="m_p")]]
-    if uid==ADMIN_ID: k.append([InlineKeyboardButton(text="⚡️ Статус",callback_data="ad_stat"), InlineKeyboardButton(text="👑 Админ",callback_data="m_adm")])
+# ГЕНЕРАТОР МЕНЮ
+def kb(uid, is_admin, has_sub):
+    """Генерация меню в зависимости от подписки"""
+    k = []
+    
+    # 1. Секция доступа (Только для активных или админов)
+    if has_sub or is_admin:
+        k.append([InlineKeyboardButton(text="📊 Отчеты", callback_data="m_rep"),
+                  InlineKeyboardButton(text="⚙️ Бот", callback_data="m_bot")])
+        k.append([InlineKeyboardButton(text="🔑 Вход", callback_data="m_auth"),
+                  InlineKeyboardButton(text="📚 Инструкция", callback_data="m_g")])
+
+    # 2. Секция для всех
+    k.append([InlineKeyboardButton(text="🎟 Промокод", callback_data="m_pro"),
+              InlineKeyboardButton(text="👤 Профиль", callback_data="m_p")])
+
+    # 3. Админка
+    if is_admin:
+        k.append([InlineKeyboardButton(text="⚡️ Статус", callback_data="ad_stat"), 
+                  InlineKeyboardButton(text="👑 Админ", callback_data="m_adm")])
+        
     return InlineKeyboardMarkup(inline_keyboard=k)
 
 @router.message(Command("start"))
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    await db.upsert_user(m.from_user.id, m.from_user.username or "U")
-    await m.answer("💎 <b>StatPro ETERNITY</b>", reply_markup=kb(m.from_user.id))
+    await db.upsert_user(m.from_user.id, m.from_user.username or "Unknown")
+    
+    sub = await db.check_sub(m.from_user.id)
+    admin = (m.from_user.id == ADMIN_ID)
+    
+    await m.answer("💎 <b>StatPro RUSSIAN SHIELD</b>", reply_markup=kb(m.from_user.id, admin, sub))
 
 @router.callback_query(F.data=="menu")
-async def mn(c: CallbackQuery, state: FSMContext): await state.clear(); await c.message.edit_text("🏠 Menu", reply_markup=kb(c.from_user.id))
+async def mn(c: CallbackQuery, state: FSMContext): 
+    await state.clear()
+    sub = await db.check_sub(c.from_user.id)
+    admin = (c.from_user.id == ADMIN_ID)
+    await c.message.edit_text("🏠 Главное меню", reply_markup=kb(c.from_user.id, admin, sub))
 
-# AUTH FIX
+# AUTH (С ЗАЩИТОЙ ДОСТУПА)
 @router.callback_query(F.data=="m_auth")
-async def ma(c: CallbackQuery): await c.message.edit_text("Method:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="QR",callback_data="a_qr"),InlineKeyboardButton(text="Phone",callback_data="a_ph")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+async def ma(c: CallbackQuery): 
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
+    await c.message.edit_text("Метод входа:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR-код",callback_data="a_qr"),InlineKeyboardButton(text="📱 Телефон",callback_data="a_ph")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 
 @router.callback_query(F.data=="a_qr")
 async def aqr(c: CallbackQuery):
-    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ No Sub", True)
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
     path=SESSION_DIR/f"session_{c.from_user.id}"; cl=TelegramClient(str(path), API_ID, API_HASH); await cl.connect()
     qr=await cl.qr_login(); i=qrcode.make(qr.url).convert("RGB"); b=io.BytesIO(); i.save(b,"PNG"); b.seek(0)
     m=await c.message.answer_photo(BufferedInputFile(b.read(),"qr.png"))
-    try: await qr.wait(60); await m.delete(); await c.message.answer("✅"); await cl.disconnect(); await mng_w(c.from_user.id,'start')
+    try: await qr.wait(60); await m.delete(); await c.message.answer("✅ Подключено"); await cl.disconnect(); await mng_w(c.from_user.id,'start')
     except: await m.delete()
 
 @router.callback_query(F.data=="a_ph")
 async def aph(c: CallbackQuery, state: FSMContext): 
-    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ No Sub", True)
-    await c.message.edit_text("Phone:"); await state.set_state(AuthS.PH)
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
+    await c.message.edit_text("📱 Введите номер:"); await state.set_state(AuthS.PH)
 
 @router.message(AuthS.PH)
 async def aphs(m: Message, state: FSMContext): 
     try:
         cl=TelegramClient(str(SESSION_DIR/f"session_{m.from_user.id}"), API_ID, API_HASH); await cl.connect()
-        r=await cl.send_code_request(m.text); await state.update_data(p=m.text,h=r.phone_code_hash,cl=cl); await m.answer("Code:"); await state.set_state(AuthS.CO)
-    except Exception as e: await m.answer(f"Error: {e}"); await state.clear()
+        r=await cl.send_code_request(m.text); await state.update_data(p=m.text,h=r.phone_code_hash,cl=cl); await m.answer("📩 Код:"); await state.set_state(AuthS.CO)
+    except Exception as e: await m.answer(f"Ошибка: {e}"); await state.clear()
 
 @router.message(AuthS.CO)
 async def aco(m: Message, state: FSMContext): 
     d=await state.get_data(); cl=d['cl']
     try: await cl.sign_in(phone=d['p'],code=m.text,phone_code_hash=d['h']); await m.answer("✅"); await cl.disconnect(); await mng_w(m.from_user.id,'start'); await state.clear()
-    except SessionPasswordNeededError: await m.answer("2FA:"); await state.set_state(AuthS.PA)
-    except Exception as e: await m.answer(f"Expired/Error: {e}"); await state.clear()
+    except SessionPasswordNeededError: await m.answer("🔒 Пароль 2FA:"); await state.set_state(AuthS.PA)
+    except Exception as e: await m.answer(f"Ошибка: {e}"); await state.clear()
 
 @router.message(AuthS.PA)
 async def apa(m: Message, state: FSMContext): 
@@ -526,53 +529,52 @@ async def apa(m: Message, state: FSMContext):
 
 # PROMO
 @router.callback_query(F.data=="m_pro")
-async def mpro(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Code:"); await state.set_state(PromoS.CODE) 
+async def mpro(c: CallbackQuery, state: FSMContext): await c.message.edit_text("🎟 Введите промокод:"); await state.set_state(PromoS.CODE) 
 
 @router.message(PromoS.CODE)
 async def proc(m: Message, state: FSMContext): 
-    d=await db.use_promo(m.from_user.id, m.text.strip()); await m.answer(f"✅ +{d}d" if d else "❌"); await state.clear()
+    d=await db.use_promo(m.from_user.id, m.text.strip()); await m.answer(f"✅ Активировано: +{d} дней" if d else "❌ Неверный код"); await state.clear()
 
 # ADMIN
 @router.callback_query(F.data=="m_adm")
-async def madm(c: CallbackQuery): await c.message.edit_text("Adm", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="+Promo",callback_data="ad_p"),InlineKeyboardButton(text="Grant",callback_data="ad_g")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+async def madm(c: CallbackQuery): await c.message.edit_text("Админка", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Промо",callback_data="ad_p"),InlineKeyboardButton(text="🎁 Выдать",callback_data="ad_g")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 
 @router.callback_query(F.data=="ad_stat")
 async def ad_stat(c: CallbackQuery):
-    """NEW: Worker Monitoring"""
+    """МОНИТОРИНГ С FIX 'MESSAGE NOT MODIFIED'"""
     total = len(W_POOL)
-    active = sum(1 for w in W_POOL.values() if "Active" in w.status)
+    active = sum(1 for w in W_POOL.values() if "Активен" in w.status)
     users, subs = await db.get_stats()
+    ts = datetime.now(MSK_TZ).strftime("%H:%M:%S")
     
-    msg = (f"⚡️ <b>SYSTEM STATUS</b>\n"
-           f"Workers: {total} (Active: {active})\n"
-           f"DB Users: {users} (Subs: {subs})\n\n"
-           f"<b>Active Sessions:</b>\n")
+    msg = (f"⚡️ <b>СТАТУС СИСТЕМЫ</b> [{ts}]\n"
+           f"Воркеры: {total} (Активны: {active})\n"
+           f"Юзеры БД: {users} (Подписки: {subs})\n\n"
+           f"<b>Сессии:</b>\n")
+    for uid, w in W_POOL.items(): msg += f"• <code>{uid}</code>: {w.status}\n"
+    if not W_POOL: msg += "Нет активных сессий."
     
-    for uid, w in W_POOL.items():
-        msg += f"• <code>{uid}</code>: {w.status}\n"
-    
-    if not W_POOL: msg += "No workers running."
-    
-    await c.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Refresh",callback_data="ad_stat")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+    await c.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить",callback_data="ad_stat")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 
 @router.callback_query(F.data=="ad_p")
-async def adp(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Days:"); await state.set_state(AdmS.D)
+async def adp(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Дней:"); await state.set_state(AdmS.D)
 @router.message(AdmS.D)
-async def adpd(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("Acts:"); await state.set_state(AdmS.A)
+async def adpd(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("Активаций:"); await state.set_state(AdmS.A)
 @router.message(AdmS.A)
-async def adpa(m: Message, state: FSMContext): d=await state.get_data(); c=await db.create_promo(d['d'],int(m.text)); await m.answer(f"<code>{c}</code>"); await state.clear()
+async def adpa(m: Message, state: FSMContext): d=await state.get_data(); c=await db.create_promo(d['d'],int(m.text)); await m.answer(f"Код: <code>{c}</code>"); await state.clear()
 @router.callback_query(F.data=="ad_g")
-async def adg(c: CallbackQuery, state: FSMContext): await c.message.edit_text("UID:"); await state.set_state(AdmS.U)
+async def adg(c: CallbackQuery, state: FSMContext): await c.message.edit_text("ID юзера:"); await state.set_state(AdmS.U)
 @router.message(AdmS.U)
-async def adgu(m: Message, state: FSMContext): await state.update_data(u=m.text); await m.answer("Days:"); await state.set_state(AdmS.UD)
+async def adgu(m: Message, state: FSMContext): await state.update_data(u=m.text); await m.answer("Дней:"); await state.set_state(AdmS.UD)
 @router.message(AdmS.UD)
-async def adgd(m: Message, state: FSMContext): d=await state.get_data(); await db.update_sub(int(d['u']),int(m.text)); await m.answer("✅"); await state.clear()
+async def adgd(m: Message, state: FSMContext): d=await state.get_data(); await db.update_sub(int(d['u']),int(m.text)); await m.answer("✅ Выдано"); await state.clear()
 
 # MISC
 @router.callback_query(F.data=="m_bot")
 async def mbot(c: CallbackQuery):
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
     s="🟢" if c.from_user.id in W_POOL else "🔴"
-    await c.message.edit_text(f"Status: {s}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Start",callback_data="w_on"),InlineKeyboardButton(text="Stop",callback_data="w_off")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+    await c.message.edit_text(f"Статус бота: {s}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Запуск",callback_data="w_on"),InlineKeyboardButton(text="Стоп",callback_data="w_off")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 @router.callback_query(F.data=="w_on")
 async def won(c: CallbackQuery): await mng_w(c.from_user.id,'start'); await mbot(c)
 @router.callback_query(F.data=="w_off")
@@ -580,24 +582,32 @@ async def woff(c: CallbackQuery): await mng_w(c.from_user.id,'stop'); await mbot
 
 @router.callback_query(F.data=="m_g")
 async def mg(c: CallbackQuery): 
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
     await c.message.edit_text(
-        "<b>📚 GUIDE</b>\n"
-        ".флуд [txt] [n] [sec]\n.scan all\n.raid (reply)\n.react 👍\n.ghost on",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙",callback_data="menu")]])
+        "<b>📚 ИНСТРУКЦИЯ</b>\n\n"
+        "<b>💣 Спам:</b> <code>.флуд [текст] [кол-во] [сек]</code>\n"
+        "<b>📊 Скан:</b> <code>.scan all</code> (в файл)\n"
+        "<b>☠️ Рейд:</b> <code>.raid</code> (реплай) / <code>.raidstop</code>\n"
+        "<b>🔥 Реакции:</b> <code>.react 👍</code>\n"
+        "<b>👻 Призрак:</b> <code>.ghost on/off</code>\n"
+        "<b>💻 IT-Смена:</b> <code>.айтистарт</code>, <code>.встал 1</code>, <code>.айтистоп</code>\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]])
     )
 
 @router.callback_query(F.data=="m_rep")
-async def mr(c: CallbackQuery): await c.message.edit_text("Reports", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="IT",callback_data="r_i"),InlineKeyboardButton(text="Drop",callback_data="r_d")],[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+async def mr(c: CallbackQuery): 
+    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нет доступа!", True)
+    await c.message.edit_text("Отчеты", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="IT Смена",callback_data="r_i"),InlineKeyboardButton(text="Дроп Лог",callback_data="r_d")],[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 @router.callback_query(F.data=="r_i")
-async def ri(c: CallbackQuery): await c.message.edit_text("IT Info:\n.айтистарт\n.встал 1\n.отчетайти", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙",callback_data="m_rep")]]))
+async def ri(c: CallbackQuery): await c.message.edit_text("IT команды:\n.айтистарт\n.встал 1\n.отчетайти", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад",callback_data="m_rep")]]))
 @router.callback_query(F.data=="r_d")
-async def rd(c: CallbackQuery): await c.message.edit_text("Drop Info:\n.отчетыстарт\n.отчетдропы", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙",callback_data="m_rep")]]))
+async def rd(c: CallbackQuery): await c.message.edit_text("Дроп команды:\n.отчетыстарт\n.отчетдропы", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад",callback_data="m_rep")]]))
 
 @router.callback_query(F.data=="m_p")
 async def mp(c: CallbackQuery):
-    if c.from_user.id==ADMIN_ID: s="∞"
-    else: u=await db.check_sub(c.from_user.id); s="Active" if u else "No"
-    await c.message.edit_text(f"ID: {c.from_user.id}\nSub: {s}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙",callback_data="menu")]]))
+    if c.from_user.id==ADMIN_ID: s="∞ АДМИН"
+    else: u=await db.check_sub(c.from_user.id); s="АКТИВНА" if u else "НЕТ"
+    await c.message.edit_text(f"👤 ID: {c.from_user.id}\n💎 Подписка: {s}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад",callback_data="menu")]]))
 
 async def main():
     await db.init()
