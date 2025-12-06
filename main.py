@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v50.1 - FIXED EDITION
+💎 StatPro v51.0 - MEMORY EDITION
 -----------------------------------
-✅ FIX: Исправлено название эмодзи DiceEmoji.DART (убрана ошибка запуска).
-✅ CORE: Стабильная работа Redis/Memory Storage.
-✅ SECURITY: Двойная проверка подписки.
+✅ FIX: Полный переход на MemoryStorage (без Redis).
+✅ FIX: Исправлено название эмодзи DiceEmoji.DART.
+✅ CORE: Стабильная работа без внешних зависимостей.
 """
 
 import asyncio
@@ -20,6 +20,8 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+# Импортируем только MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message,
     ChatMemberUpdated
@@ -53,25 +55,20 @@ CHANNELS = {
 CURRENCY_MAP = {'USDT': 'USDT ($)', 'ST': 'STATMON (ST)'}
 STATMON_BONUS = 1000.0
 
-# 🛠 НАСТРОЙКИ REDIS
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-
 # Логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-logger = logging.getLogger("StatPro_v50")
+logger = logging.getLogger("StatPro_v51")
 
 # Проверка токенов
 if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     logger.critical("❌ ВЫ НЕ УКАЗАЛИ BOT_TOKEN! Заполните переменные окружения.")
-    # Не выходим, чтобы дать шанс запуститься в тестовом режиме, но пишем в лог
 
 # =========================================================================
 # 🗄️ БАЗА ДАННЫХ (AIOSQLITE)
 # =========================================================================
 
 class Database:
-    def __init__(self, db_path="statpro_v50.db"):
+    def __init__(self, db_path="statpro_v51.db"):
         self.path = db_path
 
     async def init(self):
@@ -193,19 +190,11 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 🧠 ИНИЦИАЛИЗАЦИЯ БОТА И FSM
+# 🧠 ИНИЦИАЛИЗАЦИЯ БОТА И FSM (MEMORY ONLY)
 # =========================================================================
 
-try:
-    from aiogram.fsm.storage.redis import RedisStorage
-    import redis.asyncio as redis
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
-    storage = RedisStorage(redis=redis_client)
-    logger.info("✅ Redis Storage активирован.")
-except (ImportError, OSError, ConnectionError):
-    from aiogram.fsm.storage.memory import MemoryStorage
-    storage = MemoryStorage()
-    logger.warning("⚠️ Redis не доступен. Используется MemoryStorage.")
+storage = MemoryStorage()
+logger.info("✅ Инициализирован MemoryStorage (RAM). Redis отключен.")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=storage)
@@ -322,7 +311,7 @@ async def start_handler(u: Union[Message, CallbackQuery], state: FSMContext):
     uname = u.from_user.username or "User"
     await db.upsert_user(uid, uname)
 
-    txt = f"👋 Привет, <b>{uname}</b>!\nДобро пожаловать в <b>StatPro v50.1</b>.\nВыберите режим работы:"
+    txt = f"👋 Привет, <b>{uname}</b>!\nДобро пожаловать в <b>StatPro v51.0</b>.\nВыберите режим работы:"
     
     if isinstance(u, Message):
         await u.answer(txt, reply_markup=kb_main())
@@ -408,13 +397,12 @@ async def mode_casino(c: CallbackQuery):
 # 🎰 ИГРОВОЙ ДВИЖОК
 # =========================================================================
 
-# ⬇️ ИСПРАВЛЕНА ОШИБКА ЗДЕСЬ (DART вместо DARTS)
 GAMES_CONFIG = {
     "game_dice": {"emoji": DiceEmoji.DICE, "win_val": [6], "multi": 1.38},
     "game_basket": {"emoji": DiceEmoji.BASKETBALL, "win_val": [5], "multi": 1.13},
     "game_foot": {"emoji": DiceEmoji.FOOTBALL, "win_val": [5], "multi": 1.13},
     "game_bowl": {"emoji": DiceEmoji.BOWLING, "win_val": [6], "multi": 1.25},
-    "game_dart": {"emoji": DiceEmoji.DART, "win_val": [6], "multi": 0.75}, 
+    "game_dart": {"emoji": DiceEmoji.DART, "win_val": [6], "multi": 0.75}, # ✅ FIX
 }
 
 @router.callback_query(F.data.startswith("game_"))
@@ -559,7 +547,7 @@ async def create_promo_cmd(m: Message):
 
 async def main():
     await db.init()
-    logger.info("🤖 Бот StatPro v50.1 запускается...")
+    logger.info("🤖 Бот StatPro v51.0 (MEMORY) запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
