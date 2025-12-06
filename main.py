@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v50.0 - ULTIMATE EDITION
+💎 StatPro v50.1 - FIXED EDITION
 -----------------------------------
-✅ FIX: Исправлен Redis Storage для Aiogram 3.x.
-✅ SECURITY: Двойная проверка подписки (Канал + Личная лицензия).
-✅ LOGIC: Блокировка функционала StatPro без промокода.
-✅ CASINO: Оптимизированные алгоритмы и множители.
+✅ FIX: Исправлено название эмодзи DiceEmoji.DART (убрана ошибка запуска).
+✅ CORE: Стабильная работа Redis/Memory Storage.
+✅ SECURITY: Двойная проверка подписки.
 """
 
 import asyncio
@@ -13,7 +12,6 @@ import logging
 import os
 import sys
 import random
-import gc
 from datetime import datetime, timedelta
 from typing import Union, Optional
 
@@ -41,9 +39,9 @@ from telethon.errors import SessionPasswordNeededError
 
 # 📝 Заполните эти данные или используйте .env файл
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
-API_ID = int(os.getenv("API_ID", "12345"))      # Для Telethon
-API_HASH = os.getenv("API_HASH", "your_hash")   # Для Telethon
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
 
 # 🔗 КАНАЛЫ (ОБЯЗАТЕЛЬНЫЕ ПОДПИСКИ)
 CHANNELS = {
@@ -55,7 +53,7 @@ CHANNELS = {
 CURRENCY_MAP = {'USDT': 'USDT ($)', 'ST': 'STATMON (ST)'}
 STATMON_BONUS = 1000.0
 
-# 🛠 НАСТРОЙКИ REDIS (Опционально)
+# 🛠 НАСТРОЙКИ REDIS
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
@@ -64,9 +62,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("StatPro_v50")
 
 # Проверка токенов
-if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-    logger.critical("❌ ВЫ НЕ УКАЗАЛИ BOT_TOKEN! Заполните переменные в начале файла.")
-    sys.exit(1)
+if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    logger.critical("❌ ВЫ НЕ УКАЗАЛИ BOT_TOKEN! Заполните переменные окружения.")
+    # Не выходим, чтобы дать шанс запуститься в тестовом режиме, но пишем в лог
 
 # =========================================================================
 # 🗄️ БАЗА ДАННЫХ (AIOSQLITE)
@@ -85,7 +83,7 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     joined_at TEXT,
-                    sub_end_date TEXT, -- Дата окончания личной подписки
+                    sub_end_date TEXT,
                     balance_usdt REAL DEFAULT 0.0,
                     balance_st REAL DEFAULT 0.0,
                     current_bet REAL DEFAULT 10.0,
@@ -109,8 +107,7 @@ class Database:
             await db.execute("""
                 INSERT OR IGNORE INTO users (user_id, username, joined_at, sub_end_date)
                 VALUES (?, ?, ?, ?)
-            """, (uid, uname, now, now)) # По умолчанию подписка истекла (равна дате регистрации)
-            # Обновляем юзернейм если изменился
+            """, (uid, uname, now, now))
             await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (uname, uid))
             await db.commit()
 
@@ -122,7 +119,6 @@ class Database:
 
     # --- ПОДПИСКИ И ПРОМО ---
     async def check_personal_sub(self, uid: int) -> bool:
-        """Проверяет, активна ли ЛИЧНАЯ подписка (по дате)."""
         if uid == ADMIN_ID: return True
         user = await self.get_user(uid)
         if not user or not user['sub_end_date']: return False
@@ -133,7 +129,6 @@ class Database:
 
     async def activate_promo(self, uid: int, code: str) -> str:
         async with aiosqlite.connect(self.path) as db:
-            # 1. Ищем промокод
             async with db.execute("SELECT days, activations_left FROM promos WHERE code = ?", (code,)) as cur:
                 promo = await cur.fetchone()
             
@@ -141,13 +136,10 @@ class Database:
             days, acts = promo
             if acts <= 0: return "ended"
 
-            # 2. Обновляем промокод (минус 1 активация)
             await db.execute("UPDATE promos SET activations_left = activations_left - 1 WHERE code = ?", (code,))
 
-            # 3. Обновляем юзера (добавляем дни)
             user = await self.get_user(uid)
             current_end = datetime.fromisoformat(user['sub_end_date']) if user['sub_end_date'] else datetime.now()
-            # Если подписка уже истекла, начинаем отсчет от 'сейчас', иначе добавляем к текущей дате
             start_point = max(datetime.now(), current_end)
             new_end = start_point + timedelta(days=days)
             
@@ -167,18 +159,15 @@ class Database:
         to_username = to_username.replace("@", "").strip()
         
         async with aiosqlite.connect(self.path) as db:
-            # Находим получателя
             async with db.execute("SELECT user_id FROM users WHERE username = ? COLLATE NOCASE", (to_username,)) as cur:
                 receiver = await cur.fetchone()
                 if not receiver: return "user_not_found"
                 to_uid = receiver[0]
 
-            # Проверяем баланс отправителя
             async with db.execute(f"SELECT {col} FROM users WHERE user_id = ?", (from_uid,)) as cur:
                 res = await cur.fetchone()
                 if not res or res[0] < amount: return "no_balance"
 
-            # АТОМАРНАЯ ТРАНЗАКЦИЯ
             try:
                 await db.execute("BEGIN TRANSACTION")
                 await db.execute(f"UPDATE users SET {col} = {col} - ? WHERE user_id = ?", (amount, from_uid))
@@ -190,7 +179,6 @@ class Database:
                 logger.error(f"Transfer Error: {e}")
                 return "error"
 
-    # Сеттеры
     async def set_bet_settings(self, uid: int, bet: float = None, currency: str = None):
         async with aiosqlite.connect(self.path) as db:
             if bet: await db.execute("UPDATE users SET current_bet = ? WHERE user_id = ?", (bet, uid))
@@ -208,7 +196,6 @@ db = Database()
 # 🧠 ИНИЦИАЛИЗАЦИЯ БОТА И FSM
 # =========================================================================
 
-# Попытка подключить Redis, иначе Memory
 try:
     from aiogram.fsm.storage.redis import RedisStorage
     import redis.asyncio as redis
@@ -218,7 +205,7 @@ try:
 except (ImportError, OSError, ConnectionError):
     from aiogram.fsm.storage.memory import MemoryStorage
     storage = MemoryStorage()
-    logger.warning("⚠️ Redis не доступен. Используется MemoryStorage (не перезагружайте бота во время выплат!).")
+    logger.warning("⚠️ Redis не доступен. Используется MemoryStorage.")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=storage)
@@ -256,7 +243,6 @@ def kb_sub_req(channel_key):
         [InlineKeyboardButton(text="✅ Я подписался", callback_data=cb)]
     ])
 
-# Меню StatPro (Заблокированное - нет личной подписки)
 def kb_statpro_locked():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔒 Воркер (Закрыто)", callback_data="dummy_lock"), 
@@ -266,7 +252,6 @@ def kb_statpro_locked():
         [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
     ])
 
-# Меню StatPro (Полное)
 def kb_statpro_full():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Запустить Воркера", callback_data="w_start"), 
@@ -278,7 +263,6 @@ def kb_statpro_full():
         [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
     ])
 
-# Меню Казино
 def kb_casino_main():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 Кубик (x1.38)", callback_data="game_dice"), 
@@ -327,7 +311,7 @@ async def check_channel_subscription(user_id: int, channel_id: str) -> bool:
         return False
 
 # =========================================================================
-# 🎮 ХЕНДЛЕРЫ: СТАРТ И МЕНЮ
+# 🎮 ХЕНДЛЕРЫ
 # =========================================================================
 
 @router.message(CommandStart())
@@ -338,7 +322,7 @@ async def start_handler(u: Union[Message, CallbackQuery], state: FSMContext):
     uname = u.from_user.username or "User"
     await db.upsert_user(uid, uname)
 
-    txt = f"👋 Привет, <b>{uname}</b>!\nДобро пожаловать в <b>StatPro v50.0</b>.\nВыберите режим работы:"
+    txt = f"👋 Привет, <b>{uname}</b>!\nДобро пожаловать в <b>StatPro v50.1</b>.\nВыберите режим работы:"
     
     if isinstance(u, Message):
         await u.answer(txt, reply_markup=kb_main())
@@ -350,109 +334,93 @@ async def start_handler(u: Union[Message, CallbackQuery], state: FSMContext):
 @router.callback_query(F.data == "check_sub_statpro")
 async def mode_statpro(c: CallbackQuery):
     uid = c.from_user.id
-    
-    # 1. Проверка подписки на КАНАЛ
     if not await check_channel_subscription(uid, CHANNELS['statpro']['id']):
         return await c.message.edit_text(
             f"⛔️ <b>Доступ запрещен!</b>\nДля входа в StatPro Tools подпишитесь на канал.",
             reply_markup=kb_sub_req('statpro')
         )
 
-    # 2. Проверка ЛИЧНОЙ ПОДПИСКИ (Promo)
     has_license = await db.check_personal_sub(uid)
-    
     if not has_license:
         await c.message.edit_text(
-            "💻 <b>StatPro User Panel</b>\n\n"
-            "⚠️ <b>Лицензия не активна!</b>\n"
-            "Функционал Воркера заблокирован. Пожалуйста, активируйте промокод в меню.",
+            "💻 <b>StatPro User Panel</b>\n\n⚠️ <b>Лицензия не активна!</b>\nФункционал Воркера заблокирован. Активируйте промокод.",
             reply_markup=kb_statpro_locked()
         )
     else:
         user = await db.get_user(uid)
         end_date = datetime.fromisoformat(user['sub_end_date']).strftime("%d.%m.%Y %H:%M")
         await c.message.edit_text(
-            f"💻 <b>StatPro User Panel</b>\n"
-            f"✅ Лицензия активна до: <b>{end_date}</b>\n"
-            f"Все системы в норме.",
+            f"💻 <b>StatPro User Panel</b>\n✅ Лицензия до: <b>{end_date}</b>\nСистемы в норме.",
             reply_markup=kb_statpro_full()
         )
 
 @router.callback_query(F.data == "dummy_lock")
 async def locked_alert(c: CallbackQuery):
-    await c.answer("⛔️ Эта функция доступна только с активной подпиской!", show_alert=True)
+    await c.answer("⛔️ Требуется активная подписка!", show_alert=True)
 
 # --- АКТИВАЦИЯ ПРОМО ---
 @router.callback_query(F.data == "m_promo")
 async def promo_start(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("🎟 <b>Активация подписки</b>\nВведите ваш промокод:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="mode_statpro")]]))
+    await c.message.edit_text("🎟 <b>Активация подписки</b>\nВведите промокод:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="mode_statpro")]]))
     await state.set_state(PromoState.waiting_for_code)
 
 @router.message(PromoState.waiting_for_code)
 async def promo_process(m: Message, state: FSMContext):
     code = m.text.strip()
     res = await db.activate_promo(m.from_user.id, code)
-    
     if res.startswith("success"):
         days = res.split("_")[1]
-        await m.answer(f"✅ <b>Успешно!</b>\nПодписка продлена на {days} дней.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="В меню", callback_data="mode_statpro")]]))
+        await m.answer(f"✅ <b>Успешно!</b>\nПродлено на {days} дней.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="В меню", callback_data="mode_statpro")]]))
         await state.clear()
     elif res == "ended":
-        await m.answer("❌ Этот промокод закончился.")
+        await m.answer("❌ Промокод закончился.")
     else:
-        await m.answer("❌ Неверный промокод. Попробуйте еще раз.")
+        await m.answer("❌ Неверный промокод.")
 
 # --- STATLUD CASINO LOGIC ---
 @router.callback_query(F.data == "mode_casino")
 @router.callback_query(F.data == "check_sub_statlud")
 async def mode_casino(c: CallbackQuery):
     uid = c.from_user.id
-    
-    # 1. Проверка подписки на КАНАЛ КАЗИНО
     if not await check_channel_subscription(uid, CHANNELS['statlud']['id']):
         return await c.message.edit_text(
-            f"⛔️ <b>Доступ в Казино закрыт!</b>\nПодпишитесь на официальный канал STATLUD.",
+            f"⛔️ <b>Доступ в Казино закрыт!</b>\nПодпишитесь на канал.",
             reply_markup=kb_sub_req('statlud')
         )
     
-    # 2. Выдача бонуса новичкам
     user = await db.get_user(uid)
     if not user['bonus_received']:
         await db.claim_bonus(uid)
-        await c.answer(f"🎉 Вам начислен бонус {STATMON_BONUS} STATMON!", show_alert=True)
-        user = await db.get_user(uid) # Обновляем данные
+        await c.answer(f"🎉 Бонус {STATMON_BONUS} STATMON получен!", show_alert=True)
+        user = await db.get_user(uid)
 
-    # 3. Меню
     u_bal = user['balance_usdt']
     s_bal = user['balance_st']
     bet = user['current_bet']
     cur = user['selected_currency']
     
-    msg = (f"🎰 <b>STATLUD CASINO</b>\n"
-           f"➖➖➖➖➖➖➖➖\n"
-           f"💵 Баланс USDT: <b>{u_bal:.2f} $</b>\n"
-           f"🌟 Баланс STATMON: <b>{s_bal:.2f} ST</b>\n"
-           f"➖➖➖➖➖➖➖➖\n"
-           f"💎 Ставка: <b>{bet} {cur}</b>")
-    
+    msg = (f"🎰 <b>STATLUD CASINO</b>\n➖➖➖➖➖➖➖➖\n"
+           f"💵 USDT: <b>{u_bal:.2f} $</b>\n🌟 STATMON: <b>{s_bal:.2f} ST</b>\n"
+           f"➖➖➖➖➖➖➖➖\n💎 Ставка: <b>{bet} {cur}</b>")
     await c.message.edit_text(msg, reply_markup=kb_casino_main())
 
 # =========================================================================
 # 🎰 ИГРОВОЙ ДВИЖОК
 # =========================================================================
 
+# ⬇️ ИСПРАВЛЕНА ОШИБКА ЗДЕСЬ (DART вместо DARTS)
 GAMES_CONFIG = {
     "game_dice": {"emoji": DiceEmoji.DICE, "win_val": [6], "multi": 1.38},
     "game_basket": {"emoji": DiceEmoji.BASKETBALL, "win_val": [5], "multi": 1.13},
     "game_foot": {"emoji": DiceEmoji.FOOTBALL, "win_val": [5], "multi": 1.13},
-    "game_bowl": {"emoji": DiceEmoji.BOWLING, "win_val": [6], "multi": 1.25}, # Страйк
-    "game_dart": {"emoji": DiceEmoji.DARTS, "win_val": [6], "multi": 0.75},   # Даже при победе минус 25% (особенность)
+    "game_bowl": {"emoji": DiceEmoji.BOWLING, "win_val": [6], "multi": 1.25},
+    "game_dart": {"emoji": DiceEmoji.DART, "win_val": [6], "multi": 0.75}, 
 }
 
 @router.callback_query(F.data.startswith("game_"))
 async def process_game(c: CallbackQuery):
     game_key = c.data
-    if game_key == "game_slot": return await process_slot(c) # Слот отдельно
+    if game_key == "game_slot": return await process_slot(c)
     
     cfg = GAMES_CONFIG.get(game_key)
     if not cfg: return
@@ -467,17 +435,11 @@ async def process_game(c: CallbackQuery):
     if balance < bet:
         return await c.answer(f"❌ Недостаточно средств ({cur})!", show_alert=True)
     
-    # Списание
     await db.update_balance(uid, -bet, cur)
-    
-    # Анимация
     msg = await c.message.answer_dice(emoji=cfg['emoji'])
     await asyncio.sleep(3.5)
     
-    dice_val = msg.dice.value
-    win_amt = 0.0
-    
-    if dice_val in cfg['win_val']:
+    if msg.dice.value in cfg['win_val']:
         win_amt = bet * cfg['multi']
         await db.update_balance(uid, win_amt, cur)
         res_txt = f"🎉 <b>ПОБЕДА!</b> (+{win_amt:.2f} {cur})"
@@ -488,7 +450,6 @@ async def process_game(c: CallbackQuery):
         [InlineKeyboardButton(text="🔄 Еще раз", callback_data=game_key)],
         [InlineKeyboardButton(text="🔙 Меню", callback_data="mode_casino")]
     ])
-    
     await c.message.answer(res_txt, reply_markup=kb_replay)
     try: await c.message.delete()
     except: pass
@@ -506,32 +467,30 @@ async def process_slot(c: CallbackQuery):
     await asyncio.sleep(2.5)
     
     val = msg.dice.value
-    # 64 - Три семерки (Джекпот), 43 - Лимоны/Вишни (примерно)
     win = 0.0
     if val == 64: 
-        win = bet * 7.5
-        txt = f"🎰 <b>JACKPOT!</b> (+{win:.2f} {cur})"
+        win = bet * 7.5; txt = f"🎰 <b>JACKPOT!</b> (+{win:.2f} {cur})"
     elif val == 43:
-        win = bet * 0.5 # Мини выигрыш
-        txt = f"🍒 <b>Мини-Вин</b> (+{win:.2f} {cur})"
+        win = bet * 0.5; txt = f"🍒 <b>Мини-Вин</b> (+{win:.2f} {cur})"
     else:
         txt = f"📉 <b>Пусто</b> (-{bet:.2f} {cur})"
         
     if win > 0: await db.update_balance(uid, win, cur)
     
-    await c.message.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Еще раз", callback_data="game_slot")], [InlineKeyboardButton(text="🔙 Меню", callback_data="mode_casino")]]))
+    kb_slot = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Еще раз", callback_data="game_slot")], [InlineKeyboardButton(text="🔙 Меню", callback_data="mode_casino")]])
+    await c.message.answer(txt, reply_markup=kb_slot)
     try: await c.message.delete()
     except: pass
 
 # =========================================================================
-# 💰 УПРАВЛЕНИЕ ФИНАНСАМИ И ВЫВОД
+# 💰 УПРАВЛЕНИЕ ФИНАНСАМИ
 # =========================================================================
 
 @router.callback_query(F.data == "c_balance")
 async def show_balance_menu(c: CallbackQuery):
     user = await db.get_user(c.from_user.id)
     await c.message.edit_text(
-        f"💳 <b>Ваш Кошелек</b>\n\nUSDT: {user['balance_usdt']:.2f}\nSTATMON: {user['balance_st']:.2f}\n\n"
+        f"💳 <b>Ваш Кошелек</b>\nUSDT: {user['balance_usdt']:.2f}\nSTATMON: {user['balance_st']:.2f}\n"
         f"Активная валюта: <b>{user['selected_currency']}</b>",
         reply_markup=kb_casino_balance(user['selected_currency'], user['balance_usdt'], user['balance_st'])
     )
@@ -550,20 +509,18 @@ async def bet_menu(c: CallbackQuery):
 async def set_bet_val(c: CallbackQuery):
     val = float(c.data.split("_")[2])
     await db.set_bet_settings(c.from_user.id, bet=val)
-    await c.answer(f"Ставка установлена: {val}")
+    await c.answer(f"Ставка: {val}")
     await show_balance_menu(c)
 
-# --- ВЫВОД СРЕДСТВ ---
+# --- ВЫВОД ---
 @router.callback_query(F.data == "c_withdraw")
 async def withdraw_start(c: CallbackQuery, state: FSMContext):
     user = await db.get_user(c.from_user.id)
     cur = user['selected_currency']
     bal = user['balance_usdt'] if cur == 'USDT' else user['balance_st']
-    
-    if bal < 0.1: return await c.answer("❌ Минимум для вывода: 0.1", show_alert=True)
-    
+    if bal < 0.1: return await c.answer("❌ Минимум: 0.1", show_alert=True)
     await state.update_data(cur=cur)
-    await c.message.edit_text(f"💸 <b>Вывод {cur}</b>\nДоступно: {bal:.2f}\n\nВведите сумму для вывода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="c_balance")]]))
+    await c.message.edit_text(f"💸 <b>Вывод {cur}</b>\nДоступно: {bal:.2f}\nВведите сумму:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="c_balance")]]))
     await state.set_state(WithdrawState.amount)
 
 @router.message(WithdrawState.amount)
@@ -571,56 +528,41 @@ async def withdraw_amount(m: Message, state: FSMContext):
     try:
         amt = float(m.text)
         if amt < 0.1: raise ValueError
-    except: return await m.answer("❌ Введите корректное число (мин 0.1)")
-    
+    except: return await m.answer("❌ Введите число (мин 0.1)")
     await state.update_data(amount=amt)
-    await m.answer("👤 Введите <b>Username</b> получателя (например @user):")
+    await m.answer("👤 Введите Username получателя (@username):")
     await state.set_state(WithdrawState.username)
 
 @router.message(WithdrawState.username)
 async def withdraw_exec(m: Message, state: FSMContext):
     data = await state.get_data()
     res = await db.transfer_money(m.from_user.id, m.text, data['amount'], data['cur'])
-    
-    if res == "success":
-        await m.answer(f"✅ <b>Успешно!</b>\nПереведено {data['amount']} {data['cur']} пользователю {m.text}.")
-    elif res == "no_balance":
-        await m.answer("❌ Недостаточно средств.")
-    elif res == "user_not_found":
-        await m.answer("❌ Пользователь не найден в боте.")
-    else:
-        await m.answer("❌ Ошибка системы.")
-    
+    if res == "success": await m.answer(f"✅ Переведено {data['amount']} {data['cur']} пользователю {m.text}.")
+    elif res == "no_balance": await m.answer("❌ Недостаточно средств.")
+    elif res == "user_not_found": await m.answer("❌ Пользователь не найден.")
+    else: await m.answer("❌ Ошибка.")
     await state.clear()
     await m.answer("Меню:", reply_markup=kb_casino_main())
 
 # =========================================================================
-# 👑 АДМИН КОМАНДЫ
+# 👑 АДМИН
 # =========================================================================
-
 @router.message(Command("admin_promo"), F.from_user.id == ADMIN_ID)
 async def create_promo_cmd(m: Message):
-    # /admin_promo CODE DAYS ACTS
     try:
         _, code, days, acts = m.text.split()
         async with aiosqlite.connect(db.path) as conn:
             await conn.execute("INSERT OR REPLACE INTO promos VALUES (?, ?, ?)", (code, int(days), int(acts)))
             await conn.commit()
-        await m.answer(f"✅ Промокод <code>{code}</code> создан!\nДней: {days}, Активаций: {acts}")
+        await m.answer(f"✅ Промокод <code>{code}</code> создан!")
     except: await m.answer("Format: /admin_promo CODE DAYS ACTS")
-
-# =========================================================================
-# 🚀 ЗАПУСК
-# =========================================================================
 
 async def main():
     await db.init()
-    logger.info("🤖 Бот StatPro v50.0 запускается...")
+    logger.info("🤖 Бот StatPro v50.1 запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен.")
+    try: asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit): logger.info("Бот остановлен.")
