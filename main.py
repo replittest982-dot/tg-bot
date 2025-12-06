@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-💎 StatPro v48.0 - PROFIT MAXIMIZER EDITION
+💎 StatPro v49.0 - FINAL CONFIG EDITION
 --------------------------------------
-✅ FIX: Обязательная подписка на @STATLUD для получения 1000 STATMON.
-✅ BALANCING: Шанс победы снижен до ~16.7%. Новые, высокие множители.
-✅ CORE: Полностью оптимизированный код.
+✅ FIX: Разделение проверки подписки на два канала (STATPRO vs STATLUD).
+✅ BALANCING: Множители уменьшены на 75% (x0.25) по требованию пользователя.
 """
 
 import asyncio
@@ -58,10 +57,10 @@ from PIL import Image
 
 BASE_DIR = Path(__file__).resolve().parent
 SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "profit_maximizer.db" # Новое имя для новой схемы DB
+DB_PATH = BASE_DIR / "final_config.db" 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-VERSION = "v48.0 PROFIT MAXIMIZER"
+VERSION = "v49.0 FINAL CONFIG"
 MSK_TZ = timezone(timedelta(hours=3))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', handlers=[logging.StreamHandler()])
@@ -73,9 +72,13 @@ try:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     
-    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Установлена ссылка на канал пользователя
-    TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "@STATLUD") 
-    TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL", "https://t.me/STATLUD")
+    # КРИТИЧЕСКИЕ ПЕРЕМЕННЫЕ ДЛЯ ДВУХ КАНАЛОВ
+    STATPRO_CHANNEL_ID = os.getenv("STATPRO_CHANNEL_ID", "@STAT_PRO1") 
+    STATPRO_CHANNEL_URL = os.getenv("STATPRO_CHANNEL_URL", "https://t.me/STAT_PRO1")
+    
+    STATLUD_CHANNEL_ID = os.getenv("STATLUD_CHANNEL_ID", "@STATLUD") 
+    STATLUD_CHANNEL_URL = os.getenv("STATLUD_CHANNEL_URL", "https://t.me/STATLUD")
+    
     SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/suppor_tstatpro1bot")
     
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -83,7 +86,7 @@ try:
 
 except: sys.exit(1)
 
-if not all([BOT_TOKEN, API_ID, API_HASH]) or not TARGET_CHANNEL_ID: 
+if not all([BOT_TOKEN, API_ID, API_HASH]): 
     logger.critical("❌ Проверьте переменные окружения!")
     sys.exit(1)
 
@@ -92,7 +95,7 @@ CURRENCY_MAP = {'USDT': 'USDT', 'ST': 'STATMON'}
 STATMON_START_BONUS = 1000.0
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ (ДВОЙНАЯ ВАЛЮТА)
+# 🗄️ БАЗА ДАННЫХ (С ИНДЕКСАМИ)
 # =========================================================================
 
 class Database:
@@ -108,7 +111,6 @@ class Database:
         async with self.get_conn() as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
-            # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: statmon_balance по умолчанию теперь 0.0
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -130,7 +132,6 @@ class Database:
 
     async def upsert_user(self, uid: int, uname: str):
         async with self.get_conn() as db:
-            # statmon_balance установлен в 0.0, выдается только после подписки
             await db.execute("""
                 INSERT INTO users (user_id, username, sub_end, joined_at, balance, statmon_balance) 
                 VALUES (?, ?, ?, ?, 0.0, 0.0)
@@ -139,11 +140,11 @@ class Database:
             await db.commit()
             
     async def check_statmon_bonus(self, uid: int) -> bool:
-        """Проверяет, был ли уже выдан бонус STATMON."""
+        """Проверяет, был ли уже выдан бонус STATMON (если > 0)."""
         async with self.get_conn() as db:
             async with db.execute("SELECT statmon_balance FROM users WHERE user_id = ?", (uid,)) as c:
                 row = await c.fetchone()
-                return row and row[0] >= STATMON_START_BONUS
+                return row and row[0] > 0.0 
 
     # --- КАЗИНО (БАЛАНС) ---
     async def get_balance(self, uid: int):
@@ -215,7 +216,6 @@ db = Database()
 # =========================================================================
 # 🧠 WORKER (TELETHON CORE)
 # =========================================================================
-# (Код Воркера сохранен)
 class Worker:
     __slots__ = ('uid', 'client', 'task', 'status')
     def __init__(self, uid: int):
@@ -268,26 +268,23 @@ class WithdrawS(StatesGroup): W_AMOUNT=State(); W_USERNAME=State(); W_CURRENCY=S
 class AdmS(StatesGroup): D=State(); A=State(); U=State(); UD=State()
 
 # --- HELPERS ---
-async def check_channel_sub(user_id: int) -> bool:
-    """Проверяет подписку на целевой канал."""
-    if not TARGET_CHANNEL_ID: return True
+async def check_channel_sub(user_id: int, channel_id: str) -> bool:
+    """Проверяет подписку на указанный канал."""
+    if not channel_id: return True
     if user_id == ADMIN_ID: return True
     try:
-        # ChatMemberStatus.MEMBER = обычный подписчик
-        m = await bot.get_chat_member(chat_id=TARGET_CHANNEL_ID, user_id=user_id)
+        m = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         return m.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]
     except Exception as e:
-        logger.error(f"Subscription check failed: {e}")
-        # В случае ошибки проверки (например, если бот не админ)
+        logger.error(f"Subscription check failed for {channel_id}: {e}")
         return False
 
-# --- KEYBOARDS ---
 def kb_main(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💻 StatPro User", callback_data="mode_statpro")],[InlineKeyboardButton(text="🎰 STATLUD", callback_data="mode_casino")]])
 
-def kb_sub_check(mode_callback, reason_text="Доступ закрыт"):
+def kb_sub_check(mode_callback, channel_url, channel_name):
     """Клавиатура для проверки подписки."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться на @STATLUD", url=TARGET_CHANNEL_URL)],
+        [InlineKeyboardButton(text=f"📢 Подписаться на {channel_name}", url=channel_url)],
         [InlineKeyboardButton(text="✅ Проверить подписку", callback_data=mode_callback)]
     ])
 
@@ -308,11 +305,11 @@ def kb_currency_switch(current_currency, usdt, st):
     ])
 
 def kb_casino():
-    # Обновленные иксы для v48.0
+    # Обновленные иксы для v49.0 (x0.25 от v47.0)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Кубик (x5.5)", callback_data="game_dice"), InlineKeyboardButton(text="🏀 Баскет (x4.5)", callback_data="game_basket")],
-        [InlineKeyboardButton(text="🎰 Слоты (x30)", callback_data="game_slot"), InlineKeyboardButton(text="⚽️ Футбол (x4.5)", callback_data="game_foot")],
-        [InlineKeyboardButton(text="🎳 Боулинг (x5)", callback_data="game_bowl"), InlineKeyboardButton(text="🎯 Дартс (x3)", callback_data="game_dart")],
+        [InlineKeyboardButton(text="🎲 Кубик (x1.4)", callback_data="game_dice"), InlineKeyboardButton(text="🏀 Баскет (x1.1)", callback_data="game_basket")],
+        [InlineKeyboardButton(text="🎰 Слоты (x7.5)", callback_data="game_slot"), InlineKeyboardButton(text="⚽️ Футбол (x1.1)", callback_data="game_foot")],
+        [InlineKeyboardButton(text="🎳 Боулинг (x1.25)", callback_data="game_bowl"), InlineKeyboardButton(text="🎯 Дартс (x0.75)", callback_data="game_dart")],
         [InlineKeyboardButton(text="💱 Выбор валюты/ставки", callback_data="c_currency")],
         [InlineKeyboardButton(text="🔙 Выход", callback_data="start")]
     ])
@@ -332,7 +329,7 @@ async def start(u: Union[Message, CallbackQuery], state: FSMContext):
     uid = u.from_user.id
     uname = u.from_user.username or "User"
     await db.upsert_user(uid, uname)
-    msg_text = f"💎 <b>StatPro v48</b>\nВыберите режим:"
+    msg_text = f"💎 <b>StatPro v49</b>\nВыберите режим:"
     
     if isinstance(u, Message): 
         await u.answer(msg_text, reply_markup=kb_main())
@@ -342,33 +339,33 @@ async def start(u: Union[Message, CallbackQuery], state: FSMContext):
 
 @router.callback_query(F.data=="mode_statpro")
 async def m_stat(c: CallbackQuery):
-    if not await check_channel_sub(c.from_user.id):
-        return await c.message.edit_text("⛔️ <b>Доступ закрыт!</b>\nПодпишитесь на наш канал.", reply_markup=kb_sub_check("mode_statpro"))
+    # ПРОВЕРКА ПОДПИСКИ НА КАНАЛ STATPRO
+    if not await check_channel_sub(c.from_user.id, STATPRO_CHANNEL_ID):
+        return await c.message.edit_text(
+            "⛔️ <b>Доступ закрыт!</b>\nПодпишитесь на канал StatPro.", 
+            reply_markup=kb_sub_check("mode_statpro", STATPRO_CHANNEL_URL, "@STAT_PRO1")
+        )
     await c.message.edit_text("💻 <b>StatPro Panel</b>", reply_markup=kb_statpro(c.from_user.id, c.from_user.id==ADMIN_ID))
 
 @router.callback_query(F.data=="mode_casino")
 async def m_cas(c: CallbackQuery):
     uid = c.from_user.id
-    is_subscribed = await check_channel_sub(uid)
-    usdt, st, bet, cur, _ = await db.get_balance(uid)
     
-    # 1. Проверка подписки для входа
-    if not is_subscribed:
+    # ПРОВЕРКА ПОДПИСКИ НА КАНАЛ STATLUD
+    if not await check_channel_sub(uid, STATLUD_CHANNEL_ID):
         return await c.message.edit_text(
-            "⛔️ <b>Для доступа к Казино (STATLUD) и получения 1000 STATMON требуется подписка на канал @STATLUD!</b>", 
-            reply_markup=kb_sub_check("mode_casino")
+            "⛔️ <b>Для доступа к Казино требуется подписка на канал STATLUD!</b>", 
+            reply_markup=kb_sub_check("mode_casino", STATLUD_CHANNEL_URL, "@STATLUD")
         )
 
+    usdt, st, bet, cur, _ = await db.get_balance(uid)
+    
     # 2. Выдача стартового бонуса STATMON
-    if st < STATMON_START_BONUS:
-        # Проверяем, был ли бонус выдан ранее (например, если юзер проиграл все)
-        if not await db.check_statmon_bonus(uid): 
-             # Выдаем бонус только если баланс 0 и ранее не было выдано 1000
-             await db.update_balance(uid, STATMON_START_BONUS, 'ST')
-             st += STATMON_START_BONUS
-             await c.answer(f"🎉 Вы получили {STATMON_START_BONUS} STATMON за подписку!", show_alert=True)
+    if not await db.check_statmon_bonus(uid): 
+         await db.update_balance(uid, STATMON_START_BONUS, 'ST')
+         st += STATMON_START_BONUS
+         await c.answer(f"🎉 Вы получили {STATMON_START_BONUS} STATMON за подписку!", show_alert=True)
         
-
     # 3. Отображение меню Казино
     msg_text = (f"🎰 <b>STATLUD</b>\n"
                 f"💰 USDT (Реал): <b>{usdt:.2f} $</b>\n"
@@ -408,7 +405,7 @@ async def set_b(c: CallbackQuery):
     await c.answer(f"Ставка: {bet:.2f} $"); await c_currency(c)
 
 
-# --- GAME ENGINE (С НОВЫМИ ИКСАМИ ~16.7% WIN CHANCE) ---
+# --- GAME ENGINE (С НОВЫМИ ИКСАМИ x0.25) ---
 async def play_game(c: CallbackQuery, emoji: str, multi: float, condition: callable):
     uid = c.from_user.id; usdt, st, bet, cur, _ = await db.get_balance(uid)
     
@@ -425,7 +422,7 @@ async def play_game(c: CallbackQuery, emoji: str, multi: float, condition: calla
     if condition(val):
         win_amount = bet * multi
         await db.update_balance(uid, win_amount, cur)
-        txt = f"🎉 <b>ПОБЕДА!</b>\nМножитель: x{multi:.1f}\n+{win_amount:.2f} {currency_symbol}"
+        txt = f"🎉 <b>ПОБЕДА!</b>\nМножитель: x{multi:.2f}\n+{win_amount:.2f} {currency_symbol}"
     else: txt = f"😔 <b>Проигрыш</b>\n-{bet:.2f} {currency_symbol}"
         
     gc.collect() 
@@ -436,23 +433,33 @@ async def play_game(c: CallbackQuery, emoji: str, multi: float, condition: calla
 
 @router.callback_query(F.data=="game_dice")
 async def gd(c): 
-    # Win on 6 only (P = 1/6 ≈ 16.67%) -> x5.5
-    await play_game(c, DiceEmoji.DICE, 5.5, lambda v: v == 6)
+    # Old x5.5 * 0.25 = x1.375
+    await play_game(c, DiceEmoji.DICE, 1.38, lambda v: v == 6)
 
 @router.callback_query(F.data=="game_basket")
 async def gb(c): 
-    # Win on 5 only (P = 1/5 = 20%) -> x4.5
-    await play_game(c, DiceEmoji.BASKETBALL, 4.5, lambda v: v == 5)
+    # Old x4.5 * 0.25 = x1.125
+    await play_game(c, DiceEmoji.BASKETBALL, 1.13, lambda v: v == 5)
 
 @router.callback_query(F.data=="game_foot")
 async def gf(c): 
-    # Win on 5 only (P = 1/5 = 20%) -> x4.5
-    await play_game(c, DiceEmoji.FOOTBALL, 4.5, lambda v: v == 5)
+    # Old x4.5 * 0.25 = x1.125
+    await play_game(c, DiceEmoji.FOOTBALL, 1.13, lambda v: v == 5)
+
+@router.callback_query(F.data=="game_bowl")
+async def gbo(c):
+    # Old x5.0 * 0.25 = x1.25
+    await play_game(c, DiceEmoji.BOWLING, 1.25, lambda v: v == 6) # Strike
+
+@router.callback_query(F.data=="game_dart")
+async def gda(c):
+    # Old x3.0 * 0.25 = x0.75 (Даже при выигрыше пользователь теряет 25% ставки)
+    await play_game(c, DiceEmoji.DARTS, 0.75, lambda v: v == 6) # Bullseye
 
 @router.callback_query(F.data=="game_slot")
 async def gs(c):
-    # Win on 64 (P ≈ 1.56%) -> x30.0 (Джекпот)
-    # Win on 43 (P ≈ 1.56%) -> x2.5 (Низкий выигрыш)
+    # Old x30.0 * 0.25 = x7.5 (Джекпот)
+    # Old x2.5 * 0.25 = x0.625 (Малый выигрыш)
     uid = c.from_user.id; usdt, st, bet, cur, _ = await db.get_balance(uid)
     current_bal = usdt if cur == 'USDT' else st
     currency_symbol = '$' if cur == 'USDT' else 'ST'
@@ -465,9 +472,9 @@ async def gs(c):
     v = msg.dice.value; win = 0.0
     
     if v == 64: 
-        win = bet * 30.0; t = f"🎰 <b>ДЖЕКПОТ x30!</b>\n+{win:.2f} {currency_symbol}"
+        win = bet * 7.5; t = f"🎰 <b>ДЖЕКПОТ x7.5!</b>\n+{win:.2f} {currency_symbol}"
     elif v == 43: 
-        win = bet * 2.5; t = f"🍒 <b>Победа x2.5</b>\n+{win:.2f} {currency_symbol}" 
+        win = bet * 0.63; t = f"🍒 <b>Победа x0.63</b>\n+{win:.2f} {currency_symbol}" 
     else: 
         t = f"😔 Пусто\n-{bet:.2f} {currency_symbol}"
     
@@ -527,7 +534,6 @@ async def w_username_input(m: Message, state: FSMContext):
 @router.message(Command("get_balance"), F.from_user.id == ADMIN_ID)
 async def adm_get_balance(m: Message):
     try:
-        # Проверяем, что есть только 1 аргумент (ID)
         parts = m.text.split()
         if len(parts) != 2: raise ValueError
             
@@ -536,7 +542,6 @@ async def adm_get_balance(m: Message):
         
         usdt, st, _, _, uname = await db.get_balance(uid)
         
-        # Если пользователя нет в базе (None в uname)
         if uname is None:
             uname = f"ID: {uid} (Новый пользователь)"
             
