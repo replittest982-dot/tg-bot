@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-💀 StatPro v59.0 - AUTO REPORTER (Clean & Powerful)
----------------------------------------------------
-✅ MODE: Только отчеты (IT + Drop).
-✅ UI: Inline в меню, Reply-кнопки в разделе отчетов.
-✅ LOGIC: Авто-сохранение, защита от сбоев.
+🧬 StatPro v63.0 - HOMO SAPIENS EDITION
+---------------------------------------
+✅ EVOLUTION: Асинхронное сохранение с Debounce (без лагов).
+✅ PERFORMANCE: Запись файлов вынесена в Executor (не блокирует Loop).
+✅ MEMORY: Оптимизированная генерация QR и буферов.
+✅ SAFETY: Graceful Shutdown (сохранение при выходе).
 """
 
 import asyncio
 import logging
 import os
-import io
 import json
-import aiosqlite
+import random
+import time
 import qrcode
+import aiosqlite
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
+from dataclasses import dataclass
 
 # --- AIOGRAM ---
 from aiogram import Bot, Dispatcher, Router, F
@@ -26,43 +30,66 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    CallbackQuery, Message, BufferedInputFile, ChatMemberUpdated
+    CallbackQuery, Message, BufferedInputFile
 )
-from aiogram.enums import ParseMode, ChatMemberStatus
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
 
 # --- TELETHON ---
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.types import User
+from telethon.tl.functions.messages import SendReactionRequest
 
 # =========================================================================
-# ⚙️ НАСТРОЙКИ
+# ⚙️ CONFIGURATION CLASS
 # =========================================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-SESSION_DIR = BASE_DIR / "sessions"
-DB_PATH = BASE_DIR / "statpro_reporter.db"
-STATE_FILE = BASE_DIR / "reports_log.json"
+@dataclass
+class Config:
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН")
+    ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0"))
+    API_ID: int = int(os.getenv("API_ID", "0"))
+    API_HASH: str = os.getenv("API_HASH", "ВАШ_ХЭШ")
+    SUB_CHANNEL: str = "@STAT_PRO1"
+    TZ: timezone = timezone(timedelta(hours=3))
+    
+    BASE_DIR: Path = Path(__file__).resolve().parent
+    SESSION_DIR: Path = BASE_DIR / "sessions"
+    DB_PATH: Path = BASE_DIR / "statpro_v63.db"
+    STATE_FILE: Path = BASE_DIR / "statpro_reports.json"
 
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    def __post_init__(self):
+        self.SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-# ⚠️ Вставь свои данные
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "YOUR_HASH")
-
-SUB_CHANNEL = "@STAT_PRO1" # Единственный канал
-MSK_TZ = timezone(timedelta(hours=3))
+cfg = Config()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-logger = logging.getLogger("AutoReporter")
+logger = logging.getLogger("StatPro_v63")
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ
+# 🛠 UTILS
+# =========================================================================
+
+def get_now_ts() -> int:
+    return int(datetime.now(cfg.TZ).timestamp())
+
+def fmt_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts, cfg.TZ).strftime("%d.%m.%Y %H:%M")
+
+LAST_ACTION: Dict[int, float] = {}
+
+def can_toggle(uid: int, cooldown: float = 1.0) -> bool:
+    now = time.time()
+    last = LAST_ACTION.get(uid, 0)
+    if now - last < cooldown: return False
+    LAST_ACTION[uid] = now
+    return True
+
+# =========================================================================
+# 🗄️ DATABASE (ASYNC WAL)
 # =========================================================================
 
 class Database:
@@ -71,7 +98,7 @@ class Database:
     def __new__(cls):
         if cls._instance is None: cls._instance = super(Database, cls).__new__(cls)
         return cls._instance
-    def __init__(self): self.path = DB_PATH
+    def __init__(self): self.path = cfg.DB_PATH
     def get_conn(self): return aiosqlite.connect(self.path, timeout=30.0)
 
     async def init(self):
@@ -80,27 +107,40 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY, username TEXT, 
-                    sub_end TEXT, joined_at TEXT
+                    sub_end INTEGER, joined_at INTEGER
                 )
             """)
             await db.execute("CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, days INTEGER, activations INTEGER)")
             await db.commit()
 
     async def upsert_user(self, uid: int, uname: str):
-        now = datetime.now().isoformat()
+        now = get_now_ts()
         async with self.get_conn() as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, username, sub_end, joined_at) VALUES (?, ?, ?, ?)", (uid, uname, now, now))
+            await db.execute("INSERT OR IGNORE INTO users (user_id, username, sub_end, joined_at) VALUES (?, ?, ?, ?)", (uid, uname, 0, now))
             await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (uname, uid))
             await db.commit()
 
-    async def check_sub(self, uid: int) -> bool:
-        if uid == ADMIN_ID: return True
+    async def check_sub_bool(self, uid: int) -> bool:
+        if uid == cfg.ADMIN_ID: return True
         async with self.get_conn() as db:
             async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c:
-                row = await c.fetchone()
-                if not row or not row[0]: return False
-                try: return datetime.fromisoformat(row[0]) > datetime.now()
-                except: return False
+                r = await c.fetchone()
+                return r[0] > get_now_ts() if (r and r[0]) else False
+
+    async def add_sub_days(self, uid: int, days: int):
+        now = get_now_ts()
+        async with self.get_conn() as db:
+            async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c:
+                r = await c.fetchone()
+                curr = r[0] if (r and r[0]) else 0
+        
+        start = curr if curr > now else now
+        new_end = start + (days * 86400)
+        
+        async with self.get_conn() as db:
+            await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end, uid))
+            await db.commit()
+        return new_end
 
     async def use_promo(self, uid: int, code: str) -> int:
         code = code.strip()
@@ -110,322 +150,370 @@ class Database:
                 if not r or r[1] < 1: return 0
                 days = r[0]
             await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ? COLLATE NOCASE", (code,))
-            await db.execute("DELETE FROM promos WHERE activations <= 0")
-            # Продлеваем
-            u_date = datetime.now()
-            async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c:
-                ur = await c.fetchone()
-                if ur and ur[0]:
-                    try: 
-                        curr = datetime.fromisoformat(ur[0])
-                        if curr > u_date: u_date = curr
-                    except: pass
-            new_end = u_date + timedelta(days=days)
-            await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end.isoformat(), uid))
+            await db.execute("DELETE FROM promos WHERE code = ? AND activations <= 0", (code,))
             await db.commit()
+        await self.add_sub_days(uid, days)
         return days
+
+    async def create_promo(self, days: int, acts: int) -> str:
+        code = f"PRO-{random.randint(10000,99999)}"
+        async with self.get_conn() as db:
+            await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
+            await db.commit()
+        return code
 
 db = Database()
 
 # =========================================================================
-# 🧠 REPORT ENGINE (Logic)
+# 📊 REPORT MANAGER (ASYNC EVOLUTION)
 # =========================================================================
 
 class ReportManager:
-    """Управляет записью отчетов в JSON"""
-    def __init__(self): 
+    def __init__(self):
         self.data = {}
+        self._save_task: Optional[asyncio.Task] = None
         self.load()
 
     def load(self):
-        if STATE_FILE.exists():
-            try: 
-                with open(STATE_FILE, 'r', encoding='utf-8') as f: 
-                    raw = json.load(f)
-                    # Восстанавливаем datetime
-                    self.data = {int(k): {**v, 'start': datetime.fromisoformat(v['start'])} for k, v in raw.items()}
+        if cfg.STATE_FILE.exists():
+            try:
+                with open(cfg.STATE_FILE, 'r', encoding='utf-8') as f:
+                    self.data = json.load(f)
             except: self.data = {}
 
-    def save(self):
+    def _write_to_file(self):
+        """Блокирующая запись, которая будет запущена в Executor"""
         try:
-            export = {str(k): {**v, 'start': v['start'].isoformat()} for k, v in self.data.items()}
-            with open(STATE_FILE, 'w', encoding='utf-8') as f: json.dump(export, f, ensure_ascii=False)
-        except: pass
+            with open(cfg.STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Save error: {e}")
+
+    async def _async_save(self):
+        """Асинхронная обертка с Debounce"""
+        try:
+            await asyncio.sleep(2.0) # Debounce: ждем 2 сек, накапливаем изменения
+            loop = asyncio.get_running_loop()
+            # Запуск блокирующего I/O в отдельном потоке
+            await loop.run_in_executor(None, self._write_to_file)
+        except Exception as e:
+            logger.error(f"Async save error: {e}")
+        finally:
+            self._save_task = None
+
+    def save(self):
+        """Триггер сохранения"""
+        if self._save_task and not self._save_task.done():
+            return # Задача уже запланирована, не плодим новые
+        self._save_task = asyncio.create_task(self._async_save())
+
+    async def flush(self):
+        """Принудительное сохранение при выходе"""
+        if self._save_task:
+            self._save_task.cancel()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._write_to_file)
+        logger.info("Reports flushed to disk.")
 
     def start_session(self, uid: int, mode: str):
-        self.data[uid] = {'mode': mode, 'logs': [], 'start': datetime.now(MSK_TZ)}
+        self.data[str(uid)] = {'mode': mode, 'logs': [], 'start': get_now_ts()}
         self.save()
 
     def add_log(self, uid: int, entry: str):
-        if uid in self.data:
-            ts = datetime.now(MSK_TZ).strftime("%H:%M")
-            self.data[uid]['logs'].append(f"[{ts}] {entry}")
+        uid_s = str(uid)
+        if uid_s in self.data:
+            ts = datetime.now(cfg.TZ).strftime("%H:%M:%S")
+            self.data[uid_s]['logs'].append(f"[{ts}] {entry}")
             self.save()
 
     def stop_session(self, uid: int):
-        if uid in self.data:
-            session = self.data.pop(uid)
+        uid_s = str(uid)
+        if uid_s in self.data:
+            res = self.data.pop(uid_s)
             self.save()
-            return session
+            return res
         return None
 
-    def get_active_mode(self, uid: int):
-        return self.data.get(uid, {}).get('mode')
+    def get_mode(self, uid: int):
+        return self.data.get(str(uid), {}).get('mode')
 
 rm = ReportManager()
 
 # =========================================================================
-# 🤖 USERBOT WORKER
+# 🤖 WORKER
 # =========================================================================
 
 class Worker:
     def __init__(self, uid: int):
         self.uid = uid
         self.client = None
-        self.status = "⚪️ Stopped"
 
     async def start(self):
-        s_path = SESSION_DIR / f"session_{self.uid}"
-        self.client = TelegramClient(str(s_path), API_ID, API_HASH, auto_reconnect=True)
+        s_path = cfg.SESSION_DIR / f"session_{self.uid}"
+        self.client = TelegramClient(str(s_path), cfg.API_ID, cfg.API_HASH, 
+                                     auto_reconnect=True, system_version="StatPro v63")
         try:
             await self.client.connect()
-            if not await self.client.is_user_authorized(): 
-                self.status = "🔴 Auth Failed"; return False
-            self.status = "🟢 Active"
+            if not await self.client.is_user_authorized(): return False
             self._bind()
             asyncio.create_task(self.client.run_until_disconnected())
             return True
-        except Exception as e:
-            logger.error(f"Worker Error: {e}")
+        except Exception:
+            logger.exception(f"Worker {self.uid} Crash")
             return False
 
     async def stop(self):
         if self.client: await self.client.disconnect()
-        self.status = "🔴 Stopped"
 
     def _bind(self):
-        """Логика перехвата сообщений"""
-        
-        @self.client.on(events.NewMessage(incoming=True))
+        @self.client.on(events.NewMessage)
         async def handler(e):
-            mode = rm.get_active_mode(self.uid)
-            if not mode: return
+            try:
+                mode = rm.get_mode(self.uid)
+                if not mode: return
 
-            # --- РЕЖИМ ДРОПЫ (Лог всех сообщений) ---
-            if mode == 'drop':
-                sender = await e.get_sender()
-                name = "Unknown"
-                if isinstance(sender, User):
-                    name = sender.first_name or sender.username or "User"
-                elif sender:
-                    name = getattr(sender, 'title', 'Chat')
+                # IT Mode (Outgoing)
+                if mode == 'it' and e.out:
+                    txt = e.text.lower() if e.text else ""
+                    if txt.startswith(('.встал', '.зм', '.пв')):
+                        rm.add_log(self.uid, f"CMD: {e.text}")
+                        try: await e.client(SendReactionRequest(e.chat_id, e.id, [types.ReactionEmoji(emoticon='✍️')]))
+                        except: pass
                 
-                txt = e.text or "[Media]"
-                rm.add_log(self.uid, f"{name}: {txt}")
-
-        @self.client.on(events.NewMessage(outgoing=True))
-        async def out_handler(e):
-            mode = rm.get_active_mode(self.uid)
-            # --- РЕЖИМ IT (Лог команд) ---
-            if mode == 'it':
-                # Перехват команд .встал, .зм, .пв
-                txt = e.text.lower()
-                if txt.startswith(('.встал', '.зм', '.пв')):
-                    parts = txt.split()
-                    cmd = parts[0]
-                    arg = parts[1] if len(parts) > 1 else ""
-                    rm.add_log(self.uid, f"CMD: {cmd.upper()} | Arg: {arg}")
-                    # Реакция для подтверждения
-                    try: await e.client(SendReactionRequest(e.chat_id, e.id, [types.ReactionEmoji(emoticon='✍️')]))
-                    except: pass
+                # Drop Mode (Incoming)
+                if mode == 'drop' and e.incoming:
+                    name = "Unknown"
+                    sender = await e.get_sender()
+                    if isinstance(sender, User): name = sender.first_name or "User"
+                    elif sender: name = getattr(sender, 'title', 'Chat')
+                    rm.add_log(self.uid, f"{name}: {e.text or '[Media]'}")
+            except: pass
 
 W_POOL: Dict[int, Worker] = {}
 
 # =========================================================================
-# 📱 BOT INTERFACE
+# 📱 BOT
 # =========================================================================
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=cfg.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 router = Router()
 dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(router)
 
 class AuthS(StatesGroup): PH=State(); CO=State(); PA=State()
 class PromoS(StatesGroup): CODE=State()
+class AdminSubS(StatesGroup): USER=State(); DAYS=State()
+class AdminPromoS(StatesGroup): DAYS=State(); ACTS=State()
 
-# --- КЛАВИАТУРЫ ---
-
-def kb_main(uid, is_sub=False):
-    """Главное меню - INLINE"""
-    st = "🟢 Активна" if is_sub else "🔴 Нет подписки"
+# --- KEYBOARDS ---
+def kb_main(uid):
     rows = [
-        [InlineKeyboardButton(text="📑 Открыть Раздел ОТЧЕТЫ", callback_data="open_reports")],
-        [InlineKeyboardButton(text="🔑 Вход (QR/Тел)", callback_data="m_auth"), InlineKeyboardButton(text="🎟 Промокод", callback_data="m_pro")],
-        [InlineKeyboardButton(text=f"💎 Подписка: {st}", callback_data="check_sub")]
+        [InlineKeyboardButton(text="📂 Открыть Отчеты", callback_data="open_reports")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="🔑 Вход в аккаунт", callback_data="auth_menu")]
     ]
-    if uid == ADMIN_ID:
-        rows.append([InlineKeyboardButton(text="👑 Админ: Создать Промо", callback_data="adm_promo")])
+    if uid == cfg.ADMIN_ID: rows.append([InlineKeyboardButton(text="👑 Админ Панель", callback_data="adm_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_reports_reply(mode=None):
-    """Меню отчетов - REPLY (Кнопки внизу)"""
-    # Индикация на кнопках
-    t_drop = "📦 Дроп (СТОП)" if mode == 'drop' else "📦 Дроп (СТАРТ)"
-    t_it = "💻 Айти (СТОП)" if mode == 'it' else "💻 Айти (СТАРТ)"
-    
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=t_drop), KeyboardButton(text=t_it)],
-            [KeyboardButton(text="🔙 Назад в меню")]
-        ],
-        resize_keyboard=True,
-        persistent=True
-    )
-    return kb
+    t_d = "📦 Дроп (СТОП)" if mode == 'drop' else "📦 Дроп (СТАРТ)"
+    t_i = "💻 Айти (СТОП)" if mode == 'it' else "💻 Айти (СТАРТ)"
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t_d), KeyboardButton(text=t_i)],[KeyboardButton(text="🔙 Главное Меню")]], resize_keyboard=True, persistent=True)
 
-# --- HANDLERS ---
-
+# --- START ---
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
     uid = m.from_user.id
     await db.upsert_user(uid, m.from_user.username or "User")
     
-    # Проверка подписки
     try:
-        mem = await bot.get_chat_member(SUB_CHANNEL, uid)
-        if mem.status in ['left', 'kicked'] and uid != ADMIN_ID:
-            return await m.answer(f"⛔️ <b>Доступ закрыт!</b>\nПодпишись на: {SUB_CHANNEL}", 
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")]]))
-    except: pass # Если бот не админ канала, пропускаем
+        mem = await bot.get_chat_member(cfg.SUB_CHANNEL, uid)
+        if mem.status in ['left', 'kicked'] and uid != cfg.ADMIN_ID:
+            return await m.answer(f"⛔️ <b>Нет подписки!</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подписаться", url=f"https://t.me/{cfg.SUB_CHANNEL.replace('@','')}")],[InlineKeyboardButton(text="✅ Проверить", callback_data="chk_s")]]))
+    except: pass
+    await m.answer(f"👋 <b>StatPro v63.0</b>\nID: <code>{uid}</code>", reply_markup=kb_main(uid))
 
-    is_sub = await db.check_sub(uid)
-    await m.answer("🤖 <b>AutoReporter v59.0</b>\nСистема автоматической отчетности.", 
-                   reply_markup=kb_main(uid, is_sub))
+@router.callback_query(F.data == "chk_s")
+async def chk_s(c: CallbackQuery, state: FSMContext): await c.message.delete(); await start(c.message, state)
 
-@router.callback_query(F.data == "check_sub")
-async def chk(c: CallbackQuery, state: FSMContext):
-    await c.message.delete()
-    await start(c.message, state)
+# --- PROFILE ---
+@router.callback_query(F.data == "profile")
+async def profile(c: CallbackQuery):
+    uid = c.from_user.id
+    active = await db.check_sub_bool(uid)
+    sub_date = "Активна" if active else "Истекла"
+    await c.message.edit_text(f"👤 <b>Профиль</b>\n💎 Подписка: {sub_date}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")],[InlineKeyboardButton(text="🔙 Назад", callback_data="chk_s")]]))
 
-# --- РАЗДЕЛ ОТЧЕТЫ (REPLY КНОПКИ) ---
-
-@router.callback_query(F.data == "open_reports")
-async def open_rep(c: CallbackQuery):
-    if not await db.check_sub(c.from_user.id): return await c.answer("⛔️ Нужна активная подписка!", True)
-    
-    # Проверяем воркера
-    if c.from_user.id not in W_POOL:
-         # Пробуем запустить тихо
-         w = Worker(c.from_user.id)
-         if await w.start(): W_POOL[c.from_user.id] = w
-         else: return await c.answer("⚠️ Сначала войдите в аккаунт (Кнопка Вход)!", True)
-
-    mode = rm.get_active_mode(c.from_user.id)
-    await c.message.delete() # Удаляем инлайн меню
-    await c.message.answer("🗂 <b>Панель Отчетов открыта!</b>\nИспользуй кнопки внизу 👇", reply_markup=kb_reports_reply(mode))
-
-# Обработка Reply кнопок
-@router.message(F.text.startswith("📦 Дроп"))
-async def toggle_drop(m: Message):
-    uid = m.from_user.id
-    curr = rm.get_active_mode(uid)
-    
-    if curr == 'drop':
-        # Стоп
-        data = rm.stop_session(uid)
-        file_io = io.BytesIO("\n".join(data['logs']).encode('utf-8')); file_io.name = "drop_log.txt"
-        await m.answer_document(BufferedInputFile(file_io.getvalue(), "drop_log.txt"), caption="✅ <b>Отчет Дропы завершен.</b>", reply_markup=kb_reports_reply(None))
-    else:
-        # Старт
-        if curr: rm.stop_session(uid) # Остановить другой режим если был
-        rm.start_session(uid, 'drop')
-        await m.answer("🟢 <b>Режим ДРОПЫ включен.</b>\nЛогирую все сообщения...", reply_markup=kb_reports_reply('drop'))
-
-@router.message(F.text.startswith("💻 Айти"))
-async def toggle_it(m: Message):
-    uid = m.from_user.id
-    curr = rm.get_active_mode(uid)
-    
-    if curr == 'it':
-        # Стоп
-        data = rm.stop_session(uid)
-        # Формируем красивый IT отчет
-        lines = ["💻 <b>IT ОТЧЕТ</b>", ""]
-        for log in data['logs']: lines.append(log)
-        text_rep = "\n".join(lines)
-        await m.answer(text_rep, reply_markup=kb_reports_reply(None))
-    else:
-        # Старт
-        if curr: rm.stop_session(uid)
-        rm.start_session(uid, 'it')
-        await m.answer("🟢 <b>Режим IT включен.</b>\nЛовлю команды: <code>.встал</code>, <code>.зм</code>...", reply_markup=kb_reports_reply('it'))
-
-@router.message(F.text == "🔙 Назад в меню")
-async def back_inline(m: Message, state: FSMContext):
-    # Убираем Reply клавиатуру
-    dummy = await m.answer("🔄", reply_markup=ReplyKeyboardRemove())
-    await dummy.delete()
-    # Возвращаем Inline
-    await start(m, state)
-
-# --- АВТОРИЗАЦИЯ И ПРОМО (Inline) ---
-
-@router.callback_query(F.data == "m_auth")
-async def auth_start(c: CallbackQuery):
-    await c.message.edit_text("📲 <b>Вход в аккаунт</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 QR-Код", callback_data="a_qr"), InlineKeyboardButton(text="📞 Телефон", callback_data="a_ph")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="check_sub")]
-    ]))
-
-@router.callback_query(F.data == "a_qr")
-async def auth_qr(c: CallbackQuery):
-    w = Worker(c.from_user.id); s_path = SESSION_DIR / f"session_{c.from_user.id}"
-    cl = TelegramClient(str(s_path), API_ID, API_HASH)
-    await cl.connect()
-    qr = await cl.qr_login()
-    img = qrcode.make(qr.url).convert("RGB"); bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
-    msg = await c.message.answer_photo(BufferedInputFile(bio.read(), "qr.png"), caption="📸 Сканируй! Жду 60 сек...")
-    try:
-        await qr.wait(60); await msg.delete(); await c.message.answer("✅ Готово! Нажми 'Назад' и открывай Отчеты.")
-        await cl.disconnect()
-    except: await msg.delete(); await c.message.answer("❌ Время вышло.")
-
-@router.callback_query(F.data == "m_pro")
-async def promo_ask(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("🎟 Введите код:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Отмена", callback_data="check_sub")]]))
+@router.callback_query(F.data == "promo")
+async def promo_1(c: CallbackQuery, state: FSMContext):
+    await c.message.edit_text("🎟 <b>Код:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="profile")]]))
     await state.set_state(PromoS.CODE)
 
 @router.message(PromoS.CODE)
-async def promo_use(m: Message, state: FSMContext):
-    d = await db.use_promo(m.from_user.id, m.text.strip())
-    if d: await m.answer(f"✅ Подписка продлена на {d} дней!")
-    else: await m.answer("❌ Неверный код.")
+async def promo_2(m: Message, state: FSMContext):
+    d = await db.use_promo(m.from_user.id, m.text)
+    if d: await m.answer(f"✅ +{d} дней.")
+    else: await m.answer("❌ Ошибка.")
     await state.clear(); await start(m, state)
 
-# --- АДМИНКА ---
-@router.callback_query(F.data == "adm_promo")
-async def adm_promo(c: CallbackQuery):
-    code = f"PRO-{random.randint(1000,9999)}"
-    async with db.get_conn() as d:
-        await d.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, 30, 1)); await d.commit() # 30 дней, 1 активация
-    await c.answer(f"Код создан: {code}", show_alert=True)
+# --- REPORTS ---
+@router.callback_query(F.data == "open_reports")
+async def open_rep(c: CallbackQuery):
+    uid = c.from_user.id
+    if not await db.check_sub_bool(uid): return await c.answer("⛔️ Нет подписки", True)
+    if uid not in W_POOL:
+        w = Worker(uid)
+        if await w.start(): W_POOL[uid] = w
+        else: return await c.answer("⚠️ Вы не вошли в аккаунт", True)
+    await c.message.delete()
+    await c.message.answer("📂 Меню", reply_markup=kb_reports_reply(rm.get_mode(uid)))
 
-# --- ЗАПУСК ---
+@router.message(F.text.startswith("📦 Дроп"))
+async def rep_drop(m: Message):
+    if not await db.check_sub_bool(m.from_user.id): return
+    if not can_toggle(m.from_user.id): return
+    
+    uid = m.from_user.id
+    if rm.get_mode(uid) == 'drop':
+        d = rm.stop_session(uid)
+        if d and d['logs']:
+            # Оптимизированная отдача файла без лишних IO
+            await m.answer_document(BufferedInputFile("\n".join(d['logs']).encode(), "drop.txt"), caption="✅", reply_markup=kb_reports_reply(None))
+        else: await m.answer("⚠️ Пусто", reply_markup=kb_reports_reply(None))
+    else:
+        rm.stop_session(uid)
+        rm.start_session(uid, 'drop'); await m.answer("🟢 REC", reply_markup=kb_reports_reply('drop'))
+
+@router.message(F.text.startswith("💻 Айти"))
+async def rep_it(m: Message):
+    if not await db.check_sub_bool(m.from_user.id): return
+    if not can_toggle(m.from_user.id): return
+
+    uid = m.from_user.id
+    if rm.get_mode(uid) == 'it':
+        d = rm.stop_session(uid)
+        if d and d['logs']:
+            txt = "\n".join(d['logs'])
+            if len(txt) > 4000: await m.answer_document(BufferedInputFile(txt.encode(), "it.txt"), caption="✅", reply_markup=kb_reports_reply(None))
+            else: await m.answer(f"💻 REPORT:\n\n{txt}", reply_markup=kb_reports_reply(None))
+        else: await m.answer("⚠️ Пусто", reply_markup=kb_reports_reply(None))
+    else:
+        rm.stop_session(uid)
+        rm.start_session(uid, 'it'); await m.answer("🟢 ON", reply_markup=kb_reports_reply('it'))
+
+@router.message(F.text == "🔙 Главное Меню")
+async def back(m: Message, state: FSMContext):
+    await m.answer("🏠", reply_markup=ReplyKeyboardRemove()); await start(m, state)
+
+# --- AUTH (OPTIMIZED QR) ---
+@router.callback_query(F.data == "auth_menu")
+async def auth(c: CallbackQuery):
+    await c.message.edit_text("🔑 Вход", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR", callback_data="l_qr")],[InlineKeyboardButton(text="📞 Tel", callback_data="l_ph")],[InlineKeyboardButton(text="🔙", callback_data="chk_s")]]))
+
+@router.callback_query(F.data == "l_qr")
+async def l_qr(c: CallbackQuery):
+    uid = c.from_user.id
+    client = TelegramClient(str(cfg.SESSION_DIR / f"session_{uid}"), cfg.API_ID, cfg.API_HASH)
+    await client.connect()
+    if await client.is_user_authorized(): await client.disconnect(); return await c.answer("✅ OK", True)
+    
+    qr = await client.qr_login()
+    # Оптимизация памяти BytesIO
+    import io
+    img = qrcode.make(qr.url).convert("RGB")
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    # Передаем байты сразу
+    await c.message.answer_photo(BufferedInputFile(bio.getvalue(), "qr.png"), caption="⏳ 500s")
+    
+    try: await qr.wait(500); await c.message.answer("✅ Success")
+    except: await c.message.answer("❌ Timeout")
+    finally: await client.disconnect()
+
+@router.callback_query(F.data == "l_ph")
+async def l_ph(c: CallbackQuery, state: FSMContext):
+    await c.message.edit_text("📞 Номер:"); await state.set_state(AuthS.PH)
+
+@router.message(AuthS.PH)
+async def l_ph_s(m: Message, state: FSMContext):
+    uid = m.from_user.id; cl = TelegramClient(str(cfg.SESSION_DIR / f"session_{uid}"), cfg.API_ID, cfg.API_HASH); await cl.connect()
+    try:
+        s = await cl.send_code_request(m.text)
+        await state.update_data(p=m.text, h=s.phone_code_hash, s=str(cfg.SESSION_DIR / f"session_{uid}"))
+        await cl.disconnect(); await m.answer("📩 Код:"); await state.set_state(AuthS.CO)
+    except Exception as e: await m.answer(f"❌ {e}")
+
+@router.message(AuthS.CO)
+async def l_co_s(m: Message, state: FSMContext):
+    d = await state.get_data()
+    if 's' not in d: return await state.clear()
+    cl = TelegramClient(d['s'], cfg.API_ID, cfg.API_HASH); await cl.connect()
+    try: await cl.sign_in(phone=d['p'], code=m.text, phone_code_hash=d['h']); await m.answer("✅ OK"); await cl.disconnect(); await state.clear(); await start(m, state)
+    except SessionPasswordNeededError: await m.answer("🔒 2FA:"); await cl.disconnect(); await state.set_state(AuthS.PA)
+    except Exception as e: await cl.disconnect(); await m.answer(f"❌ {e}")
+
+@router.message(AuthS.PA)
+async def l_pa_s(m: Message, state: FSMContext):
+    d = await state.get_data(); cl = TelegramClient(d['s'], cfg.API_ID, cfg.API_HASH); await cl.connect()
+    try: await cl.sign_in(password=m.text); await m.answer("✅ OK")
+    except Exception as e: await m.answer(f"❌ {e}")
+    finally: await cl.disconnect(); await state.clear(); await start(m, state)
+
+# --- ADMIN ---
+@router.callback_query(F.data == "adm_menu")
+async def adm(c: CallbackQuery):
+    if c.from_user.id != cfg.ADMIN_ID: return
+    await c.message.edit_text("👑 Admin", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Promo", callback_data="mk_p")],[InlineKeyboardButton(text="🎁 Give", callback_data="g_s")],[InlineKeyboardButton(text="🔙", callback_data="chk_s")]]))
+
+@router.callback_query(F.data == "mk_p")
+async def mk_p(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != cfg.ADMIN_ID: return
+    await c.message.answer("Days?"); await state.set_state(AdminPromoS.DAYS)
+
+@router.message(AdminPromoS.DAYS)
+async def mk_p_d(m: Message, state: FSMContext):
+    if m.from_user.id != cfg.ADMIN_ID: return
+    await state.update_data(d=int(m.text)); await m.answer("Acts?"); await state.set_state(AdminPromoS.ACTS)
+
+@router.message(AdminPromoS.ACTS)
+async def mk_p_a(m: Message, state: FSMContext):
+    if m.from_user.id != cfg.ADMIN_ID: return
+    d = await state.get_data(); c = await db.create_promo(d['d'], int(m.text))
+    await m.answer(f"Code: <code>{c}</code>"); await state.clear()
+
+@router.callback_query(F.data == "g_s")
+async def g_s(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != cfg.ADMIN_ID: return
+    await c.message.answer("ID?"); await state.set_state(AdminSubS.USER)
+
+@router.message(AdminSubS.USER)
+async def g_s_u(m: Message, state: FSMContext):
+    if m.from_user.id != cfg.ADMIN_ID: return
+    await state.update_data(u=m.text); await m.answer("Days?"); await state.set_state(AdminSubS.DAYS)
+
+@router.message(AdminSubS.DAYS)
+async def g_s_d(m: Message, state: FSMContext):
+    if m.from_user.id != cfg.ADMIN_ID: return
+    d = await state.get_data(); await db.upsert_user(int(d['u']), "Adm"); await db.add_sub_days(int(d['u']), int(m.text))
+    await m.answer("Done"); await state.clear()
+
+# --- MAIN ---
 async def main():
     await db.init()
-    # Автостарт сессий
-    for f in SESSION_DIR.glob("session_*.session"):
+    for f in cfg.SESSION_DIR.glob("session_*.session"):
         try:
             uid = int(f.stem.split("_")[1])
-            if await db.check_sub(uid):
+            if await db.check_sub_bool(uid):
                 w = Worker(uid)
                 if await w.start(): W_POOL[uid] = w
         except: pass
-        
-    logger.info("🔥 AutoReporter v59.0 Started")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    logger.info("🔥 StatPro v63.0 Started")
+    
+    try: await dp.start_polling(bot)
+    finally:
+        # Graceful Shutdown
+        await rm.flush()
+        if sys.platform != "win32": await db.get_conn().close()
 
 if __name__ == "__main__":
     try: asyncio.run(main())
