@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-💎 StatPro v69.2 - TITAN REBORN
--------------------------------
-Fixed: .g command silence (Updated AI Engine)
-Modules: Siphon, Deep Scan, Turbo Quiz, Secure Auth
+💎 StatPro v69.3 - TITAN ABSOLUTE POWER
+---------------------------------------
+Architect: StatPro AI
+Status: PRODUCTION READY
+Modules:
+1. ⚡️ Turbo Quiz AI (.g) - Fixed & Optimized
+2. 🌪 Siphon System (CSV -> Mass DM)
+3. 🧬 Deep Infinite Scan
+4. 🔐 Secure Numpad Auth
 """
 
 import asyncio
@@ -33,17 +38,18 @@ from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 
 from telethon import TelegramClient, events, types, functions
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneCodeInvalidError
 
-# --- AI CORE (UPDATED) ---
+# --- AI CORE (G4F) ---
 try:
     from g4f.client import AsyncClient
-    from g4f.Provider import Blackbox, PollinationsAI, DarkAI
+    import g4f
+    # Отключаем лишний шум в консоли от g4f
+    g4f.debug.logging = False
 except ImportError:
-    print("⚠️ Installing AI libs...")
+    print("⚠️ Libraries missing! Auto-installing...")
     os.system("pip install -U g4f[all] curl_cffi aiohttp")
     from g4f.client import AsyncClient
-    from g4f.Provider import Blackbox, PollinationsAI, DarkAI
 
 # =========================================================================
 # ⚙️ CONFIGURATION
@@ -51,16 +57,19 @@ except ImportError:
 
 @dataclass
 class Config:
+    # Переменные окружения
     BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
     ADMIN_ID: int = int(os.environ.get("ADMIN_ID", "0"))
     API_ID: int = int(os.environ.get("API_ID", "0"))
     API_HASH: str = os.environ.get("API_HASH", "")
     
+    # Пути
     BASE_DIR: Path = Path(__file__).resolve().parent
     SESSION_DIR: Path = BASE_DIR / "sessions"
-    DB_PATH: Path = BASE_DIR / "statpro_titan_v2.db"
+    DB_PATH: Path = BASE_DIR / "statpro_titan.db"
     TEMP_DIR: Path = BASE_DIR / "temp"
     
+    # Маскировка под iPhone 15 Pro Max (iOS 17.5.1)
     DEVICE_MODEL: str = "iPhone 15 Pro Max"
     SYSTEM_VERSION: str = "17.5.1"
     APP_VERSION: str = "10.8.1"
@@ -80,7 +89,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("StatPro")
 
 # =========================================================================
-# 🗄️ DATABASE
+# 🗄️ DATABASE ENGINE
 # =========================================================================
 
 class Database:
@@ -90,8 +99,23 @@ class Database:
     async def init(self):
         async with self.get_conn() as db:
             await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, sub_end INTEGER, joined_at INTEGER)")
-            await db.execute("CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, days INTEGER, activations INTEGER)")
+            # Таблица пользователей
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY, 
+                    username TEXT, 
+                    sub_end INTEGER, 
+                    joined_at INTEGER
+                )
+            """)
+            # Таблица промокодов
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS promos (
+                    code TEXT PRIMARY KEY, 
+                    days INTEGER, 
+                    activations INTEGER
+                )
+            """)
             await db.commit()
 
     async def get_all_users_ids(self) -> List[int]:
@@ -122,10 +146,13 @@ class Database:
                 days = r[0]
             await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ? COLLATE NOCASE", (code,))
             await db.execute("DELETE FROM promos WHERE activations <= 0")
+            
+            # Продление
             now = int(time.time())
             async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c2:
                 row = await c2.fetchone()
                 curr = row[0] if (row and row[0]) else 0
+            
             new_end = (curr if curr > now else now) + (days * 86400)
             await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end, uid))
             await db.commit()
@@ -141,24 +168,26 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 🧠 AI ENGINE (NEW CLIENT)
+# 🧠 AI ENGINE (TURBO QUIZ v2)
 # =========================================================================
 
 async def ask_gpt_turbo(question: str) -> str:
     """
-    Использует новый AsyncClient для стабильности.
+    Прямой запрос к AI через AsyncClient.
+    Оптимизировано для скорости и краткости.
     """
     system_prompt = (
-        "Ты играешь в викторину. Отвечай ТОЛЬКО правильным ответом."
-        "Если столица - пиши только название города."
-        "Если дата - пиши только год или число."
-        "Максимально коротко. Без точек в конце."
+        "Ты помощник для викторины. Твоя цель: дать ТОЛЬКО правильный ответ."
+        "Не пиши 'Ответ:', не пиши 'Я думаю'. Просто ответ."
+        "Если это год - пиши цифры."
+        "Если это имя - пиши имя."
+        "Максимально коротко."
     )
     
     client = AsyncClient()
     
     try:
-        # Попытка 1: Автоматический выбор
+        # Используем gpt-4o (g4f сам подберет рабочего провайдера)
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -166,21 +195,14 @@ async def ask_gpt_turbo(question: str) -> str:
                 {"role": "user", "content": question}
             ]
         )
-        return response.choices[0].message.content
+        result = response.choices[0].message.content
+        if not result: return "❌ AI Error: Empty response"
+        return result
     except Exception as e:
-        # Попытка 2: Принудительный провайдер (если авто не сработал)
-        try:
-            response = await client.chat.completions.create(
-                model="gpt-4",
-                provider=Blackbox,
-                messages=[{"role": "user", "content": question}]
-            )
-            return response.choices[0].message.content
-        except Exception as e2:
-            return f"❌ AI Error: {e2}"
+        return f"❌ AI Error: {str(e)[:50]}"
 
 # =========================================================================
-# 🦾 WORKER CORE
+# 🦾 WORKER CORE (USERBOT)
 # =========================================================================
 
 class Worker:
@@ -188,10 +210,14 @@ class Worker:
         self.uid = uid
         self.client = None
         self.spam_task = None
+        self.raid_targets = set()
+        self.afk_reason = None
 
     def _get_client(self, path):
         return TelegramClient(
-            str(path), cfg.API_ID, cfg.API_HASH, 
+            str(path), 
+            cfg.API_ID, 
+            cfg.API_HASH, 
             device_model=cfg.DEVICE_MODEL, 
             system_version=cfg.SYSTEM_VERSION, 
             app_version=cfg.APP_VERSION,
@@ -213,9 +239,13 @@ class Worker:
         client = self.client
 
         # --- ⚡️ TURBO QUIZ (.g) ---
+        # Реагирует на исходящие сообщения, начинающиеся с .g
         @client.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.g(?: |$)(.*)'))
         async def quiz_cmd(e):
-            # Логика захвата вопроса
+            # 1. Мгновенная визуальная реакция
+            await e.edit("⚡️...")
+            
+            # 2. Извлечение вопроса
             question = ""
             if e.is_reply:
                 r = await e.get_reply_message()
@@ -224,32 +254,30 @@ class Worker:
                 question = e.pattern_match.group(1)
             
             if not question: 
-                return await e.edit("⚡️ <b>Ошибка:</b> Нет текста вопроса!")
+                return await e.edit("❌ Текст не найден! (Реплай или текст)")
             
-            # Визуальный эффект загрузки
-            await e.edit("⚡️...")
-            
-            # Запрос к AI
+            # 3. Запрос к AI
             answer = await ask_gpt_turbo(question)
             
-            # Редактирование сообщения на ответ
-            await e.edit(answer)
+            # 4. Вывод ответа (жирным шрифтом)
+            await e.edit(f"<b>{answer}</b>", parse_mode='html')
 
         # --- 🧬 DEEP SCAN ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.scan(?:\s+(\d+))?'))
         async def deep_scan(e):
             limit_arg = e.pattern_match.group(1)
-            limit = int(limit_arg) if limit_arg else None
+            limit = int(limit_arg) if limit_arg else None # Если None - сканит всё
             
-            await e.edit(f"🧬 <b>Deep Scan...</b>\nTarget: {'ALL' if limit is None else limit}", parse_mode='html')
+            await e.edit(f"🧬 <b>Deep Scan Started...</b>\nLimit: {'Infinite' if limit is None else limit}\n<i>Collecting data...</i>", parse_mode='html')
             
-            users = {} 
+            users = {} # ID: [Username, Name]
             count = 0
+            
             try:
                 async for m in client.iter_messages(e.chat_id, limit=limit):
                     count += 1
-                    if count % 500 == 0:
-                        try: await e.edit(f"🧬 Scanned: {count}...")
+                    if count % 200 == 0:
+                        try: await e.edit(f"🧬 Scanned: {count} msgs... Found: {len(users)}")
                         except: pass
                     
                     if m.sender and isinstance(m.sender, types.User) and not m.sender.bot:
@@ -258,9 +286,10 @@ class Worker:
                             lname = m.sender.last_name or ""
                             users[m.sender.id] = [m.sender.username or "", f"{fname} {lname}".strip()]
             except Exception as ex:
-                await e.edit(f"❌ Error: {ex}")
+                await e.edit(f"❌ Scan Error: {ex}")
                 return
 
+            # CSV
             out = io.StringIO()
             w = csv.writer(out)
             w.writerow(["ID", "Username", "Name"])
@@ -270,10 +299,10 @@ class Worker:
             bio = io.BytesIO(out.getvalue().encode('utf-8-sig'))
             bio.name = f"Scan_{e.chat_id}.csv"
             
-            await client.send_file("me", bio, caption=f"✅ <b>Scan Done</b>\nUsers: {len(users)}", force_document=True, parse_mode='html')
+            await client.send_file("me", bio, caption=f"✅ <b>Scan Done</b>\nUsers Found: {len(users)}", force_document=True, parse_mode='html')
             await e.edit(f"✅ Saved {len(users)} users.")
 
-        # --- SPAM ---
+        # --- 🚀 SPAM ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(s|spam)\s+(.+)\s+(\d+)\s+([\d\.]+)'))
         async def spam_cmd(e):
             txt, cnt, dly = e.pattern_match.group(2), int(e.pattern_match.group(3)), float(e.pattern_match.group(4))
@@ -289,8 +318,8 @@ class Worker:
         async def stop_cmd(e):
             if self.spam_task: self.spam_task.cancel(); self.spam_task = None
             await e.edit("🛑 Stopped.")
-            
-        # --- MASS MENTION ---
+
+        # --- 📢 MASS MENTION ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.all(?:\s+(.+))?'))
         async def all_cmd(e):
             txt = e.pattern_match.group(1) or "."
@@ -303,12 +332,24 @@ class Worker:
                 if len(chunk) >= 5:
                     await client.send_message(e.chat_id, txt + "".join(chunk), parse_mode='html')
                     chunk = []
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2) # Задержка от бана
+
+        # --- AFK ---
+        @client.on(events.NewMessage(outgoing=True, pattern=r'^\.afk(?:\s+(.+))?'))
+        async def afk_cmd(e):
+            self.afk_reason = e.pattern_match.group(1)
+            await e.edit(f"💤 AFK: {self.afk_reason or 'OFF'}")
+
+        @client.on(events.NewMessage(incoming=True))
+        async def afk_handler(e):
+            if self.afk_reason and e.is_private and not e.out:
+                try: await e.reply(f"💤 <b>AFK</b>: {self.afk_reason}", parse_mode='html')
+                except: pass
 
 W_POOL: Dict[int, Worker] = {}
 
 # =========================================================================
-# 🤖 BOT UI
+# 🤖 BOT INTERFACE (AIOGRAM)
 # =========================================================================
 
 bot = Bot(token=cfg.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -326,7 +367,7 @@ def get_numpad_kb():
         [InlineKeyboardButton(text="1️⃣", callback_data="n_1"), InlineKeyboardButton(text="2️⃣", callback_data="n_2"), InlineKeyboardButton(text="3️⃣", callback_data="n_3")],
         [InlineKeyboardButton(text="4️⃣", callback_data="n_4"), InlineKeyboardButton(text="5️⃣", callback_data="n_5"), InlineKeyboardButton(text="6️⃣", callback_data="n_6")],
         [InlineKeyboardButton(text="7️⃣", callback_data="n_7"), InlineKeyboardButton(text="8️⃣", callback_data="n_8"), InlineKeyboardButton(text="9️⃣", callback_data="n_9")],
-        [InlineKeyboardButton(text="🔙", callback_data="n_del"), InlineKeyboardButton(text="0️⃣", callback_data="n_0"), InlineKeyboardButton(text="✅", callback_data="n_go")]
+        [InlineKeyboardButton(text="🔙 DEL", callback_data="n_del"), InlineKeyboardButton(text="0️⃣", callback_data="n_0"), InlineKeyboardButton(text="✅ GO", callback_data="n_go")]
     ])
 
 def kb_main(uid):
@@ -338,16 +379,23 @@ def kb_main(uid):
     if uid == cfg.ADMIN_ID: btns.append([InlineKeyboardButton(text="👑 Админ", callback_data="adm")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
+# --- START & MENUS ---
+
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"💎 <b>StatPro TITAN v69.2</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
+    await m.answer(f"💎 <b>StatPro TITAN v69.3</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "help")
 async def help_cb(c: CallbackQuery):
     await c.message.edit_text(
-        "⚡️ <b>Commands:</b>\n<code>.g</code> - AI Quiz (Reply)\n<code>.scan</code> - Scan Chat\n<code>.s [txt] [cnt] [time]</code> - Spam\n<code>.all</code> - Tag All",
+        "⚡️ <b>Commands:</b>\n"
+        "<code>.g [вопрос]</code> - AI Quiz\n"
+        "<code>.scan</code> - Scan Chat -> CSV\n"
+        "<code>.s [txt] [cnt] [time]</code> - Spam\n"
+        "<code>.all [text]</code> - Mass Mention\n"
+        "<code>.afk [reason]</code> - Auto Reply",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]])
     )
 
@@ -367,6 +415,8 @@ async def promo_use(m: Message, state: FSMContext):
 @router.callback_query(F.data == "back")
 async def back_cb(c: CallbackQuery, state: FSMContext): await c.message.delete(); await start(c.message, state)
 
+# --- SIPHON (ПЕРЕЛИВ) ---
+
 @router.callback_query(F.data == "siphon_start")
 async def siphon_init(c: CallbackQuery, state: FSMContext):
     if not await db.check_sub_bool(c.from_user.id): return await c.answer("No Sub!", True)
@@ -377,9 +427,11 @@ async def siphon_init(c: CallbackQuery, state: FSMContext):
 @router.message(SiphonS.FILE, F.document)
 async def siphon_file(m: Message, state: FSMContext):
     if not m.document.file_name.endswith('.csv'): return await m.answer("❌ .csv only!")
+    
     file = await bot.get_file(m.document.file_id)
     path = cfg.TEMP_DIR / f"siphon_{m.from_user.id}.csv"
     await bot.download_file(file.file_path, path)
+    
     ids = []
     try:
         with open(path, 'r', encoding='utf-8-sig') as f:
@@ -389,7 +441,9 @@ async def siphon_file(m: Message, state: FSMContext):
                 if r and r[0].isdigit(): ids.append(int(r[0]))
     except: return await m.answer("❌ Bad CSV")
     finally: os.remove(path)
-    if not ids: return await m.answer("❌ Empty")
+    
+    if not ids: return await m.answer("❌ Empty file")
+    
     await state.update_data(targets=ids)
     await m.answer(f"✅ Loaded {len(ids)} users.\n✍️ <b>Send post text:</b>")
     await state.set_state(SiphonS.MSG)
@@ -398,15 +452,15 @@ async def siphon_file(m: Message, state: FSMContext):
 async def siphon_msg(m: Message, state: FSMContext):
     await state.update_data(msg_text=m.text or m.caption or "Hello")
     data = await state.get_data()
-    await m.answer(f"🌪 Start Siphon?\nUsers: {len(data['targets'])}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 START", callback_data="siphon_run"), InlineKeyboardButton(text="❌", callback_data="back")]]))
+    await m.answer(f"🌪 Ready?\nUsers: {len(data['targets'])}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 START", callback_data="siphon_run"), InlineKeyboardButton(text="❌", callback_data="back")]]))
     await state.set_state(SiphonS.CONFIRM)
 
 @router.callback_query(F.data == "siphon_run", SiphonS.CONFIRM)
 async def siphon_exec(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     worker = W_POOL.get(c.from_user.id)
-    if not worker: return await c.answer("Offline", True)
-    await c.message.edit_text("🚀 Siphon Started!")
+    if not worker: return await c.answer("Worker Offline", True)
+    await c.message.edit_text("🚀 Siphon Started! Check DMs.")
     asyncio.create_task(run_siphon(c.from_user.id, worker, data['targets'], data['msg_text']))
     await state.clear()
 
@@ -416,10 +470,12 @@ async def run_siphon(uid, worker, targets, text):
         try:
             await worker.client.send_message(tid, text)
             ok += 1
-            await asyncio.sleep(random.randint(4, 8))
+            await asyncio.sleep(random.uniform(3, 7)) # Anti-Flood
         except: fail += 1
-    try: await bot.send_message(uid, f"✅ Siphon Done\nOK: {ok}\nFail: {fail}")
+    try: await bot.send_message(uid, f"✅ <b>Siphon Done</b>\nOK: {ok}\nFail: {fail}")
     except: pass
+
+# --- AUTH (NUMPAD) ---
 
 @router.callback_query(F.data == "auth")
 async def auth_ui(c: CallbackQuery):
@@ -479,6 +535,7 @@ async def qr_h(c: CallbackQuery):
     except: await msg.delete()
     finally: await cl.disconnect()
 
+# --- ADMIN ---
 @router.callback_query(F.data == "adm")
 async def adm(c: CallbackQuery): await c.message.edit_text("Admin:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Promo", callback_data="mk_p")], [InlineKeyboardButton(text="📢 Broadcast", callback_data="bc")]]))
 @router.callback_query(F.data == "mk_p")
@@ -497,8 +554,10 @@ async def bc_run(m: Message, state: FSMContext):
         except: pass
     await m.answer("Done"); await state.clear()
 
+# --- MAIN LOOP ---
 async def main():
     await db.init()
+    # Auto-restart sessions
     for f in cfg.SESSION_DIR.glob("session_*.session"):
         try:
             uid = int(f.stem.split("_")[1])
@@ -506,7 +565,7 @@ async def main():
                 w = Worker(uid)
                 if await w.start(): W_POOL[uid] = w
         except: pass
-    logger.info("🔥 TITAN REBORN")
+    logger.info("🔥 StatPro TITAN Started")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
