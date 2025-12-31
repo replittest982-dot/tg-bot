@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-💎 StatPro v69.0 - TITAN EDITION
---------------------------------
-Full Stack Userbot & Manager
-Modules: Siphon, Deep Scan, Turbo AI, Secure Auth
+💎 StatPro v69.0 - TITAN EDITION (FULL MERGE)
+---------------------------------------------
 Architect: StatPro AI
+Modules Included:
+1. 🌪 Siphon System (CSV Traffic -> Mass DM)
+2. ⚡️ Turbo Quiz AI (.g / .G command via GPT-4o)
+3. 🧬 Deep Infinite Scan (No duplicates)
+4. 🔐 Secure Numpad Auth (Anti-Detect)
 """
 
 import asyncio
@@ -32,7 +35,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, 
-    CallbackQuery, Message, BufferedInputFile, ContentType
+    CallbackQuery, Message, BufferedInputFile
 )
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
@@ -42,15 +45,15 @@ from telethon import TelegramClient, events, types, functions
 from telethon.errors import (
     SessionPasswordNeededError, 
     FloodWaitError, 
-    PhoneCodeInvalidError, 
-    UserPrivacyRestrictedError
+    PhoneCodeInvalidError
 )
 
-# --- AI CORE ---
+# --- AI CORE (GPT) ---
 try:
     import g4f
     g4f.debug.logging = False
 except ImportError:
+    print("⚠️ Installing AI libs...")
     os.system("pip install -U g4f curl_cffi")
     import g4f
 
@@ -169,16 +172,18 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 🧠 AI ENGINE (TURBO QUIZ)
+# 🧠 AI ENGINE (TURBO QUIZ LOGIC)
 # =========================================================================
 
 async def ask_gpt_turbo(question: str) -> str:
-    """Оптимизированный запрос к GPT-4o для викторин"""
+    """
+    Оптимизированный запрос к GPT-4o для викторин.
+    """
     system_prompt = (
         "Ты играешь в викторину. Твоя задача: дать верный ответ МАКСИМАЛЬНО КОРОТКО."
         "Если это тест, напиши только букву или цифру."
         "Если вопрос текстом, напиши только ответ (1-3 слова)."
-        "Не используй вводные слова."
+        "Не используй вводные слова типа 'Ответ', 'Я думаю'."
     )
     try:
         response = await g4f.ChatCompletion.create_async(
@@ -203,10 +208,9 @@ class Worker:
         self.spam_task = None
         self.raid_targets = set()
         self.afk_reason = None
-        self.siphon_active = False
 
     def _get_client(self, path):
-        # Строгая эмуляция iOS (Без lang_pack, чтобы не было ошибок)
+        # Строгая эмуляция iOS
         return TelegramClient(
             str(path), 
             cfg.API_ID, 
@@ -231,14 +235,7 @@ class Worker:
     def _bind(self):
         client = self.client
 
-        # --- HANDLERS ---
-        @client.on(events.NewMessage(incoming=True))
-        async def afk_handler(e):
-            if self.afk_reason and e.is_private and not e.out:
-                try: await e.reply(f"💤 <b>AFK</b>: {self.afk_reason}", parse_mode='html')
-                except: pass
-
-        # ⚡️ TURBO QUIZ (.g)
+        # --- ⚡️ TURBO QUIZ (.g) ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.g(?:\s+(.+))?$'))
         async def quiz_cmd(e):
             question = ""
@@ -248,19 +245,19 @@ class Worker:
             else:
                 question = e.pattern_match.group(1)
             
-            if not question: return await e.edit("⚡️ .g [вопрос] или реплай")
+            if not question: return await e.edit("⚡️ <b>Usage:</b> .g [question] or reply")
             
-            await e.edit("⚡️") # Маркер работы
+            await e.edit("⚡️") # Индикатор работы
             answer = await ask_gpt_turbo(question)
             await e.edit(answer)
 
-        # ⚫️ DEEP SCAN (Infinite)
+        # --- 🧬 DEEP SCAN ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.scan(?:\s+(\d+))?'))
         async def deep_scan(e):
             limit_arg = e.pattern_match.group(1)
-            limit = int(limit_arg) if limit_arg else None # Если None - качает всё
+            limit = int(limit_arg) if limit_arg else None
             
-            await e.edit(f"🧬 <b>Deep Scan Started...</b>\nTarget: {'ALL' if limit is None else limit}\n<i>Please wait...</i>", parse_mode='html')
+            await e.edit(f"🧬 <b>Deep Scan Started...</b>\nTarget: {'ALL' if limit is None else limit}\n<i>Wait...</i>", parse_mode='html')
             
             users = {} # ID: [Username, Name]
             count = 0
@@ -268,7 +265,7 @@ class Worker:
             try:
                 async for m in client.iter_messages(e.chat_id, limit=limit):
                     count += 1
-                    if count % 1000 == 0:
+                    if count % 500 == 0:
                         try: await e.edit(f"🧬 Scanned: {count} msgs... Found: {len(users)}")
                         except: pass
                     
@@ -278,10 +275,9 @@ class Worker:
                             lname = m.sender.last_name or ""
                             users[m.sender.id] = [m.sender.username or "", f"{fname} {lname}".strip()]
             except Exception as ex:
-                await e.edit(f"❌ Scan Error: {ex}")
+                await e.edit(f"❌ Error: {ex}")
                 return
 
-            # CSV Generation
             out = io.StringIO()
             w = csv.writer(out)
             w.writerow(["ID", "Username", "Name"])
@@ -291,10 +287,10 @@ class Worker:
             bio = io.BytesIO(out.getvalue().encode('utf-8-sig'))
             bio.name = f"Scan_{e.chat_id}_{len(users)}.csv"
             
-            await client.send_file("me", bio, caption=f"✅ <b>Scan Complete</b>\nProcessed: {count} msgs\nUnique: {len(users)}", force_document=True, parse_mode='html')
-            await e.edit(f"✅ Saved {len(users)} users to Saved Messages.")
+            await client.send_file("me", bio, caption=f"✅ <b>Scan Done</b>\nUnique Users: {len(users)}", force_document=True, parse_mode='html')
+            await e.edit(f"✅ Saved {len(users)} users.")
 
-        # 🚀 SPAM (.s)
+        # --- STANDARD COMMANDS ---
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(s|spam)\s+(.+)\s+(\d+)\s+([\d\.]+)'))
         async def spam_cmd(e):
             txt, cnt, dly = e.pattern_match.group(2), int(e.pattern_match.group(3)), float(e.pattern_match.group(4))
@@ -306,12 +302,6 @@ class Worker:
                     except: break
             self.spam_task = asyncio.create_task(run())
 
-        @client.on(events.NewMessage(outgoing=True, pattern=r'^\.stop$'))
-        async def stop_cmd(e):
-            if self.spam_task: self.spam_task.cancel(); self.spam_task = None
-            await e.edit("🛑 Stopped.")
-
-        # 📢 MASS MENTION (.all)
         @client.on(events.NewMessage(outgoing=True, pattern=r'^\.all(?:\s+(.+))?'))
         async def all_cmd(e):
             txt = e.pattern_match.group(1) or "."
@@ -321,15 +311,15 @@ class Worker:
             for p in parts:
                 if p.bot or p.deleted: continue
                 chunk.append(f"<a href='tg://user?id={p.id}'>\u200b</a>")
-                if len(chunk) >= 5: # Пачки по 5 для безопасности
+                if len(chunk) >= 5:
                     await client.send_message(e.chat_id, txt + "".join(chunk), parse_mode='html')
                     chunk = []
                     await asyncio.sleep(2)
 
-        @client.on(events.NewMessage(outgoing=True, pattern=r'^\.afk(?:\s+(.+))?'))
-        async def afk_cmd(e):
-            self.afk_reason = e.pattern_match.group(1)
-            await e.edit(f"💤 AFK: {self.afk_reason or 'OFF'}")
+        @client.on(events.NewMessage(outgoing=True, pattern=r'^\.stop$'))
+        async def stop_cmd(e):
+            if self.spam_task: self.spam_task.cancel(); self.spam_task = None
+            await e.edit("🛑 Stopped.")
 
 W_POOL: Dict[int, Worker] = {}
 
@@ -346,8 +336,6 @@ class AuthS(StatesGroup): PH=State(); CO=State(); PA=State()
 class PromoS(StatesGroup): CODE=State()
 class SiphonS(StatesGroup): FILE=State(); MSG=State(); CONFIRM=State()
 class AdminS(StatesGroup): PD=State(); PA=State(); CAST=State()
-
-# --- HELPERS ---
 
 def get_numpad_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -372,17 +360,16 @@ def kb_main(uid):
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"💎 <b>StatPro TITAN v69</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
+    await m.answer(f"💎 <b>StatPro TITAN v69.0</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "help")
 async def help_cb(c: CallbackQuery):
     await c.message.edit_text(
         "⚡️ <b>Commands:</b>\n"
-        "<code>.g [текст]</code> - Turbo Quiz AI\n"
-        "<code>.scan [limit]</code> - Deep Scan -> CSV\n"
+        "<code>.g [вопрос]</code> - Turbo Quiz AI\n"
+        "<code>.scan</code> - Deep Scan -> CSV\n"
         "<code>.s [txt] [cnt] [time]</code> - Spam\n"
-        "<code>.all [text]</code> - Mass Tag\n"
-        "<code>.afk [reason]</code> - Auto Reply",
+        "<code>.all [text]</code> - Mass Tag",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]])
     )
 
@@ -416,12 +403,10 @@ async def siphon_init(c: CallbackQuery, state: FSMContext):
 async def siphon_file(m: Message, state: FSMContext):
     if not m.document.file_name.endswith('.csv'): return await m.answer("❌ .csv only!")
     
-    # Download
     file = await bot.get_file(m.document.file_id)
     path = cfg.TEMP_DIR / f"siphon_{m.from_user.id}.csv"
     await bot.download_file(file.file_path, path)
     
-    # Parse IDs
     ids = []
     try:
         with open(path, 'r', encoding='utf-8-sig') as f:
@@ -564,7 +549,6 @@ async def mk_pa(m: Message, state: FSMContext):
 
 async def main():
     await db.init()
-    # Auto-start valid sessions
     for f in cfg.SESSION_DIR.glob("session_*.session"):
         try:
             uid = int(f.stem.split("_")[1])
