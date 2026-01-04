@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-💎 StatPro v73.0 - UNIVERSAL EDITION
-------------------------------------
-Архитектура: Non-blocking Event Loop
-Новое:
-1. 📂 Всеядный парсер: Читает .txt, .csv, старые базы. Ищет ID через Regex.
-2. 🛡 Защита: Авто-определение кодировки (UTF-8 / Windows-1251).
-3. ⚡️ Ядро: Полная асинхронность, воркер не блокирует бота.
-4. 🇷🇺 Полный русский перевод.
+💎 StatPro v74.0 - KAMIKAZE EDITION
+-----------------------------------
+Режим: AGGRESSIVE SPAM
+Особенности:
+1. Игнорирует ошибки приватности/удаленных аккаунтов.
+2. Пытается пробить PeerIdInvalid через get_input_entity.
+3. Минимальные задержки (высокий риск бана).
+4. Читает любые файлы (txt/csv/excel-csv).
 """
 
 import asyncio
@@ -26,7 +26,6 @@ import json
 from pathlib import Path
 from typing import Dict, List
 from dataclasses import dataclass
-from datetime import datetime
 
 # --- БИБЛИОТЕКИ ---
 from aiogram import Bot, Dispatcher, Router, F
@@ -38,8 +37,12 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 
-from telethon import TelegramClient, events, types
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon import TelegramClient, events, types, functions
+from telethon.errors import (
+    SessionPasswordNeededError, FloodWaitError, 
+    UserPrivacyRestrictedError, UserDeactivatedError, 
+    PeerIdInvalidError, ChatWriteForbiddenError
+)
 
 # --- AI CORE ---
 try:
@@ -64,7 +67,7 @@ class Config:
     
     BASE_DIR: Path = Path(__file__).resolve().parent
     SESSION_DIR: Path = BASE_DIR / "sessions"
-    DB_PATH: Path = BASE_DIR / "statpro_universal.db"
+    DB_PATH: Path = BASE_DIR / "statpro_kamikaze.db"
     TEMP_DIR: Path = BASE_DIR / "temp"
     
     DEVICE_MODEL: str = "iPhone 15 Pro Max"
@@ -75,7 +78,7 @@ class Config:
         self.SESSION_DIR.mkdir(parents=True, exist_ok=True)
         self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         if not all([self.BOT_TOKEN, self.API_ID, self.API_HASH]):
-            print("❌ ОШИБКА: Не заполнены переменные окружения!")
+            print("❌ ОШИБКА: Заполни переменные окружения!")
             sys.exit(1)
 
 cfg = Config()
@@ -102,7 +105,7 @@ class Database:
                     joined_at INTEGER
                 )
             """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub ON users(sub_end)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_sub ON users(sub_end)")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS promos (
                     code TEXT PRIMARY KEY, 
@@ -122,34 +125,29 @@ class Database:
     async def upsert_user(self, uid: int, uname: str):
         now = int(time.time())
         async with self.get_conn() as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, username, sub_end, joined_at) VALUES (?, ?, 0, ?)", (uid, uname, now))
+            await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?, 0, ?)", (uid, uname, now))
             await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (uname, uid))
             await db.commit()
 
     async def use_promo(self, uid: int, code: str) -> int:
-        code = code.strip()
         async with self.get_conn() as db:
-            async with db.execute("SELECT days, activations FROM promos WHERE code = ? COLLATE NOCASE", (code,)) as c:
+            async with db.execute("SELECT days, activations FROM promos WHERE code = ? COLLATE NOCASE", (code.strip(),)) as c:
                 r = await c.fetchone()
                 if not r or r[1] < 1: return 0
                 days = r[0]
-            
-            await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ? COLLATE NOCASE", (code,))
-            await db.execute("DELETE FROM promos WHERE activations <= 0")
+            await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ?", (code.strip(),))
             await db.execute("INSERT OR IGNORE INTO users (user_id, sub_end, joined_at) VALUES (?, 0, ?)", (uid, int(time.time())))
-            
             now = int(time.time())
             async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (uid,)) as c2:
                 row = await c2.fetchone()
                 curr = row[0] if (row and row[0]) else 0
-            
             new_end = (curr if curr > now else now) + (days * 86400)
             await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_end, uid))
             await db.commit()
         return days
 
     async def create_promo(self, days: int, acts: int) -> str:
-        code = f"TITAN-{random.randint(100,999)}"
+        code = f"KAMIKAZE-{random.randint(100,999)}"
         async with self.get_conn() as db:
             await db.execute("INSERT INTO promos VALUES (?, ?, ?)", (code, days, acts))
             await db.commit()
@@ -163,37 +161,25 @@ class Database:
 db = Database()
 
 # =========================================================================
-# 🧠 AI ENGINE (РОТАЦИЯ)
+# 🧠 AI ENGINE
 # =========================================================================
 
-async def ask_gpt_safe(system_prompt: str, user_content: str) -> str:
+async def ask_gpt_safe(sys_p: str, user_p: str) -> str:
     client = AsyncClient()
-    providers = [
-        g4f.Provider.Blackbox,
-        g4f.Provider.DeepInfra,
-        g4f.Provider.PollinationsAI,
-        g4f.Provider.DarkAI
-    ]
-
-    for provider in providers:
+    providers = [g4f.Provider.Blackbox, g4f.Provider.DeepInfra, g4f.Provider.PollinationsAI, g4f.Provider.DarkAI]
+    for p in providers:
         try:
             response = await client.chat.completions.create(
-                model="gpt-4o",
-                provider=provider,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ]
+                model="gpt-4o", provider=p,
+                messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}]
             )
             res = response.choices[0].message.content
-            if res and len(res.strip()) > 0:
-                return res
+            if res: return res
         except: continue
-            
-    return "❌ Ошибка AI: Все каналы заняты."
+    return "❌ AI Error"
 
 # =========================================================================
-# 🦾 WORKER (ЮЗЕРБОТ)
+# 🦾 WORKER (USERBOT)
 # =========================================================================
 
 class Worker:
@@ -205,10 +191,8 @@ class Worker:
     def _get_client(self, path):
         return TelegramClient(
             str(path), cfg.API_ID, cfg.API_HASH, 
-            device_model=cfg.DEVICE_MODEL, 
-            system_version=cfg.SYSTEM_VERSION, 
-            app_version=cfg.APP_VERSION,
-            sequential_updates=False 
+            device_model=cfg.DEVICE_MODEL, system_version=cfg.SYSTEM_VERSION, app_version=cfg.APP_VERSION,
+            sequential_updates=False
         )
 
     async def start(self):
@@ -217,16 +201,14 @@ class Worker:
             await self.client.connect()
             if not await self.client.is_user_authorized(): return False
             self._bind()
-            asyncio.create_task(self._run_safe()) # Non-blocking start
+            asyncio.create_task(self._run_safe())
             return True
-        except Exception as e:
-            logger.error(f"Worker {self.uid} start error: {e}")
-            return False
+        except: return False
 
     async def _run_safe(self):
         while True:
             try: await self.client.run_until_disconnected()
-            except Exception:
+            except: 
                 await asyncio.sleep(5)
                 try: await self.client.connect()
                 except: pass
@@ -235,110 +217,68 @@ class Worker:
     def _bind(self):
         cl = self.client
 
-        # --- .g (AI) ---
+        # --- .g ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.g(?: |$)(.*)'))
-        async def quiz_cmd(e):
-            await e.edit("⚡️...")
-            q = e.pattern_match.group(1)
-            if not q and e.is_reply:
-                r = await e.get_reply_message()
-                q = r.text or r.caption
-            if not q: return await e.edit("❌ Текст?")
-            ans = await ask_gpt_safe("Ты помощник викторины. Ответ 1-2 слова.", q)
+        async def quiz(e):
+            await e.edit("⚡️")
+            q = e.pattern_match.group(1) or (await e.get_reply_message()).text if e.is_reply else ""
+            if not q: return
+            ans = await ask_gpt_safe("Ответ 1-3 слова.", q)
             await e.edit(f"<b>{ans}</b>", parse_mode='html')
 
-        # --- .report (AI) ---
+        # --- .report ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.report$'))
-        async def report_cmd(e):
-            await e.edit("🕵️‍♂️ <b>Сбор данных...</b>")
-            topic_id = None
-            if e.reply_to: topic_id = e.reply_to.reply_to_top_id or e.reply_to.reply_to_msg_id
-
-            keywords = ['айти', 'вбив', 'номер', 'код', 'встал', 'слет', 'сек', 'ща', 'готово', 'сдох', 'взял', 'отстоял']
+        async def report(e):
+            await e.edit("🕵️‍♂️")
+            tid = e.reply_to.reply_to_top_id if e.reply_to else None
             logs = []
+            keys = ['айти', 'вбив', 'номер', 'код', 'встал', 'слет', 'сек', 'ща', 'готово', 'сдох', 'взял', 'отстоял']
             try:
-                async for m in cl.iter_messages(e.chat_id, limit=1000, reply_to=topic_id):
-                    if m.text and any(k in m.text.lower() for k in keywords):
-                        ts = m.date.strftime("%H:%M")
-                        name = m.sender.first_name if m.sender else "User"
-                        logs.append(f"[{ts}] {name}: {m.text}")
-            except Exception as ex: return await e.edit(f"❌ Ошибка: {ex}")
-
-            if not logs: return await e.edit("❌ Пусто.")
-            logs = logs[::-1]
-            prompt = """
-            Анализируй логи.
-            1. "айти"/"вбив"/"взял" -> Старт.
-            2. >35 мин без "слет" -> ✅ Отстоял.
-            3. "слет"/"бан" -> ❌ Слет.
-            Верни JSON: [{"num": "номер", "time": "мин", "status": "✅"}]
-            """
-            res = await ask_gpt_safe(prompt, "\n".join(logs))
+                async for m in cl.iter_messages(e.chat_id, limit=1000, reply_to=tid):
+                    if m.text and any(k in m.text.lower() for k in keys):
+                        logs.append(f"[{m.date.strftime('%H:%M')}] {m.sender.first_name if m.sender else 'U'}: {m.text}")
+            except: return await e.edit("❌ Err")
+            
+            if not logs: return await e.edit("❌ Empty")
+            prompt = """Analyze logs. 1. Start: "айти"/"вбив". 2. Success: >35 min no "слет". 3. Fail: "слет". JSON: [{"num":"x","time":"x","status":"✅"}]"""
+            res = await ask_gpt_safe(prompt, "\n".join(logs[::-1]))
             try:
-                json_str = re.search(r'\[.*\]', res, re.DOTALL).group()
-                data = json.loads(json_str)
-                txt = "📊 <b>ОТЧЕТ:</b>\n\n"
-                ok = 0
-                for i in data:
-                    st = i.get('status','?')
-                    txt += f"📱 {i.get('num','?')} | ⏱ {i.get('time','0')} | {st}\n"
-                    if "✅" in st: ok += 1
-                txt += f"\n🏆 <b>Всего OK: {ok}</b>"
+                data = json.loads(re.search(r'\[.*\]', res, re.DOTALL).group())
+                txt = "📊 <b>REPORT:</b>\n" + "\n".join([f"📱 {i.get('num','?')} | {i.get('time','0')}m | {i.get('status','?')}" for i in data])
                 await e.edit(txt, parse_mode='html')
-            except: await e.edit(f"📝 <b>Текст:</b>\n{res}", parse_mode='html')
+            except: await e.edit(f"📝 {res}", parse_mode='html')
 
         # --- .scan ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.scan$'))
         async def scan(e):
-            await e.edit("🔎 <b>Сканирую...</b>")
-            users = {}
+            await e.edit("🔎 Scan...")
+            u = {}
             try:
-                async for m in cl.iter_messages(e.chat_id, limit=3000):
+                async for m in cl.iter_messages(e.chat_id, limit=None):
                     if m.sender and isinstance(m.sender, types.User) and not m.sender.bot:
-                        if m.sender_id not in users:
-                            users[m.sender_id] = [m.sender.username or "", m.sender.first_name or ""]
+                        u[m.sender_id] = [m.sender.username or "", m.sender.first_name or ""]
             except: pass
             
-            out = io.StringIO(); w = csv.writer(out)
-            w.writerow(["ID", "Username", "Name"])
-            for uid, d in users.items(): w.writerow([uid, d[0], d[1]])
+            out = io.StringIO(); w = csv.writer(out); w.writerow(["ID", "Username", "Name"])
+            for uid, d in u.items(): w.writerow([uid, d[0], d[1]])
             out.seek(0)
-            bio = io.BytesIO(out.getvalue().encode('utf-8-sig'))
-            bio.name = f"Scan_{e.chat_id}.csv"
-            await cl.send_file("me", bio, caption=f"✅ Найдено: {len(users)}")
-            await e.edit(f"✅ Готово: {len(users)}")
+            bio = io.BytesIO(out.getvalue().encode('utf-8-sig')); bio.name = "Scan.csv"
+            await cl.send_file("me", bio, caption=f"✅ {len(u)} users"); await e.edit("✅")
 
         # --- .spam ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.(s|spam)\s+(.+)\s+(\d+)\s+([\d\.]+)'))
         async def spam(e):
-            txt, cnt, dly = e.pattern_match.group(2), int(e.pattern_match.group(3)), float(e.pattern_match.group(4))
+            t, c, d = e.pattern_match.group(2), int(e.pattern_match.group(3)), float(e.pattern_match.group(4))
             await e.delete()
-            async def run():
-                for _ in range(cnt):
-                    try: await cl.send_message(e.chat_id, txt); await asyncio.sleep(dly)
+            async def r():
+                for _ in range(c):
+                    try: await cl.send_message(e.chat_id, t); await asyncio.sleep(d)
                     except: break
-            self.spam_task = asyncio.create_task(run())
+            self.spam_task = asyncio.create_task(r())
 
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.stop$'))
         async def stop(e):
-            if self.spam_task: self.spam_task.cancel(); await e.edit("🛑 Стоп.")
-
-        # --- .all ---
-        @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.all(?:\s+(.+))?'))
-        async def tag_all(e):
-            await e.delete()
-            txt = e.pattern_match.group(1) or "."
-            try:
-                parts = await cl.get_participants(e.chat_id)
-                chunk = []
-                for p in parts:
-                    if not p.bot and not p.deleted:
-                        chunk.append(f"<a href='tg://user?id={p.id}'>\u200b</a>")
-                        if len(chunk) >= 5:
-                            await cl.send_message(e.chat_id, txt + "".join(chunk), parse_mode='html')
-                            chunk = []
-                            await asyncio.sleep(2)
-            except: pass
+            if self.spam_task: self.spam_task.cancel(); await e.edit("🛑")
 
 W_POOL: Dict[int, Worker] = {}
 
@@ -358,7 +298,7 @@ class AdminS(StatesGroup): PD=State(); PA=State()
 
 def kb_main(uid):
     btns = [
-        [InlineKeyboardButton(text="🌪 Перелив (Siphon)", callback_data="siphon_start")],
+        [InlineKeyboardButton(text="🌪 ПЕРЕЛИВ (Siphon)", callback_data="siphon_start")],
         [InlineKeyboardButton(text="📚 Инфо", callback_data="help"), InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🔑 Вход (Auth)", callback_data="auth")]
     ]
@@ -379,238 +319,138 @@ def get_numpad():
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"💎 <b>StatPro TITANIUM v73.0</b>\nПривет, {m.from_user.first_name}!", reply_markup=kb_main(m.from_user.id))
+    await m.answer(f"💎 <b>StatPro KAMIKAZE v74.0</b>\nID: <code>{m.from_user.id}</code>", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "help")
-async def hlp(c: CallbackQuery):
-    txt = "⚡️ <b>Команды:</b>\n.g [текст] - ИИ ответ\n.report - Анализ топика\n.scan - Сбор базы\n.spam [текст] [кол] [сек]\n.all [текст] - Тег всех"
-    await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
-
+async def hlp(c: CallbackQuery): await c.message.edit_text("Команды: .g, .report, .scan, .spam, .all", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
 @router.callback_query(F.data == "back")
 async def back(c: CallbackQuery, state: FSMContext): await c.message.delete(); await start(c.message, state)
-
 @router.callback_query(F.data == "profile")
 async def prof(c: CallbackQuery):
     info = await db.get_user_info(c.from_user.id)
-    sub = "🔴 Нет"
-    if info and info[0] and info[0] > time.time():
-        days = int((info[0] - time.time()) / 86400)
-        sub = f"🟢 Активна ({days} дн.)"
-    stat = "🟢 В сети" if c.from_user.id in W_POOL else "🔴 Отключен"
-    txt = f"👤 <b>Профиль</b>\n🆔: {c.from_user.id}\n💎 Подписка: {sub}\n🔌 Воркер: {stat}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")], [InlineKeyboardButton(text="🔙", callback_data="back")]])
-    await c.message.edit_text(txt, reply_markup=kb)
+    sub = f"🟢 Актив ({int((info[0]-time.time())/86400)} дн)" if info and info[0] > time.time() else "🔴 Нет"
+    stat = "🟢 ON" if c.from_user.id in W_POOL else "🔴 OFF"
+    await c.message.edit_text(f"👤 <b>Профиль</b>\n💎 Подписка: {sub}\n🔌 Воркер: {stat}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промо", callback_data="promo"), InlineKeyboardButton(text="🔙", callback_data="back")]]))
 
 @router.callback_query(F.data == "promo")
-async def prm(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Введите код:"); await state.set_state(PromoS.CODE)
+async def prm(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Код:"); await state.set_state(PromoS.CODE)
 @router.message(PromoS.CODE)
-async def prm_use(m: Message, state: FSMContext):
-    d = await db.use_promo(m.from_user.id, m.text)
-    if d: await m.answer(f"✅ Добавлено: {d} дней"); await start(m, state)
-    else: await m.answer("❌ Неверно.")
+async def prm_u(m: Message, state: FSMContext):
+    if await db.use_promo(m.from_user.id, m.text): await m.answer("✅ Активировано"); await start(m, state)
+    else: await m.answer("❌ Ошибка")
     await state.clear()
 
-# --- SIPHON (UNIVERSAL PARSER) ---
+# --- SIPHON (KAMIKAZE LOGIC) ---
 
 @router.callback_query(F.data == "siphon_start")
-async def siphon_init(c: CallbackQuery, state: FSMContext):
-    if not await db.check_sub_bool(c.from_user.id): return await c.answer("Нужна подписка!", True)
-    if c.from_user.id not in W_POOL: return await c.answer("Войдите в аккаунт!", True)
-    await c.message.edit_text("📂 <b>Кидай ЛЮБОЙ файл с ID</b> (.csv, .txt, старая база):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
+async def siph(c: CallbackQuery, state: FSMContext):
+    if not await db.check_sub_bool(c.from_user.id): return await c.answer("Купи подписку!", True)
+    if c.from_user.id not in W_POOL: return await c.answer("Запусти воркера (Вход)!", True)
+    await c.message.edit_text("📂 <b>Кидай ЛЮБОЙ файл (txt, csv)</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
     await state.set_state(SiphonS.FILE)
 
 @router.message(SiphonS.FILE, F.document)
-async def siphon_file(m: Message, state: FSMContext):
-    path = cfg.TEMP_DIR / f"siphon_{m.from_user.id}.tmp"
+async def siph_f(m: Message, state: FSMContext):
+    path = cfg.TEMP_DIR / f"s_{m.from_user.id}.tmp"
     try:
-        file = await bot.get_file(m.document.file_id)
-        await bot.download_file(file.file_path, path)
-        
-        # МАГИЧЕСКИЙ ПАРСЕР v2.0: Читает всё
-        content = ""
-        try:
-            with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
-        except:
-            try:
-                with open(path, 'r', encoding='cp1251') as f: content = f.read()
-            except: 
-                 # Fallback: просто бинарное чтение и декод ошибок
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
-        
-        # Ищем все ID через Regex (от 7 до 20 цифр)
-        raw_ids = re.findall(r'\b\d{7,20}\b', content)
-        ids = list(set([int(x) for x in raw_ids])) # Удаляем дубликаты
-        
-    except Exception as e:
-        return await m.answer(f"❌ Ошибка файла: {e}")
-    finally:
+        await bot.download(m.document, destination=path)
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
+        ids = list(set([int(x) for x in re.findall(r'\b\d{7,20}\b', content)])) # Universal Regex Parser
+        if not ids: return await m.answer("❌ ID не найдены.")
+        await state.update_data(ids=ids); await m.answer(f"✅ ID: {len(ids)}\n✍️ <b>Текст рассылки:</b>"); await state.set_state(SiphonS.MSG)
+    except Exception as e: await m.answer(f"❌ Error: {e}")
+    finally: 
         if os.path.exists(path): os.remove(path)
-    
-    if not ids: return await m.answer("❌ В файле не найдено ID пользователей.")
-    
-    await state.update_data(targets=ids)
-    await m.answer(f"✅ Найдено уникальных ID: {len(ids)}\n✍️ <b>Введи текст рассылки:</b>")
-    await state.set_state(SiphonS.MSG)
 
 @router.message(SiphonS.MSG)
-async def siphon_msg(m: Message, state: FSMContext):
-    await state.update_data(msg=m.text or "Привет")
-    data = await state.get_data()
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🚀 ЗАПУСК ({len(data['targets'])})", callback_data="run_s"), InlineKeyboardButton(text="❌", callback_data="back")]])
-    await m.answer("Подтверди запуск:", reply_markup=kb)
+async def siph_m(m: Message, state: FSMContext):
+    await state.update_data(txt=m.text); d = await state.get_data()
+    await m.answer(f"🔥 Начать КАМИКАДЗЕ рассылку?\nЦелей: {len(d['ids'])}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 ПУСК", callback_data="run_k"), InlineKeyboardButton(text="❌", callback_data="back")]]))
     await state.set_state(SiphonS.CONFIRM)
 
-@router.callback_query(F.data == "run_s", SiphonS.CONFIRM)
-async def siphon_run_handler(c: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    w = W_POOL.get(c.from_user.id)
-    if not w or not w.client or not await w.client.is_user_authorized():
-        return await c.answer("Воркер отключен!", True)
-        
-    await c.message.edit_text("🚀 <b>Рассылка запущена!</b> (Результат придет в ЛС)")
-    asyncio.create_task(siphon_task(c.from_user.id, w, data['targets'], data['msg']))
+@router.callback_query(F.data == "run_k", SiphonS.CONFIRM)
+async def siph_run(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data(); w = W_POOL.get(c.from_user.id)
+    if not w: return await c.answer("Воркер оффлайн", True)
+    await c.message.edit_text("🚀 <b>Рассылка пошла!</b> (Режим: Игнор ошибок)")
+    asyncio.create_task(kamikaze_task(c.from_user.id, w, d['ids'], d['txt']))
     await state.clear()
 
-async def siphon_task(uid, w, targets, text):
-    ok, fail = 0, 0
-    try:
-        for tid in targets:
-            try:
-                await w.client.send_message(tid, text)
-                ok += 1
-                await asyncio.sleep(random.uniform(5, 10)) 
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds + 5)
-            except: fail += 1
-    except: pass
-    
-    try: await bot.send_message(uid, f"🏁 <b>Рассылка завершена!</b>\n✅ Доставлено: {ok}\n❌ Ошибок: {fail}")
+async def kamikaze_task(uid, w, targets, text):
+    ok, skip = 0, 0
+    for tid in targets:
+        try:
+            # Пытаемся найти сущность, если ID не в кэше
+            try: entity = await w.client.get_input_entity(tid)
+            except: entity = tid # Пробуем слать на сырой ID
+            
+            await w.client.send_message(entity, text)
+            ok += 1
+            await asyncio.sleep(random.uniform(1.5, 4)) # АГРЕССИВНАЯ ЗАДЕРЖКА
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds) # Обязательно ждем флуд, иначе скрипт умрет
+        except (UserPrivacyRestrictedError, UserDeactivatedError, PeerIdInvalidError, ChatWriteForbiddenError):
+            skip += 1 # Игнорируем приватность/бан/удаленных
+        except Exception as e:
+            skip += 1 # Игнорируем всё остальное
+            
+    try: await bot.send_message(uid, f"🏁 <b>Рассылка завершена!</b>\n✅ Доставлено: {ok}\n🗑 Пропущено (блок/приват): {skip}")
     except: pass
 
 # --- AUTH ---
-
 @router.callback_query(F.data == "auth")
-async def auth(c: CallbackQuery):
-    if not await db.check_sub_bool(c.from_user.id): return await c.answer("Нужна подписка!", True)
-    await c.message.edit_text("Вход:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="QR", callback_data="qr"), InlineKeyboardButton(text="Phone", callback_data="ph")]]))
-
+async def au(c: CallbackQuery): await c.message.edit_text("Вход:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="QR", callback_data="qr"), InlineKeyboardButton(text="Phone", callback_data="ph")]]))
 @router.callback_query(F.data == "ph")
-async def ph(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Номер (79...):"); await state.set_state(AuthS.PH)
-
+async def ph(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Номер:"); await state.set_state(AuthS.PH)
 @router.message(AuthS.PH)
-async def ph_get(m: Message, state: FSMContext):
-    uid = m.from_user.id
-    w = Worker(uid)
-    w.client = TelegramClient(str(cfg.SESSION_DIR / f"session_{uid}"), cfg.API_ID, cfg.API_HASH)
-    await w.client.connect()
-    try:
-        s = await w.client.send_code_request(m.text)
-        await state.update_data(ph=m.text, h=s.phone_code_hash, uid=uid, c="")
-        await w.client.disconnect()
-        await m.answer("Код:", reply_markup=get_numpad())
-        await state.set_state(AuthS.CO)
-    except Exception as e:
-        await w.client.disconnect()
-        await m.answer(f"Ошибка: {e}")
-        await state.clear()
-
+async def ph_g(m: Message, state: FSMContext):
+    uid = m.from_user.id; w = Worker(uid); w.client = TelegramClient(str(cfg.SESSION_DIR/f"s_{uid}"), cfg.API_ID, cfg.API_HASH); await w.client.connect()
+    try: s = await w.client.send_code_request(m.text); await state.update_data(ph=m.text, h=s.phone_code_hash, uid=uid, c=""); await w.client.disconnect(); await m.answer("Код:", reply_markup=get_numpad()); await state.set_state(AuthS.CO)
+    except Exception as e: await w.client.disconnect(); await m.answer(f"Error: {e}"); await state.clear()
 @router.callback_query(F.data.startswith("n_"), AuthS.CO)
-async def numpad(c: CallbackQuery, state: FSMContext):
-    act = c.data.split("_")[1]
-    d = await state.get_data()
-    curr = d.get("c", "")
+async def nm(c: CallbackQuery, state: FSMContext):
+    act = c.data.split("_")[1]; d = await state.get_data(); curr = d.get("c", "")
     if act == "del": curr = curr[:-1]
     elif act == "go":
-        if not curr: return await c.answer("Пусто!", True)
-        await c.message.edit_text("⏳ Вход...")
-        w = Worker(d['uid'])
-        w.client = TelegramClient(str(cfg.SESSION_DIR / f"session_{d['uid']}"), cfg.API_ID, cfg.API_HASH)
-        await w.client.connect()
-        try:
-            await w.client.sign_in(d['ph'], curr, phone_code_hash=d['h'])
-            await w.client.disconnect()
-            
-            real_w = Worker(d['uid'])
-            if await real_w.start():
-                W_POOL[d['uid']] = real_w
-                await c.message.answer("✅ Готово!")
-                await start(c.message, state)
-            else: await c.message.answer("❌ Ошибка запуска.")
-        except SessionPasswordNeededError:
-            await w.client.disconnect()
-            await c.message.answer("🔒 Введи 2FA пароль:")
-            await state.set_state(AuthS.PA)
-            return
-        except Exception as e:
-            await w.client.disconnect()
-            await c.message.answer(f"❌ {e}")
-        await state.clear()
+        await c.message.edit_text("⏳ ..."); w = Worker(d['uid']); w.client = TelegramClient(str(cfg.SESSION_DIR/f"s_{d['uid']}"), cfg.API_ID, cfg.API_HASH); await w.client.connect()
+        try: await w.client.sign_in(d['ph'], curr, phone_code_hash=d['h']); await w.client.disconnect(); rw = Worker(d['uid']); await rw.start(); W_POOL[d['uid']]=rw; await c.message.answer("✅ OK"); await start(c.message, state)
+        except SessionPasswordNeededError: await w.client.disconnect(); await c.message.answer("🔒 2FA:"); await state.set_state(AuthS.PA); return
+        except Exception as e: await w.client.disconnect(); await c.message.answer(f"❌ {e}"); await state.clear(); return
         return
     else: curr += act
-    await state.update_data(c=curr)
-    try: await c.message.edit_text(f"Код: {curr}", reply_markup=get_numpad())
-    except: pass
-
+    await state.update_data(c=curr); await c.message.edit_text(f"Код: {curr}", reply_markup=get_numpad())
 @router.message(AuthS.PA)
 async def pa(m: Message, state: FSMContext):
-    d = await state.get_data()
-    w = Worker(d['uid'])
-    w.client = TelegramClient(str(cfg.SESSION_DIR / f"session_{d['uid']}"), cfg.API_ID, cfg.API_HASH)
-    await w.client.connect()
-    try:
-        await w.client.sign_in(password=m.text)
-        await w.client.disconnect()
-        real_w = Worker(d['uid'])
-        if await real_w.start():
-            W_POOL[d['uid']] = real_w
-            await m.answer("✅ Вход выполнен!")
-        else: await m.answer("❌ Ошибка старта.")
+    d = await state.get_data(); w = Worker(d['uid']); w.client = TelegramClient(str(cfg.SESSION_DIR/f"s_{d['uid']}"), cfg.API_ID, cfg.API_HASH); await w.client.connect()
+    try: await w.client.sign_in(password=m.text); await w.client.disconnect(); rw=Worker(d['uid']); await rw.start(); W_POOL[d['uid']]=rw; await m.answer("✅ OK")
     except Exception as e: await m.answer(f"❌ {e}")
     await state.clear()
-
 @router.callback_query(F.data == "qr")
 async def qr(c: CallbackQuery, state: FSMContext):
-    uid = c.from_user.id
-    w = Worker(uid)
-    w.client = TelegramClient(str(cfg.SESSION_DIR / f"session_{uid}"), cfg.API_ID, cfg.API_HASH)
-    await w.client.connect()
-    try:
-        q = await w.client.qr_login()
-        b = io.BytesIO(); qrcode.make(q.url).save(b, "PNG"); b.seek(0)
-        msg = await c.message.answer_photo(BufferedInputFile(b.read(), "qr.png"), caption="Сканируй QR")
-        await q.wait(60)
-        await msg.delete()
-        await w.client.disconnect()
-        real_w = Worker(uid)
-        if await real_w.start():
-            W_POOL[uid] = real_w
-            await c.message.answer("✅ Успех!")
-    except: await c.message.answer("❌ Тайм-аут")
+    uid=c.from_user.id; w=Worker(uid); w.client=TelegramClient(str(cfg.SESSION_DIR/f"s_{uid}"), cfg.API_ID, cfg.API_HASH); await w.client.connect()
+    try: q=await w.client.qr_login(); b=io.BytesIO(); qrcode.make(q.url).save(b,"PNG"); b.seek(0); m=await c.message.answer_photo(BufferedInputFile(b.read(),"qr.png")); await q.wait(60); await m.delete(); await w.client.disconnect(); rw=Worker(uid); await rw.start(); W_POOL[uid]=rw; await c.message.answer("✅ OK")
+    except: await c.message.answer("Time out")
     finally: await state.clear()
 
 # --- ADMIN ---
 @router.callback_query(F.data == "adm")
-async def adm(c: CallbackQuery): await c.message.edit_text("Admin:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Create Promo", callback_data="mk_p")]]))
+async def adm(c: CallbackQuery): await c.message.edit_text("Adm:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Promo", callback_data="mk_p")]]))
 @router.callback_query(F.data == "mk_p")
-async def mk_p(c: CallbackQuery, state: FSMContext): await c.message.answer("Days?"); await state.set_state(AdminS.PD)
+async def mk(c: CallbackQuery, state: FSMContext): await c.message.answer("D?"); await state.set_state(AdminS.PD)
 @router.message(AdminS.PD)
-async def mk_pd(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("Count?"); await state.set_state(AdminS.PA)
+async def mk_d(m: Message, state: FSMContext): await state.update_data(d=int(m.text)); await m.answer("C?"); await state.set_state(AdminS.PA)
 @router.message(AdminS.PA)
-async def mk_pa(m: Message, state: FSMContext): 
-    d=await state.get_data(); c=await db.create_promo(d['d'], int(m.text)); await m.answer(f"Code: <code>{c}</code>")
-    await state.clear()
+async def mk_a(m: Message, state: FSMContext): d=await state.get_data(); code=await db.create_promo(d['d'], int(m.text)); await m.answer(code); await state.clear()
 
-# --- MAIN ---
 async def main():
     await db.init()
     for f in cfg.SESSION_DIR.glob("session_*.session"):
         try:
             uid = int(f.stem.split("_")[1])
             if await db.check_sub_bool(uid):
-                w = Worker(uid)
-                if await w.start(): W_POOL[uid] = w
+                w = Worker(uid); await w.start(); W_POOL[uid] = w
         except: pass
-    logger.info("🔥 StatPro TITANIUM Started")
+    logger.info("🔥 StatPro KAMIKAZE Started")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
