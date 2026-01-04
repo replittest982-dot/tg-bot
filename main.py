@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-💎 StatPro v72.0 - TITANIUM EDITION (RUSSIAN)
----------------------------------------------
+💎 StatPro v73.0 - UNIVERSAL EDITION
+------------------------------------
 Архитектура: Non-blocking Event Loop
-Исправления:
-1. ✅ Siphon: Чтение CSV в память, поддержка любых разделителей.
-2. ✅ Scan: Безопасный сбор сообщений.
-3. ✅ AI: Ротация провайдеров (нет ошибок атрибутов).
-4. ✅ DB: Индексы и WAL режим.
-5. ✅ Core: Запуск клиента в фоне (не блокирует бота).
+Новое:
+1. 📂 Всеядный парсер: Читает .txt, .csv, старые базы. Ищет ID через Regex.
+2. 🛡 Защита: Авто-определение кодировки (UTF-8 / Windows-1251).
+3. ⚡️ Ядро: Полная асинхронность, воркер не блокирует бота.
+4. 🇷🇺 Полный русский перевод.
 """
 
 import asyncio
@@ -65,7 +64,7 @@ class Config:
     
     BASE_DIR: Path = Path(__file__).resolve().parent
     SESSION_DIR: Path = BASE_DIR / "sessions"
-    DB_PATH: Path = BASE_DIR / "statpro_titanium.db"
+    DB_PATH: Path = BASE_DIR / "statpro_universal.db"
     TEMP_DIR: Path = BASE_DIR / "temp"
     
     DEVICE_MODEL: str = "iPhone 15 Pro Max"
@@ -85,7 +84,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("StatPro")
 
 # =========================================================================
-# 🗄️ БАЗА ДАННЫХ (С ИНДЕКСАМИ)
+# 🗄️ БАЗА ДАННЫХ
 # =========================================================================
 
 class Database:
@@ -95,8 +94,6 @@ class Database:
     async def init(self):
         async with self.get_conn() as db:
             await db.execute("PRAGMA journal_mode=WAL")
-            
-            # Таблица юзеров
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY, 
@@ -105,10 +102,7 @@ class Database:
                     joined_at INTEGER
                 )
             """)
-            # Исправление №6 (Индексы)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub ON users(sub_end)")
-            
-            # Таблица промокодов
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS promos (
                     code TEXT PRIMARY KEY, 
@@ -142,8 +136,6 @@ class Database:
             
             await db.execute("UPDATE promos SET activations = activations - 1 WHERE code = ? COLLATE NOCASE", (code,))
             await db.execute("DELETE FROM promos WHERE activations <= 0")
-            
-            # Гарантируем наличие юзера
             await db.execute("INSERT OR IGNORE INTO users (user_id, sub_end, joined_at) VALUES (?, 0, ?)", (uid, int(time.time())))
             
             now = int(time.time())
@@ -176,7 +168,6 @@ db = Database()
 
 async def ask_gpt_safe(system_prompt: str, user_content: str) -> str:
     client = AsyncClient()
-    # Список надежных провайдеров
     providers = [
         g4f.Provider.Blackbox,
         g4f.Provider.DeepInfra,
@@ -197,8 +188,7 @@ async def ask_gpt_safe(system_prompt: str, user_content: str) -> str:
             res = response.choices[0].message.content
             if res and len(res.strip()) > 0:
                 return res
-        except:
-            continue
+        except: continue
             
     return "❌ Ошибка AI: Все каналы заняты."
 
@@ -218,29 +208,24 @@ class Worker:
             device_model=cfg.DEVICE_MODEL, 
             system_version=cfg.SYSTEM_VERSION, 
             app_version=cfg.APP_VERSION,
-            sequential_updates=False # Важно для скорости
+            sequential_updates=False 
         )
 
     async def start(self):
-        """Исправление №1: Неблокирующий запуск"""
         self.client = self._get_client(cfg.SESSION_DIR / f"session_{self.uid}")
         try:
             await self.client.connect()
             if not await self.client.is_user_authorized(): return False
-            
             self._bind()
-            # Запускаем в фоне, чтобы не блочить бота
-            asyncio.create_task(self._run_safe())
+            asyncio.create_task(self._run_safe()) # Non-blocking start
             return True
         except Exception as e:
             logger.error(f"Worker {self.uid} start error: {e}")
             return False
 
     async def _run_safe(self):
-        """Авто-реконнект"""
         while True:
-            try:
-                await self.client.run_until_disconnected()
+            try: await self.client.run_until_disconnected()
             except Exception:
                 await asyncio.sleep(5)
                 try: await self.client.connect()
@@ -250,7 +235,7 @@ class Worker:
     def _bind(self):
         cl = self.client
 
-        # --- ⚡️ .g (AI) ---
+        # --- .g (AI) ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.g(?: |$)(.*)'))
         async def quiz_cmd(e):
             await e.edit("⚡️...")
@@ -258,39 +243,29 @@ class Worker:
             if not q and e.is_reply:
                 r = await e.get_reply_message()
                 q = r.text or r.caption
-            
             if not q: return await e.edit("❌ Текст?")
-            
             ans = await ask_gpt_safe("Ты помощник викторины. Ответ 1-2 слова.", q)
             await e.edit(f"<b>{ans}</b>", parse_mode='html')
 
-        # --- 🕵️‍♂️ .report (АНАЛИТИКА) ---
+        # --- .report (AI) ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'(?i)^\.report$'))
         async def report_cmd(e):
             await e.edit("🕵️‍♂️ <b>Сбор данных...</b>")
-            
             topic_id = None
-            if e.reply_to:
-                topic_id = e.reply_to.reply_to_top_id or e.reply_to.reply_to_msg_id
+            if e.reply_to: topic_id = e.reply_to.reply_to_top_id or e.reply_to.reply_to_msg_id
 
             keywords = ['айти', 'вбив', 'номер', 'код', 'встал', 'слет', 'сек', 'ща', 'готово', 'сдох', 'взял', 'отстоял']
             logs = []
-            
             try:
                 async for m in cl.iter_messages(e.chat_id, limit=1000, reply_to=topic_id):
                     if m.text and any(k in m.text.lower() for k in keywords):
                         ts = m.date.strftime("%H:%M")
                         name = m.sender.first_name if m.sender else "User"
                         logs.append(f"[{ts}] {name}: {m.text}")
-            except Exception as ex:
-                return await e.edit(f"❌ Ошибка: {ex}")
+            except Exception as ex: return await e.edit(f"❌ Ошибка: {ex}")
 
             if not logs: return await e.edit("❌ Пусто.")
-            
             logs = logs[::-1]
-            logs_txt = "\n".join(logs)
-            await e.edit(f"🧠 <b>Анализ ({len(logs)} строк)...</b>")
-            
             prompt = """
             Анализируй логи.
             1. "айти"/"вбив"/"взял" -> Старт.
@@ -298,9 +273,8 @@ class Worker:
             3. "слет"/"бан" -> ❌ Слет.
             Верни JSON: [{"num": "номер", "time": "мин", "status": "✅"}]
             """
-            res = await ask_gpt_safe(prompt, logs_txt)
+            res = await ask_gpt_safe(prompt, "\n".join(logs))
             try:
-                # Попытка найти JSON в ответе
                 json_str = re.search(r'\[.*\]', res, re.DOTALL).group()
                 data = json.loads(json_str)
                 txt = "📊 <b>ОТЧЕТ:</b>\n\n"
@@ -311,13 +285,12 @@ class Worker:
                     if "✅" in st: ok += 1
                 txt += f"\n🏆 <b>Всего OK: {ok}</b>"
                 await e.edit(txt, parse_mode='html')
-            except:
-                await e.edit(f"📝 <b>Текст:</b>\n{res}", parse_mode='html')
+            except: await e.edit(f"📝 <b>Текст:</b>\n{res}", parse_mode='html')
 
-        # --- 🧬 .scan (СКАЧАТЬ ЧАТ) ---
+        # --- .scan ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.scan$'))
         async def scan(e):
-            await e.edit("🔎 <b>Сканирую (до 3000)...</b>")
+            await e.edit("🔎 <b>Сканирую...</b>")
             users = {}
             try:
                 async for m in cl.iter_messages(e.chat_id, limit=3000):
@@ -326,19 +299,16 @@ class Worker:
                             users[m.sender_id] = [m.sender.username or "", m.sender.first_name or ""]
             except: pass
             
-            out = io.StringIO()
-            w = csv.writer(out)
+            out = io.StringIO(); w = csv.writer(out)
             w.writerow(["ID", "Username", "Name"])
             for uid, d in users.items(): w.writerow([uid, d[0], d[1]])
-            
             out.seek(0)
             bio = io.BytesIO(out.getvalue().encode('utf-8-sig'))
             bio.name = f"Scan_{e.chat_id}.csv"
-            
-            await cl.send_file("me", bio, caption=f"✅ Скан завершен. Людей: {len(users)}")
+            await cl.send_file("me", bio, caption=f"✅ Найдено: {len(users)}")
             await e.edit(f"✅ Готово: {len(users)}")
 
-        # --- 🚀 .spam ---
+        # --- .spam ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.(s|spam)\s+(.+)\s+(\d+)\s+([\d\.]+)'))
         async def spam(e):
             txt, cnt, dly = e.pattern_match.group(2), int(e.pattern_match.group(3)), float(e.pattern_match.group(4))
@@ -353,7 +323,7 @@ class Worker:
         async def stop(e):
             if self.spam_task: self.spam_task.cancel(); await e.edit("🛑 Стоп.")
 
-        # --- 📢 .all ---
+        # --- .all ---
         @cl.on(events.NewMessage(outgoing=True, pattern=r'^\.all(?:\s+(.+))?'))
         async def tag_all(e):
             await e.delete()
@@ -365,7 +335,6 @@ class Worker:
                     if not p.bot and not p.deleted:
                         chunk.append(f"<a href='tg://user?id={p.id}'>\u200b</a>")
                         if len(chunk) >= 5:
-                            # Исправление №2: Проверка клиента
                             await cl.send_message(e.chat_id, txt + "".join(chunk), parse_mode='html')
                             chunk = []
                             await asyncio.sleep(2)
@@ -374,7 +343,7 @@ class Worker:
 W_POOL: Dict[int, Worker] = {}
 
 # =========================================================================
-# 🤖 BOT UI (AIOGRAM)
+# 🤖 BOT UI
 # =========================================================================
 
 bot = Bot(token=cfg.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -410,11 +379,11 @@ def get_numpad():
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"💎 <b>StatPro TITANIUM</b>\nПривет, {m.from_user.first_name}!", reply_markup=kb_main(m.from_user.id))
+    await m.answer(f"💎 <b>StatPro TITANIUM v73.0</b>\nПривет, {m.from_user.first_name}!", reply_markup=kb_main(m.from_user.id))
 
 @router.callback_query(F.data == "help")
 async def hlp(c: CallbackQuery):
-    txt = "⚡️ <b>Команды юзербота:</b>\n.g [текст] - ИИ ответ\n.report - Анализ (в реплай)\n.scan - Сбор базы\n.spam [текст] [кол] [сек]\n.all [текст] - Тег всех"
+    txt = "⚡️ <b>Команды:</b>\n.g [текст] - ИИ ответ\n.report - Анализ топика\n.scan - Сбор базы\n.spam [текст] [кол] [сек]\n.all [текст] - Тег всех"
     await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
 
 @router.callback_query(F.data == "back")
@@ -428,7 +397,6 @@ async def prof(c: CallbackQuery):
         days = int((info[0] - time.time()) / 86400)
         sub = f"🟢 Активна ({days} дн.)"
     stat = "🟢 В сети" if c.from_user.id in W_POOL else "🔴 Отключен"
-    
     txt = f"👤 <b>Профиль</b>\n🆔: {c.from_user.id}\n💎 Подписка: {sub}\n🔌 Воркер: {stat}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")], [InlineKeyboardButton(text="🔙", callback_data="back")]])
     await c.message.edit_text(txt, reply_markup=kb)
@@ -442,46 +410,46 @@ async def prm_use(m: Message, state: FSMContext):
     else: await m.answer("❌ Неверно.")
     await state.clear()
 
-# --- SIPHON (FIXED CSV READING) ---
+# --- SIPHON (UNIVERSAL PARSER) ---
 
 @router.callback_query(F.data == "siphon_start")
 async def siphon_init(c: CallbackQuery, state: FSMContext):
     if not await db.check_sub_bool(c.from_user.id): return await c.answer("Нужна подписка!", True)
     if c.from_user.id not in W_POOL: return await c.answer("Войдите в аккаунт!", True)
-    await c.message.edit_text("📂 <b>Кидай CSV файл</b> (.scan):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
+    await c.message.edit_text("📂 <b>Кидай ЛЮБОЙ файл с ID</b> (.csv, .txt, старая база):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="back")]]))
     await state.set_state(SiphonS.FILE)
 
 @router.message(SiphonS.FILE, F.document)
 async def siphon_file(m: Message, state: FSMContext):
-    file = await bot.get_file(m.document.file_id)
-    path = cfg.TEMP_DIR / f"siphon_{m.from_user.id}.csv"
-    await bot.download_file(file.file_path, path)
-    
-    ids = []
-    # Исправление №4: Надежное чтение CSV
+    path = cfg.TEMP_DIR / f"siphon_{m.from_user.id}.tmp"
     try:
-        with open(path, 'r', encoding='utf-8-sig') as f:
-            content = f.read()
-            # Авто-детект разделителя
-            sep = ';' if ';' in content else ','
-            f.seek(0)
-            reader = csv.reader(f, delimiter=sep)
-            # Пропускаем заголовок
-            headers = next(reader, None)
-            for r in reader:
-                # Ищем колонку с ID (обычно первая, если это цифры)
-                if r and r[0].isdigit(): 
-                    ids.append(int(r[0]))
+        file = await bot.get_file(m.document.file_id)
+        await bot.download_file(file.file_path, path)
+        
+        # МАГИЧЕСКИЙ ПАРСЕР v2.0: Читает всё
+        content = ""
+        try:
+            with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+        except:
+            try:
+                with open(path, 'r', encoding='cp1251') as f: content = f.read()
+            except: 
+                 # Fallback: просто бинарное чтение и декод ошибок
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
+        
+        # Ищем все ID через Regex (от 7 до 20 цифр)
+        raw_ids = re.findall(r'\b\d{7,20}\b', content)
+        ids = list(set([int(x) for x in raw_ids])) # Удаляем дубликаты
+        
     except Exception as e:
-        if os.path.exists(path): os.remove(path)
         return await m.answer(f"❌ Ошибка файла: {e}")
+    finally:
+        if os.path.exists(path): os.remove(path)
     
-    if os.path.exists(path): os.remove(path)
-    
-    if not ids: return await m.answer("❌ Файл пуст или формат неверен.")
+    if not ids: return await m.answer("❌ В файле не найдено ID пользователей.")
     
     await state.update_data(targets=ids)
-    await m.answer(f"✅ Загружено: {len(ids)} чел.\n✍️ <b>Введи текст рассылки:</b>")
+    await m.answer(f"✅ Найдено уникальных ID: {len(ids)}\n✍️ <b>Введи текст рассылки:</b>")
     await state.set_state(SiphonS.MSG)
 
 @router.message(SiphonS.MSG)
@@ -496,32 +464,30 @@ async def siphon_msg(m: Message, state: FSMContext):
 async def siphon_run_handler(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     w = W_POOL.get(c.from_user.id)
-    
-    # Исправление №2: Проверка воркера
     if not w or not w.client or not await w.client.is_user_authorized():
         return await c.answer("Воркер отключен!", True)
         
-    await c.message.edit_text("🚀 <b>Рассылка полетела!</b> (Результат придет в ЛС)")
+    await c.message.edit_text("🚀 <b>Рассылка запущена!</b> (Результат придет в ЛС)")
     asyncio.create_task(siphon_task(c.from_user.id, w, data['targets'], data['msg']))
     await state.clear()
 
 async def siphon_task(uid, w, targets, text):
     ok, fail = 0, 0
-    for tid in targets:
-        try:
-            await w.client.send_message(tid, text)
-            ok += 1
-            # Исправление №7: Рандомная задержка
-            await asyncio.sleep(random.uniform(5, 12)) 
-        except FloodWaitError as e:
-            await asyncio.sleep(e.seconds + 5)
-        except:
-            fail += 1
+    try:
+        for tid in targets:
+            try:
+                await w.client.send_message(tid, text)
+                ok += 1
+                await asyncio.sleep(random.uniform(5, 10)) 
+            except FloodWaitError as e:
+                await asyncio.sleep(e.seconds + 5)
+            except: fail += 1
+    except: pass
     
     try: await bot.send_message(uid, f"🏁 <b>Рассылка завершена!</b>\n✅ Доставлено: {ok}\n❌ Ошибок: {fail}")
     except: pass
 
-# --- AUTH (FULL) ---
+# --- AUTH ---
 
 @router.callback_query(F.data == "auth")
 async def auth(c: CallbackQuery):
@@ -535,7 +501,6 @@ async def ph(c: CallbackQuery, state: FSMContext): await c.message.edit_text("Н
 async def ph_get(m: Message, state: FSMContext):
     uid = m.from_user.id
     w = Worker(uid)
-    # Временный клиент для логина
     w.client = TelegramClient(str(cfg.SESSION_DIR / f"session_{uid}"), cfg.API_ID, cfg.API_HASH)
     await w.client.connect()
     try:
@@ -547,7 +512,7 @@ async def ph_get(m: Message, state: FSMContext):
     except Exception as e:
         await w.client.disconnect()
         await m.answer(f"Ошибка: {e}")
-        await state.clear() # Исправление №5
+        await state.clear()
 
 @router.callback_query(F.data.startswith("n_"), AuthS.CO)
 async def numpad(c: CallbackQuery, state: FSMContext):
@@ -563,16 +528,14 @@ async def numpad(c: CallbackQuery, state: FSMContext):
         await w.client.connect()
         try:
             await w.client.sign_in(d['ph'], curr, phone_code_hash=d['h'])
-            await w.client.disconnect() # Закрываем логин-сессию
+            await w.client.disconnect()
             
-            # Запускаем боевой воркер
             real_w = Worker(d['uid'])
-            if await real_w.start(): # Исправление №3 (start sequence)
+            if await real_w.start():
                 W_POOL[d['uid']] = real_w
                 await c.message.answer("✅ Готово!")
                 await start(c.message, state)
-            else:
-                await c.message.answer("❌ Ошибка запуска воркера.")
+            else: await c.message.answer("❌ Ошибка запуска.")
         except SessionPasswordNeededError:
             await w.client.disconnect()
             await c.message.answer("🔒 Введи 2FA пароль:")
@@ -584,7 +547,6 @@ async def numpad(c: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     else: curr += act
-    
     await state.update_data(c=curr)
     try: await c.message.edit_text(f"Код: {curr}", reply_markup=get_numpad())
     except: pass
@@ -619,7 +581,6 @@ async def qr(c: CallbackQuery, state: FSMContext):
         await q.wait(60)
         await msg.delete()
         await w.client.disconnect()
-        
         real_w = Worker(uid)
         if await real_w.start():
             W_POOL[uid] = real_w
