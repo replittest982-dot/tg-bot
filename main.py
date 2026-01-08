@@ -9,6 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Tuple
 from enum import Enum
+import re
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -260,7 +261,7 @@ class Database:
         await self._conn.commit()
 
     async def log_operation(self, number_id: int, worker_id: int, 
-                           action: str, details: str = None):
+                            action: str, details: str = None):
         """Логирование операции"""
         now = int(datetime.now().timestamp())
         await self._conn.execute("""
@@ -387,9 +388,9 @@ class Worker:
         async def cmd_ping(event):
             """Проверка работоспособности"""
             await event.edit("🚀 **TITAN SYSTEM ONLINE**\n\n"
-                           f"📊 Обработано: {self.processed_count}\n"
-                           f"❌ Ошибок: {self.error_count}\n"
-                           f"⏱ Uptime: {self._get_uptime()}")
+                            f"📊 Обработано: {self.processed_count}\n"
+                            f"❌ Ошибок: {self.error_count}\n"
+                            f"⏱ Uptime: {self._get_uptime()}")
 
         @self.client.on(events.NewMessage(outgoing=True, pattern=r'^\.au$'))
         async def cmd_au(event):
@@ -454,7 +455,9 @@ class Worker:
                 buttons=buttons
             )
             self.last_activity = int(datetime.now().timestamp())
-            logger.info(f"✅ Воркер {self.user_id}: номер {self.current_phone} встал")@self.client.on(events.CallbackQuery(pattern=b"slet"))
+            logger.info(f"✅ Воркер {self.user_id}: номер {self.current_phone} встал")
+
+        @self.client.on(events.CallbackQuery(pattern=b"slet"))
         async def callback_slet(event):
             """Обработка нажатия кнопки Слёт"""
             if self.current_phone:
@@ -506,8 +509,8 @@ class Worker:
                     'me',
                     csv_path,
                     caption=f"📊 **Отчёт за последние 7 дней**\n\n"
-                           f"📅 Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                           f"📝 Записей: {len(data)}"
+                            f"📅 Сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            f"📝 Записей: {len(data)}"
                 )
                 
                 await event.delete()
@@ -524,7 +527,7 @@ class Worker:
             """Статистика воркера"""
             uptime = self._get_uptime()
             success_rate = (self.processed_count / (self.processed_count + self.error_count) * 100 
-                          if (self.processed_count + self.error_count) > 0 else 0)
+                           if (self.processed_count + self.error_count) > 0 else 0)
             
             await event.edit(
                 f"📊 **Статистика воркера**\n\n"
@@ -691,7 +694,7 @@ async def cb_my_stats(call: CallbackQuery):
     stats = await db.get_user_stats(user_id)
     
     success_rate = (stats['completed'] / stats['total'] * 100 
-                   if stats['total'] > 0 else 0)
+                    if stats['total'] > 0 else 0)
     
     avg_time_str = f"{int(stats['avg_time'])}с" if stats['avg_time'] else "N/A"
     
@@ -781,7 +784,7 @@ async def cb_global_stats(call: CallbackQuery):
     """Глобальная статистика"""
     workers_count = len(WORKERS)
     active_workers = sum(1 for w in WORKERS.values() 
-                        if w.status == WorkerStatus.ONLINE)
+                         if w.status == WorkerStatus.ONLINE)
     
     total_processed = sum(w.processed_count for w in WORKERS.values())
     total_errors = sum(w.error_count for w in WORKERS.values())
